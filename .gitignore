@@ -1,0 +1,22 @@
+# Build outputs
+clippy/node_modules/
+clippy/dist/
+clippy/src-tauri/target/
+clippy/src-tauri/gen/
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+*.suo
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Local Claude state
+.claude/
