@@ -3,15 +3,25 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
+  cropsEqual,
+  GIF_DEFAULT_RESOLUTION,
   newRegionId,
   SIZE_PRESETS,
+  trackColor,
+  trackMixIsDefault,
+  trackMixToBackend,
+  type Crop,
+  type ExportFormat,
   type ExportMode,
   type ExportProgress,
+  type GifResolution,
   type Phase,
+  type ProjectState,
   type ProxyProgress,
   type ProxyResult,
   type Region,
   type SizeLimit,
+  type TrackMix,
   type VideoInfo,
 } from "./types";
 import { fmtTime, fmtEta } from "./formatters";
@@ -29,12 +39,28 @@ import {
 } from "./keybinds";
 import { ExportModal } from "./ExportModal";
 import { ExportToast } from "./ExportToast";
+import { CropOverlay } from "./CropOverlay";
+import { CropIndicator } from "./CropIndicator";
+import { SpeedPicker } from "./SpeedPicker";
+import { TrackMixer } from "./TrackMixer";
+import { useAudioTracks } from "./useAudioTracks";
 import "./App.css";
 
 // Per-region hue offsets so 3+ regions are visually distinguishable on the
 // timeline. All hues live in the green/teal/lime range so the bands still read
 // as "selection / keep" rather than being a rainbow.
 const REGION_HUES = [142, 132, 152, 122, 162, 138, 148, 128, 158];
+
+/** "#rrggbb" + alpha → "rgba(r, g, b, a)". Used for waveform fill colors so we
+ *  can blend the per-track palette colors with translucency. */
+function hexWithAlpha(hex: string, alpha: number): string {
+  const m = hex.match(/^#([0-9a-f]{6})$/i);
+  if (!m) return hex;
+  const r = parseInt(m[1].slice(0, 2), 16);
+  const g = parseInt(m[1].slice(2, 4), 16);
+  const b = parseInt(m[1].slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
 
 export default function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -66,11 +92,18 @@ export default function App() {
   const [exportOpen, setExportOpen] = useState(false);
   const [exportSize, setExportSize] = useState<SizeLimit>(SIZE_PRESETS[0]);
   const [exportMode, setExportMode] = useState<ExportMode>("separate");
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("mp4");
+  const [exportNormalize, setExportNormalize] = useState(false);
+  // Per-track mute + volume for multi-audio sources. Persisted with project.
+  const [trackMix, setTrackMix] = useState<TrackMix>({});
+  const [exportGifResolution, setExportGifResolution] =
+    useState<GifResolution>(GIF_DEFAULT_RESOLUTION);
   // Post-export toast: list of files just produced.
   const [lastExport, setLastExport] = useState<{ paths: string[] } | null>(null);
 
-  // Waveform: bins of peak amplitude per timeline slice (0..1).
-  const [waveform, setWaveform] = useState<Float32Array | null>(null);
+  // Waveforms: one Float32Array of peak amplitudes per audio track, keyed by
+  // track index. Single-track sources end up with a single entry at key 0.
+  const [waveforms, setWaveforms] = useState<Map<number, Float32Array>>(new Map());
   const waveformIdRef = useRef(0);
   const waveCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -132,7 +165,7 @@ export default function App() {
     try {
       // Invalidate any in-flight waveform extraction.
       waveformIdRef.current += 1;
-      setWaveform(null);
+      setWaveforms(new Map());
 
       // Stop any active loop, since regions are about to clear.
       loopingRegionIdRef.current = null;
@@ -145,6 +178,7 @@ export default function App() {
       setDraftIn(null);
       setDraftOut(null);
       setCurrentTime(0);
+      setTrackMix({});
       setPhase({ kind: "probing" });
 
       const probed = await invoke<VideoInfo>("probe_video", { path: selected });
@@ -153,23 +187,55 @@ export default function App() {
       setPhase({ kind: "proxying", progress: 0, eta: null });
       const result = await invoke<ProxyResult>("generate_proxy", {
         path: selected,
-        durationSecs: probed.duration_secs,
+        info: probed,
       });
       setProxyPath(result.play_path);
       setProxyEncoder(result.strategy);
       setPhase({ kind: "ready" });
 
-      // Kick off waveform extraction in the background (don't block ready state).
-      const waveId = ++waveformIdRef.current;
-      invoke<number[]>("extract_waveform", { path: selected })
-        .then((bins) => {
-          if (waveId !== waveformIdRef.current) return;
-          setWaveform(new Float32Array(bins));
-        })
-        .catch((err) => {
-          if (waveId !== waveformIdRef.current) return;
-          console.error("[clippy] waveform extract failed:", err);
+      // Restore previously-saved regions for this source (regions, crops,
+      // speeds). Sidecar JSON keyed by the same fingerprint as the cache.
+      try {
+        const saved = await invoke<ProjectState | null>("load_project", {
+          srcPath: selected,
         });
+        if (saved && Array.isArray(saved.regions)) {
+          // Re-run sort so any out-of-order entries are tidied.
+          const sorted = [...saved.regions].sort((a, b) => a.inSecs - b.inSecs);
+          setRegions(sorted);
+        }
+        if (saved && saved.trackMix && typeof saved.trackMix === "object") {
+          setTrackMix(saved.trackMix as TrackMix);
+        }
+      } catch (err) {
+        console.warn("[clippy] load_project failed:", err);
+      }
+
+      // Kick off waveform extraction per audio track in parallel. Doesn't block
+      // ready state; bins arrive over time and the canvas redraws as they land.
+      const waveId = ++waveformIdRef.current;
+      const tracksForWave = probed.audio_tracks.length > 0
+        ? probed.audio_tracks.map((t) => t.index)
+        : [0];
+      for (const idx of tracksForWave) {
+        invoke<number[]>("extract_waveform", {
+          path: selected,
+          info: probed,
+          trackIndex: idx,
+        })
+          .then((bins) => {
+            if (waveId !== waveformIdRef.current) return;
+            setWaveforms((prev) => {
+              const next = new Map(prev);
+              next.set(idx, new Float32Array(bins));
+              return next;
+            });
+          })
+          .catch((err) => {
+            if (waveId !== waveformIdRef.current) return;
+            console.error(`[clippy] waveform extract (track ${idx}) failed:`, err);
+          });
+      }
     } catch (e) {
       setPhase({ kind: "error", message: String(e) });
     }
@@ -186,6 +252,28 @@ export default function App() {
     if (!selected || typeof selected !== "string") return;
     await loadFile(selected);
   }, [loadFile]);
+
+  // Suppress the default Chromium context menu globally — for a focused
+  // desktop app the "Save video as / Inspect / Reload" entries are just noise.
+  useEffect(() => {
+    const onCtx = (e: MouseEvent) => e.preventDefault();
+    window.addEventListener("contextmenu", onCtx);
+    return () => window.removeEventListener("contextmenu", onCtx);
+  }, []);
+
+  // If Clippy was launched with a file argument (Windows "Open with" → Clippy,
+  // or a video dropped on Clippy.exe), auto-load it on first mount. The backend
+  // takes-and-clears its stored value so a hot-reload during dev won't re-open.
+  useEffect(() => {
+    invoke<string | null>("get_initial_path")
+      .then((p) => {
+        if (p) loadFile(p);
+      })
+      .catch((err) => console.error("[clippy] get_initial_path failed:", err));
+    // loadFile is stable (useCallback with empty deps), but we intentionally
+    // run this only once at mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Window-level drag-and-drop: drop a video file on the window to open it.
   const [isDraggingFile, setIsDraggingFile] = useState(false);
@@ -254,6 +342,41 @@ export default function App() {
     else v.pause();
   }, []);
 
+  // Debounced save of the project state (regions, crops, speeds, track mix)
+  // to a sidecar JSON next to the proxy cache.
+  useEffect(() => {
+    if (!srcPath) return;
+    const handle = window.setTimeout(() => {
+      const state: ProjectState = { version: 1, regions, trackMix };
+      invoke("save_project", { srcPath, state }).catch((err) =>
+        console.warn("[clippy] save_project failed:", err)
+      );
+    }, 600);
+    return () => window.clearTimeout(handle);
+  }, [srcPath, regions, trackMix]);
+
+  // Loop playback state (declared up here so seek/scrubTo can reference it
+  // for the auto-stop-when-outside check below). The actual loop logic is
+  // further down with the rest of the region helpers.
+  const [loopingRegionId, setLoopingRegionId] = useState<string | null>(null);
+  const loopingRegionIdRef = useRef<string | null>(null);
+  const regionsRef = useRef<Region[]>([]);
+  useEffect(() => { regionsRef.current = regions; }, [regions]);
+
+  // If the user moves the playhead outside the currently-looping region,
+  // stop looping. The playback wrap (timeupdate handler) sets currentTime
+  // directly and doesn't go through these helpers, so it stays in-bounds.
+  const maybeStopLoopOutsideRegion = useCallback((t: number) => {
+    const loopId = loopingRegionIdRef.current;
+    if (!loopId) return;
+    const r = regionsRef.current.find((x) => x.id === loopId);
+    // Tiny tolerance so floating-point boundary lands don't kill the loop.
+    if (!r || t < r.inSecs - 0.001 || t > r.outSecs + 0.001) {
+      loopingRegionIdRef.current = null;
+      setLoopingRegionId(null);
+    }
+  }, []);
+
   const seek = useCallback(
     (t: number) => {
       const v = videoRef.current;
@@ -262,8 +385,9 @@ export default function App() {
       v.currentTime = clamped;
       pendingSeekRef.current = null;
       setCurrentTime(clamped);
+      maybeStopLoopOutsideRegion(clamped);
     },
-    [duration]
+    [duration, maybeStopLoopOutsideRegion]
   );
 
   // Scrub-friendly seek: updates the playhead immediately, and either dispatches
@@ -280,8 +404,9 @@ export default function App() {
         pendingSeekRef.current = null;
         try { v.currentTime = clamped; } catch {}
       }
+      maybeStopLoopOutsideRegion(clamped);
     },
-    [duration]
+    [duration, maybeStopLoopOutsideRegion]
   );
 
   const stepFrames = useCallback(
@@ -294,12 +419,44 @@ export default function App() {
     [seek, frameSecs]
   );
 
+  // New regions auto-inherit a crop from the existing regions, so once you've
+  // cropped one you don't have to re-crop every subsequent region. Picks the
+  // most recently-added region's crop (last in the array). Returns undefined
+  // when no existing region has a crop.
+  const inheritedCrop = useCallback((existing: Region[]): Crop | undefined => {
+    for (let i = existing.length - 1; i >= 0; i--) {
+      if (existing[i].crop) return existing[i].crop;
+    }
+    return undefined;
+  }, []);
+
+  // Same idea for per-region audio mix. Snapshot from the most recent region
+  // that has one so the user's tweaks carry forward without having to re-set
+  // the mix on each new clip.
+  const inheritedMix = useCallback((existing: Region[]): TrackMix | undefined => {
+    for (let i = existing.length - 1; i >= 0; i--) {
+      const m = existing[i].mix;
+      if (m) return { ...m };
+    }
+    return undefined;
+  }, []);
+
   // Set draft in. If draft out is already set later than t, auto-commit a region.
   const setIn = useCallback(() => {
     const t = videoRef.current?.currentTime ?? 0;
     if (draftOut != null && t < draftOut) {
-      setRegions((r) => [...r, { id: newRegionId(), inSecs: t, outSecs: draftOut }]
-        .sort((a, b) => a.inSecs - b.inSecs));
+      setRegions((r) =>
+        [
+          ...r,
+          {
+            id: newRegionId(),
+            inSecs: t,
+            outSecs: draftOut,
+            crop: inheritedCrop(r),
+            mix: inheritedMix(r),
+          },
+        ].sort((a, b) => a.inSecs - b.inSecs)
+      );
       setDraftIn(null);
       setDraftOut(null);
     } else {
@@ -307,25 +464,124 @@ export default function App() {
       // If the existing draft out is now <= the new in, drop it.
       if (draftOut != null && t >= draftOut) setDraftOut(null);
     }
-  }, [draftOut]);
+  }, [draftOut, inheritedCrop, inheritedMix]);
 
   // Set draft out. If draft in is already set earlier than t, auto-commit a region.
   const setOut = useCallback(() => {
     const t = videoRef.current?.currentTime ?? 0;
     if (draftIn != null && t > draftIn) {
-      setRegions((r) => [...r, { id: newRegionId(), inSecs: draftIn, outSecs: t }]
-        .sort((a, b) => a.inSecs - b.inSecs));
+      setRegions((r) =>
+        [
+          ...r,
+          {
+            id: newRegionId(),
+            inSecs: draftIn,
+            outSecs: t,
+            crop: inheritedCrop(r),
+            mix: inheritedMix(r),
+          },
+        ].sort((a, b) => a.inSecs - b.inSecs)
+      );
       setDraftIn(null);
       setDraftOut(null);
     } else {
       setDraftOut(t);
       if (draftIn != null && t <= draftIn) setDraftIn(null);
     }
-  }, [draftIn]);
+  }, [draftIn, inheritedCrop, inheritedMix]);
 
   const deleteRegion = useCallback((id: string) => {
     setRegions((r) => r.filter((x) => x.id !== id));
   }, []);
+
+  // Crop edit mode: which region's crop are we editing? null = not editing.
+  const [cropEditingRegionId, setCropEditingRegionId] = useState<string | null>(null);
+  const wasPlayingBeforeCropRef = useRef(false);
+  const startCropEdit = useCallback((regionId: string) => {
+    const r = regions.find((x) => x.id === regionId);
+    if (!r) return;
+    const v = videoRef.current;
+    if (v) {
+      wasPlayingBeforeCropRef.current = !v.paused;
+      if (!v.paused) v.pause();
+    }
+    seek(r.inSecs);
+    setCropEditingRegionId(regionId);
+  }, [regions, seek]);
+  const finishCropEdit = useCallback((newCrop: Crop | undefined) => {
+    if (!cropEditingRegionId) return;
+    setRegions((rs) =>
+      rs.map((r) => (r.id === cropEditingRegionId ? { ...r, crop: newCrop } : r))
+    );
+    setCropEditingRegionId(null);
+    if (wasPlayingBeforeCropRef.current) {
+      videoRef.current?.play().catch(() => {});
+    }
+  }, [cropEditingRegionId]);
+  const cancelCropEdit = useCallback(() => {
+    setCropEditingRegionId(null);
+    if (wasPlayingBeforeCropRef.current) {
+      videoRef.current?.play().catch(() => {});
+    }
+  }, []);
+  // Propagate the just-edited crop to every region. Closes the overlay.
+  // Used to make stitched export trivially possible (all regions must share
+  // the same crop, and matching them by hand is awkward).
+  const applyCropToAllRegions = useCallback((newCrop: Crop) => {
+    setRegions((rs) => rs.map((r) => ({ ...r, crop: newCrop })));
+    setCropEditingRegionId(null);
+    if (wasPlayingBeforeCropRef.current) {
+      videoRef.current?.play().catch(() => {});
+    }
+  }, []);
+  const editingRegion = cropEditingRegionId
+    ? regions.find((r) => r.id === cropEditingRegionId)
+    : null;
+
+  // Active cropped region for the read-only indicator: first region whose crop
+  // is set AND contains the playhead. Re-evaluates each render — cheap.
+  const activeCroppedRegion = regions.find(
+    (r) => r.crop && currentTime >= r.inSecs && currentTime <= r.outSecs
+  );
+
+  // Region containing the playhead (first match, sorted by inSecs already).
+  // Drives the audio-mix context: while inside, the mixer edits that region's
+  // mix and WebAudio plays it; outside, both fall back to the source default.
+  const playheadRegion = regions.find(
+    (r) => currentTime >= r.inSecs && currentTime <= r.outSecs
+  );
+  const playheadRegionIndex = playheadRegion ? regions.indexOf(playheadRegion) : -1;
+  const effectiveMix: TrackMix = playheadRegion?.mix ?? trackMix;
+  // Stable callback that writes back to the right slice of state — region
+  // override if inside one, otherwise the source default.
+  const setEffectiveMix = useCallback(
+    (next: TrackMix) => {
+      if (playheadRegion) {
+        const id = playheadRegion.id;
+        setRegions((rs) => rs.map((r) => (r.id === id ? { ...r, mix: next } : r)));
+      } else {
+        setTrackMix(next);
+      }
+    },
+    [playheadRegion]
+  );
+
+  // Multi-track audio: extract each track on file load and feed them through
+  // WebAudio so the mixer's sliders/mutes affect playback in real time. Hook
+  // is a no-op for single-track sources. Effective mix changes as the playhead
+  // crosses region boundaries — you literally hear the per-region mix kick in.
+  useAudioTracks({
+    videoElement: videoRef.current,
+    srcPath,
+    tracks: info?.audio_tracks ?? [],
+    mix: effectiveMix,
+  });
+
+  // For the floating loop badge in the player corner.
+  const loopingRegion = loopingRegionId
+    ? regions.find((r) => r.id === loopingRegionId)
+    : null;
+  const loopingRegionIndex = loopingRegion ? regions.indexOf(loopingRegion) : -1;
 
   const clearAllRegions = useCallback(() => {
     setRegions([]);
@@ -337,13 +593,6 @@ export default function App() {
   // Using state for the cursor styling, ref for the move handler closure.
   const [resizingEdge, setResizingEdge] = useState<{ regionId: string; edge: "in" | "out" } | null>(null);
   const resizingEdgeRef = useRef<{ regionId: string; edge: "in" | "out" } | null>(null);
-
-  // Loop playback: while non-null, the timeupdate handler wraps the playhead
-  // back to that region's in-point when it reaches the out-point.
-  const [loopingRegionId, setLoopingRegionId] = useState<string | null>(null);
-  const loopingRegionIdRef = useRef<string | null>(null);
-  const regionsRef = useRef<Region[]>([]);
-  useEffect(() => { regionsRef.current = regions; }, [regions]);
 
   // If targetId is given, toggle loop on that specific region; otherwise pick
   // the region under the playhead (or nearest if none contain it).
@@ -444,11 +693,24 @@ export default function App() {
   };
 
   // ---- export ----
-  // Build the list of [in, out] pairs that should be exported. Uses committed
-  // regions when present, otherwise falls back to the draft pair.
-  const collectClips = useCallback((): Array<{ inSecs: number; outSecs: number }> => {
+  // Build the list of clips that should be exported. Uses committed regions
+  // when present, otherwise falls back to the draft pair (drafts have no
+  // crop/speed/mix — those are per-region only).
+  const collectClips = useCallback((): Array<{
+    inSecs: number;
+    outSecs: number;
+    crop?: Crop;
+    speed?: number;
+    mix?: TrackMix;
+  }> => {
     if (regions.length > 0) {
-      return regions.map((r) => ({ inSecs: r.inSecs, outSecs: r.outSecs }));
+      return regions.map((r) => ({
+        inSecs: r.inSecs,
+        outSecs: r.outSecs,
+        crop: r.crop,
+        speed: r.speed,
+        mix: r.mix,
+      }));
     }
     if (draftIn != null && draftOut != null && draftIn < draftOut) {
       return [{ inSecs: draftIn, outSecs: draftOut }];
@@ -482,32 +744,111 @@ export default function App() {
 
     const baseName = srcPath.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? "clip";
     const isStitched = exportMode === "stitched" && clips.length > 1;
-    const sized = exportSize.kind === "mb";
+    const isAudio = exportFormat === "mp3";
+    const isGif = exportFormat === "gif";
+    const sized = exportFormat === "mp4" && exportSize.kind === "mb";
+    const ext = isAudio ? "mp3" : isGif ? "gif" : "mp4";
+    const filterName = isAudio ? "MP3" : isGif ? "GIF" : "MP4";
+
+    // GIF target width: resolved here so the backend doesn't need to know about
+    // the "source" preset. Source = the actual source width (no upscale ever).
+    const gifTargetWidth = isGif
+      ? exportGifResolution.kind === "source"
+        ? info?.width ?? 1280
+        : exportGifResolution.w
+      : null;
+
+    const totalTracks = info?.audio_tracks.length ?? 0;
+    const totalAudioTracks = totalTracks > 0 ? totalTracks : null;
+    // Convert a TrackMix → backend payload. Returns null when the mix is at
+    // defaults so the backend takes the fast single-track path.
+    const mixToPayload = (m: TrackMix | undefined): Array<{ index: number; volume: number }> | null => {
+      if (totalTracks <= 1) return null;
+      const eff = m ?? trackMix;
+      if (trackMixIsDefault(eff, totalTracks)) return null;
+      return trackMixToBackend(eff, totalTracks);
+    };
+    // Default mix payload (used when a region has no override or for non-region
+    // single-clip exports).
+    const defaultMixPayload = mixToPayload(trackMix);
+
+    // Backend RegionExport — includes the region's own mix (or null fallback).
+    const toRegionExport = (c: { inSecs: number; outSecs: number; crop?: Crop; speed?: number; mix?: TrackMix }) => ({
+      in_secs: c.inSecs,
+      out_secs: c.outSecs,
+      crop: c.crop ?? null,
+      speed: c.speed ?? null,
+      mix: mixToPayload(c.mix),
+    });
 
     if (isStitched) {
+      // Stitched + non-audio needs uniform crop (different output dims would
+      // require visible scale+pad). Stitched + sized OR stitched + GIF + audio
+      // additionally need uniform speed (single-pass paths).
+      const firstCrop = clips[0].crop;
+      const allCropMatch = clips.every((c) => cropsEqual(c.crop, firstCrop));
+      const allSpeedMatch = clips.every((c) => (c.speed ?? 1) === (clips[0].speed ?? 1));
+      if (!isAudio && !allCropMatch) {
+        setPhase({
+          kind: "error",
+          message: "Stitched export requires every region to have the same crop. Use the ✂ button → Apply to all.",
+        });
+        return;
+      }
+      if ((sized || isAudio) && !allSpeedMatch) {
+        setPhase({
+          kind: "error",
+          message: "Size-targeted or audio stitched export needs uniform speed across regions.",
+        });
+        return;
+      }
+
       const suggested = sized
-        ? `${baseName}_stitched_${exportSize.mb}mb.mp4`
-        : `${baseName}_stitched.mp4`;
+        ? `${baseName}_stitched_${exportSize.mb}mb.${ext}`
+        : `${baseName}_stitched.${ext}`;
       const dest = await saveDialog({
         defaultPath: suggested,
-        filters: [{ name: "MP4", extensions: ["mp4"] }],
+        filters: [{ name: filterName, extensions: [ext] }],
       });
       if (!dest) return;
 
       setPhase({ kind: "exporting", progress: 0, current: 1, total: 1 });
       try {
-        if (sized) {
+        const regionPayload = clips.map(toRegionExport);
+        if (isGif) {
+          await invoke("export_concat_gif", {
+            srcPath,
+            regions: regionPayload,
+            outputPath: dest,
+            targetWidth: gifTargetWidth,
+          });
+        } else if (isAudio) {
+          await invoke("export_concat_audio", {
+            srcPath,
+            regions: regionPayload,
+            outputPath: dest,
+            normalize: exportNormalize,
+            trackMix: defaultMixPayload,
+            totalAudioTracks,
+          });
+        } else if (sized) {
           await invoke("export_concat_sized", {
             srcPath,
-            regions: clips.map((c) => [c.inSecs, c.outSecs]),
+            regions: regionPayload,
             outputPath: dest,
             targetSizeMb: exportSize.mb,
+            normalize: exportNormalize,
+            trackMix: defaultMixPayload,
+            totalAudioTracks,
           });
         } else {
           await invoke("export_concat", {
             srcPath,
-            regions: clips.map((c) => [c.inSecs, c.outSecs]),
+            regions: regionPayload,
             outputPath: dest,
+            normalize: exportNormalize,
+            trackMix: defaultMixPayload,
+            totalAudioTracks,
           });
         }
         setPhase({ kind: "ready" });
@@ -519,13 +860,14 @@ export default function App() {
     }
 
     // Separate clips (or single clip)
+    const sizeSuffix = sized ? `_${exportSize.mb}mb` : "";
     const suggested =
       clips.length === 1
-        ? `${baseName}_clip_${Math.round(clips[0].inSecs)}-${Math.round(clips[0].outSecs)}${sized ? `_${exportSize.mb}mb` : ""}.mp4`
-        : `${baseName}_clip_1${sized ? `_${exportSize.mb}mb` : ""}.mp4`;
+        ? `${baseName}_clip_${Math.round(clips[0].inSecs)}-${Math.round(clips[0].outSecs)}${sizeSuffix}.${ext}`
+        : `${baseName}_clip_1${sizeSuffix}.${ext}`;
     const firstDest = await saveDialog({
       defaultPath: suggested,
-      filters: [{ name: "MP4", extensions: ["mp4"] }],
+      filters: [{ name: filterName, extensions: [ext] }],
     });
     if (!firstDest) return;
 
@@ -533,28 +875,61 @@ export default function App() {
     if (clips.length === 1) {
       outputPaths = [firstDest];
     } else {
-      const m = firstDest.match(/^(.*?)(?:_\d+)?\.mp4$/i);
-      const base = m ? m[1] : firstDest.replace(/\.mp4$/i, "");
-      outputPaths = clips.map((_, idx) => `${base}_${idx + 1}.mp4`);
+      const re = new RegExp(`^(.*?)(?:_\\d+)?\\.${ext}$`, "i");
+      const m = firstDest.match(re);
+      const base = m ? m[1] : firstDest.replace(new RegExp(`\\.${ext}$`, "i"), "");
+      outputPaths = clips.map((_, idx) => `${base}_${idx + 1}.${ext}`);
     }
 
     try {
       for (let i = 0; i < clips.length; i++) {
         setPhase({ kind: "exporting", progress: 0, current: i + 1, total: clips.length });
-        if (sized) {
+        const c = clips[i];
+        if (isGif) {
+          await invoke("export_clip_gif", {
+            srcPath,
+            inSecs: c.inSecs,
+            outSecs: c.outSecs,
+            outputPath: outputPaths[i],
+            crop: c.crop ?? null,
+            speed: c.speed ?? null,
+            targetWidth: gifTargetWidth,
+          });
+        } else if (isAudio) {
+          await invoke("export_clip_audio", {
+            srcPath,
+            inSecs: c.inSecs,
+            outSecs: c.outSecs,
+            outputPath: outputPaths[i],
+            speed: c.speed ?? null,
+            normalize: exportNormalize,
+            trackMix: mixToPayload(c.mix),
+            totalAudioTracks,
+          });
+        } else if (sized) {
           await invoke("export_clip_sized", {
             srcPath,
-            inSecs: clips[i].inSecs,
-            outSecs: clips[i].outSecs,
+            inSecs: c.inSecs,
+            outSecs: c.outSecs,
             outputPath: outputPaths[i],
             targetSizeMb: exportSize.mb,
+            crop: c.crop ?? null,
+            speed: c.speed ?? null,
+            normalize: exportNormalize,
+            trackMix: mixToPayload(c.mix),
+            totalAudioTracks,
           });
         } else {
           await invoke("export_clip", {
             srcPath,
-            inSecs: clips[i].inSecs,
-            outSecs: clips[i].outSecs,
+            inSecs: c.inSecs,
+            outSecs: c.outSecs,
             outputPath: outputPaths[i],
+            crop: c.crop ?? null,
+            speed: c.speed ?? null,
+            normalize: exportNormalize,
+            trackMix: mixToPayload(c.mix),
+            totalAudioTracks,
           });
         }
       }
@@ -563,10 +938,86 @@ export default function App() {
     } catch (e) {
       setPhase({ kind: "error", message: String(e) });
     }
-  }, [srcPath, collectClips, exportMode, exportSize]);
+  }, [srcPath, collectClips, exportMode, exportSize, exportFormat, exportNormalize, exportGifResolution, info, trackMix]);
 
   // Alias for the keybind dispatcher.
   const handleExport = openExport;
+
+  // Crop the region containing the playhead (or the nearest if none contain it).
+  // Wired to the cropRegion keybind.
+  const cropCurrentRegion = useCallback(() => {
+    if (regions.length === 0) return;
+    const t = videoRef.current?.currentTime ?? 0;
+    const inside = regions.find((r) => r.inSecs <= t && t <= r.outSecs);
+    const target =
+      inside ??
+      [...regions].sort((a, b) =>
+        Math.abs(a.inSecs - t) - Math.abs(b.inSecs - t)
+      )[0];
+    if (target) startCropEdit(target.id);
+  }, [regions, startCropEdit]);
+
+  // Save Frame is two-stage:
+  //   • First click  → copy current frame to clipboard (paste straight into
+  //     Discord/Slack — covers the 90% case).
+  //   • Click again within ~5 s → open the save dialog and write a PNG.
+  // Resets back to "copy" mode if the user moves the playhead substantially or
+  // the timeout elapses, so a stale "save" mode never surprises them.
+  const [frameAction, setFrameAction] = useState<"copy" | "save">("copy");
+  const [frameToast, setFrameToast] = useState<string | null>(null);
+  const frameModeAtRef = useRef<number>(0);
+  const frameTimerRef = useRef<number | null>(null);
+  const clearFrameMode = useCallback(() => {
+    setFrameAction("copy");
+    setFrameToast(null);
+    if (frameTimerRef.current) {
+      window.clearTimeout(frameTimerRef.current);
+      frameTimerRef.current = null;
+    }
+  }, []);
+  const saveCurrentFrame = useCallback(async () => {
+    if (!srcPath || !info) return;
+    const t = videoRef.current?.currentTime ?? 0;
+
+    // If we're in "save" mode but the playhead has moved, reset to copy.
+    const moved = Math.abs(t - frameModeAtRef.current) > 0.05;
+    const mode = !moved && frameAction === "save" ? "save" : "copy";
+
+    if (mode === "copy") {
+      try {
+        await invoke("copy_frame_to_clipboard", {
+          srcPath,
+          timeSecs: t,
+          width: info.width,
+          height: info.height,
+        });
+        frameModeAtRef.current = t;
+        setFrameAction("save");
+        setFrameToast("Copied to clipboard — click again to save as PNG");
+        if (frameTimerRef.current) window.clearTimeout(frameTimerRef.current);
+        frameTimerRef.current = window.setTimeout(clearFrameMode, 5000);
+      } catch (e) {
+        setPhase({ kind: "error", message: `Couldn't copy frame: ${e}` });
+      }
+      return;
+    }
+
+    // Second click — open save dialog and write a PNG.
+    const baseName = srcPath.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? "frame";
+    const suggested = `${baseName}_frame_${t.toFixed(2).replace(".", "_")}s.png`;
+    try {
+      const dest = await saveDialog({
+        defaultPath: suggested,
+        filters: [{ name: "PNG", extensions: ["png"] }],
+      });
+      clearFrameMode();
+      if (!dest) return;
+      await invoke("export_frame_png", { srcPath, timeSecs: t, outputPath: dest });
+      setLastExport({ paths: [dest] });
+    } catch (e) {
+      setPhase({ kind: "error", message: String(e) });
+    }
+  }, [srcPath, info, frameAction, clearFrameMode]);
 
   // ---- keyboard shortcuts ----
   useEffect(() => {
@@ -589,6 +1040,8 @@ export default function App() {
           case "setOut": setOut(); break;
           case "export": handleExport(); break;
           case "loopRegion": toggleLoopRegion(); break;
+          case "cropRegion": cropCurrentRegion(); break;
+          case "saveFrame": saveCurrentFrame(); break;
           default: {
             // Region jumps: jumpRegion1..jumpRegion9 → seek to that region's in.
             const m = action.match(/^jumpRegion(\d)$/);
@@ -613,7 +1066,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [keybinds, listeningAction, phase, handleOpen, playPause, stepFrames, seek, duration, setIn, setOut, handleExport, toggleLoopRegion, regions]);
+  }, [keybinds, listeningAction, phase, handleOpen, playPause, stepFrames, seek, duration, setIn, setOut, handleExport, toggleLoopRegion, regions, cropCurrentRegion, saveCurrentFrame]);
 
   // Capture next keypress when listening to bind a new shortcut.
   useEffect(() => {
@@ -690,7 +1143,10 @@ export default function App() {
     }
   };
 
-  // Draw waveform onto the canvas (and redraw on container resize).
+  // Draw all per-track waveforms layered onto the canvas (and redraw on
+  // container resize). Each track uses its palette color; additive blend so
+  // simultaneously-loud tracks brighten where they overlap. Drawing centered
+  // on the mid-line — bar heights = max amplitude in that x's bin slice.
   useEffect(() => {
     const canvas = waveCanvasRef.current;
     const container = timelineRef.current;
@@ -710,33 +1166,97 @@ export default function App() {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, cssW, cssH);
-      if (!waveform || waveform.length === 0) return;
+      if (waveforms.size === 0) return;
 
       const mid = cssH / 2;
-      const N = waveform.length;
-      // Background fill (subtle); use accent color at low alpha
-      ctx.fillStyle = "rgba(79, 157, 255, 0.42)";
+      // Sort by index so colors are deterministic and the layering doesn't
+      // depend on Map insertion order (extraction parallelism).
+      const entries = [...waveforms.entries()].sort((a, b) => a[0] - b[0]);
 
-      // 1px-per-x bars; for each x take the max bin amplitude in its slice
+      // Build the per-x effective mix. For each pixel of timeline width, find
+      // which region's mix applies (or fall back to the source default).
+      // Pre-computed once so the inner draw loop stays cheap.
+      const dur = duration > 0 ? duration : 1;
+      const xMixes: TrackMix[] = new Array(cssW);
+      // Sorted regions are an invariant of setRegions; binary search overkill
+      // for typical N <= ~10.
       for (let x = 0; x < cssW; x++) {
-        const binStart = Math.floor((x / cssW) * N);
-        const binEnd = Math.max(binStart + 1, Math.floor(((x + 1) / cssW) * N));
-        let max = 0;
-        for (let i = binStart; i < binEnd && i < N; i++) {
-          const v = waveform[i];
-          if (v > max) max = v;
+        const t = (x / cssW) * dur;
+        let m: TrackMix = trackMix;
+        for (const r of regions) {
+          if (t >= r.inSecs && t <= r.outSecs) {
+            m = r.mix ?? trackMix;
+            break;
+          }
         }
-        const h = max * (cssH * 0.85);
-        if (h < 1) continue;
-        ctx.fillRect(x, mid - h / 2, 1, h);
+        xMixes[x] = m;
       }
+
+      // Two-pass render:
+      //   Pass 1 (source-over, grey, low alpha): muted tracks at original
+      //     amplitude — visible as ghost so the user knows what's there.
+      //   Pass 2 (lighter, track color): active tracks scaled by per-x volume
+      //     so 50% slider → half-height bars, 158% → ~1.6× taller. Heights
+      //     clamp to slightly past the track strip so 200% reads as "loud"
+      //     without escaping the canvas.
+      const maxBar = cssH * 0.92; // hard cap (canvas-bound)
+      const unityBar = cssH * 0.55; // bar height at volume == 1.0
+
+      ctx.globalCompositeOperation = "source-over";
+      ctx.fillStyle = "rgba(140, 144, 154, 0.16)";
+      for (const [idx, bins] of entries) {
+        const N = bins.length;
+        if (N === 0) continue;
+        for (let x = 0; x < cssW; x++) {
+          if (!xMixes[x][idx]?.muted) continue;
+          const binStart = Math.floor((x / cssW) * N);
+          const binEnd = Math.max(binStart + 1, Math.floor(((x + 1) / cssW) * N));
+          let max = 0;
+          for (let i = binStart; i < binEnd && i < N; i++) {
+            const v = bins[i];
+            if (v > max) max = v;
+          }
+          const h = Math.min(max * unityBar, maxBar);
+          if (h < 1) continue;
+          ctx.fillRect(x, mid - h / 2, 1, h);
+        }
+      }
+
+      // Average active-count for alpha — heuristic: count active in the
+      // middle x to avoid scanning all xMixes again.
+      const midMix = xMixes[Math.floor(cssW / 2)] ?? trackMix;
+      const activeCount = entries.filter(([i]) => !midMix[i]?.muted).length;
+      const baseAlpha = activeCount <= 1 ? 0.85 : 0.55;
+      ctx.globalCompositeOperation = "lighter";
+      for (const [idx, bins] of entries) {
+        const N = bins.length;
+        if (N === 0) continue;
+        ctx.fillStyle = hexWithAlpha(trackColor(idx), baseAlpha);
+        for (let x = 0; x < cssW; x++) {
+          const m = xMixes[x][idx];
+          if (m?.muted) continue;
+          const vol = m?.volume ?? 1;
+          if (vol <= 0) continue;
+          const binStart = Math.floor((x / cssW) * N);
+          const binEnd = Math.max(binStart + 1, Math.floor(((x + 1) / cssW) * N));
+          let max = 0;
+          for (let i = binStart; i < binEnd && i < N; i++) {
+            const v = bins[i];
+            if (v > max) max = v;
+          }
+          const h = Math.min(max * vol * unityBar, maxBar);
+          if (h < 1) continue;
+          ctx.fillRect(x, mid - h / 2, 1, h);
+        }
+      }
+      ctx.globalCompositeOperation = "source-over";
     };
 
     draw();
     const ro = new ResizeObserver(draw);
     ro.observe(container);
     return () => ro.disconnect();
-  }, [waveform]);
+  }, [waveforms, trackMix, regions, duration]);
 
   const playheadPct = duration > 0 ? (currentTime / duration) * 100 : 0;
   const draftInPct = draftIn != null && duration > 0 ? (draftIn / duration) * 100 : null;
@@ -825,6 +1345,18 @@ export default function App() {
       {phaseBanner}
 
       <main className="stage">
+        {loopingRegion && proxySrc && (
+          <button
+            className="loop-badge"
+            onClick={() => toggleLoopRegion(loopingRegion.id)}
+            title="Click to stop looping (or scrub outside the region)"
+          >
+            <span className="loop-badge-icon">↻</span>
+            <span className="loop-badge-text">
+              Looping #{loopingRegionIndex + 1}
+            </span>
+          </button>
+        )}
         {proxySrc ? (
           <video
             ref={videoRef}
@@ -900,11 +1432,39 @@ export default function App() {
           <button onClick={clearAllRegions} title="Remove all regions and the current draft">
             Clear all
           </button>
+          <button
+            onClick={saveCurrentFrame}
+            disabled={!srcPath || phase.kind !== "ready"}
+            className={frameAction === "save" ? "btn-armed" : ""}
+            title={
+              frameAction === "save"
+                ? "Frame copied to clipboard — click again to save as PNG"
+                : `Copy current frame to clipboard (${formatKeybind(keybinds.saveFrame)}). Click again to save as PNG.`
+            }
+          >
+            {frameAction === "save" ? "Save as PNG…" : "Copy frame"}
+          </button>
           <span className="dim mono draft-readout">
             draft: {draftIn != null ? fmtTime(draftIn) : "--"} → {draftOut != null ? fmtTime(draftOut) : "--"}
           </span>
         </div>
       </section>
+
+      {info && info.audio_tracks.length > 1 && (
+        <TrackMixer
+          tracks={info.audio_tracks}
+          mix={effectiveMix}
+          onChange={setEffectiveMix}
+          contextLabel={
+            playheadRegion ? `Region ${playheadRegionIndex + 1}` : "Default"
+          }
+          contextColor={
+            playheadRegion
+              ? `hsl(${REGION_HUES[playheadRegionIndex % REGION_HUES.length]}, 60%, 55%)`
+              : null
+          }
+        />
+      )}
 
       {regions.length > 0 && (
         <section className="region-list">
@@ -922,6 +1482,26 @@ export default function App() {
               </span>
               <span className="region-chip-len mono dim">
                 ({fmtTime(r.outSecs - r.inSecs)})
+              </span>
+              {r.crop && (
+                <span className="region-chip-crop mono" title={`Crop ${r.crop.w}×${r.crop.h} at ${r.crop.x},${r.crop.y}`}>
+                  ✂ {r.crop.w}×{r.crop.h}
+                </span>
+              )}
+              <button
+                className={`region-chip-crop-btn${r.crop ? " active" : ""}`}
+                onClick={(e) => { e.stopPropagation(); startCropEdit(r.id); }}
+                title={r.crop ? "Edit crop" : "Add a crop to this region"}
+              >
+                ✂
+              </button>
+              <span onClick={(e) => e.stopPropagation()}>
+                <SpeedPicker
+                  value={r.speed}
+                  onChange={(v) =>
+                    setRegions((rs) => rs.map((x) => x.id === r.id ? { ...x, speed: v } : x))
+                  }
+                />
               </span>
               <button
                 className={`region-chip-loop-btn${loopingRegionId === r.id ? " active" : ""}`}
@@ -973,6 +1553,9 @@ export default function App() {
                 onPointerCancel={onEdgeResizeUp}
               />
               <span className="region-band-num">{i + 1}</span>
+              <span className="region-band-dur mono" aria-hidden>
+                {fmtTime(r.outSecs - r.inSecs)}
+              </span>
               <div
                 className={`region-edge-handle right${isResizingThis && resizingEdge?.edge === "out" ? " active" : ""}`}
                 onPointerDown={(e) => startEdgeResize(e, r.id, "out")}
@@ -1024,6 +1607,14 @@ export default function App() {
           setMode={setExportMode}
           size={exportSize}
           setSize={setExportSize}
+          format={exportFormat}
+          setFormat={setExportFormat}
+          normalize={exportNormalize}
+          setNormalize={setExportNormalize}
+          gifResolution={exportGifResolution}
+          setGifResolution={setExportGifResolution}
+          sourceWidth={info?.width ?? 0}
+          sourceHeight={info?.height ?? 0}
           sourceBitrateBps={info?.bit_rate_bps ?? null}
           onCancel={() => setExportOpen(false)}
           onConfirm={runExport}
@@ -1034,6 +1625,12 @@ export default function App() {
         <ExportToast paths={lastExport.paths} onClose={() => setLastExport(null)} />
       )}
 
+      {frameToast && (
+        <div className="frame-toast" onClick={clearFrameMode}>
+          {frameToast}
+        </div>
+      )}
+
       {isDraggingFile && (
         <div className="drop-overlay">
           <div className="drop-message">
@@ -1041,6 +1638,30 @@ export default function App() {
             <div>Drop to open</div>
           </div>
         </div>
+      )}
+
+      {editingRegion && info && (
+        <CropOverlay
+          videoElement={videoRef.current}
+          sourceWidth={info.width}
+          sourceHeight={info.height}
+          initialCrop={editingRegion.crop}
+          totalRegions={regions.length}
+          onDone={finishCropEdit}
+          onApplyToAll={applyCropToAllRegions}
+          onCancel={cancelCropEdit}
+        />
+      )}
+
+      {/* Read-only crop indicator: shows when playhead is inside a cropped region
+          and the overlay isn't open (the overlay already shows the same bounds). */}
+      {!editingRegion && activeCroppedRegion?.crop && info && (
+        <CropIndicator
+          videoElement={videoRef.current}
+          sourceWidth={info.width}
+          sourceHeight={info.height}
+          crop={activeCroppedRegion.crop}
+        />
       )}
 
       {keybindsOpen && (
@@ -1077,6 +1698,7 @@ export default function App() {
                 );
               })}
             </div>
+            <CacheControls />
             <footer className="modal-footer">
               <button onClick={() => setKeybinds(DEFAULT_KEYBINDS)}>Reset to defaults</button>
               <button className="primary" onClick={() => setKeybindsOpen(false)}>Done</button>
@@ -1104,6 +1726,49 @@ function HintKbd(props: {
       )}{" "}
       {props.label}
     </span>
+  );
+}
+
+/** Tiny cache-cleanup row inside the keybinds modal. Auto-prune for files
+ *  >30 days untouched runs at app startup; this exposes the manual button
+ *  plus the current size readout. */
+function CacheControls() {
+  const [size, setSize] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const refresh = useCallback(() => {
+    invoke<number>("cache_size")
+      .then((s) => setSize(s))
+      .catch(() => setSize(null));
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+  const fmt = (b: number) =>
+    b >= 1_073_741_824
+      ? `${(b / 1_073_741_824).toFixed(2)} GB`
+      : b >= 1_048_576
+      ? `${(b / 1_048_576).toFixed(1)} MB`
+      : b >= 1024
+      ? `${(b / 1024).toFixed(0)} KB`
+      : `${b} B`;
+  return (
+    <div className="cache-row">
+      <span className="cache-label">Cache</span>
+      <span className="cache-size mono">{size == null ? "—" : fmt(size)}</span>
+      <button
+        className="cache-clear"
+        disabled={busy || size === 0}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            await invoke("clear_cache");
+          } catch {}
+          setBusy(false);
+          refresh();
+        }}
+        title="Delete all cached proxies, waveforms, and project files. They'll be regenerated on next open."
+      >
+        {busy ? "Clearing…" : "Clear cache"}
+      </button>
+    </div>
   );
 }
 

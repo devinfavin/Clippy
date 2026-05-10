@@ -18,6 +18,8 @@ export type ActionId =
   | "setOut"
   | "export"
   | "loopRegion"
+  | "cropRegion"
+  | "saveFrame"
   | "jumpRegion1"
   | "jumpRegion2"
   | "jumpRegion3"
@@ -41,6 +43,8 @@ export const ACTION_LABELS: Record<ActionId, string> = {
   setOut: "Set out point",
   export: "Export selection",
   loopRegion: "Loop current region",
+  cropRegion: "Crop current region",
+  saveFrame: "Save current frame as PNG",
   jumpRegion1: "Jump to region 1",
   jumpRegion2: "Jump to region 2",
   jumpRegion3: "Jump to region 3",
@@ -63,6 +67,8 @@ export const DEFAULT_KEYBINDS: Keybinds = {
   setOut:       { key: "o" },
   export:       { key: "e", ctrl: true },
   loopRegion:   { key: "l" },
+  cropRegion:   { key: "c", shift: true },
+  saveFrame:    { key: "s", shift: true },
   jumpRegion1:  { key: "1" },
   jumpRegion2:  { key: "2" },
   jumpRegion3:  { key: "3" },

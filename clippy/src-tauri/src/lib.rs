@@ -30,6 +30,7 @@ use tokio_util::io::ReaderStream;
 #[derive(Clone)]
 struct ServerState {
     token: String,
+    port: u16,
     allowlist: Arc<AsyncMutex<HashSet<PathBuf>>>,
 }
 
@@ -45,15 +46,11 @@ struct ServeQuery {
 }
 
 fn generate_session_token() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    let mut h = Sha256::new();
-    h.update(now.to_le_bytes());
-    h.update(pid.to_le_bytes());
-    format!("{:x}", h.finalize())
+    // 32 bytes from the OS CSPRNG → 64-char hex. Predictable inputs (time, pid)
+    // would let any local process guess the token and reach the media server.
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).expect("OS RNG unavailable");
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 async fn serve_file(
@@ -61,6 +58,19 @@ async fn serve_file(
     Query(q): Query<ServeQuery>,
     headers: HeaderMap,
 ) -> Response {
+    // Defeat DNS rebinding: only accept Host headers that target our exact
+    // loopback port. A remote site that learns the port can still send the
+    // request, but the browser-supplied Host will be the attacker's domain.
+    let expected_host_v4 = format!("127.0.0.1:{}", state.port);
+    let expected_host_localhost = format!("localhost:{}", state.port);
+    let host_ok = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| h == expected_host_v4 || h == expected_host_localhost)
+        .unwrap_or(false);
+    if !host_ok {
+        return (StatusCode::FORBIDDEN, "bad host").into_response();
+    }
     if q.token != state.token {
         return (StatusCode::FORBIDDEN, "bad token").into_response();
     }
@@ -122,6 +132,10 @@ async fn serve_file(
                         format!("bytes {}-{}/{}", start, end, total),
                     )
                     .header(header::ACCEPT_RANGES, "bytes")
+                    // CORS so MediaElementSource can read samples for WebAudio.
+                    // Token + Host already gate access; CORS is the browser's.
+                    .header("access-control-allow-origin", "*")
+                    .header("access-control-expose-headers", "Content-Range, Content-Length, Accept-Ranges")
                     .body(Body::from_stream(stream))
                     .unwrap();
             }
@@ -134,17 +148,129 @@ async fn serve_file(
         .header(header::CONTENT_TYPE, mime_str)
         .header(header::CONTENT_LENGTH, total.to_string())
         .header(header::ACCEPT_RANGES, "bytes")
+        .header("access-control-allow-origin", "*")
+        .header("access-control-expose-headers", "Content-Range, Content-Length, Accept-Ranges")
         .body(Body::from_stream(stream))
         .unwrap()
 }
 
-/// Return the size of a file in bytes. Used by the post-export toast to show
-/// the resulting file size without round-tripping through tauri-plugin-fs scope.
+/// CORS preflight handler. Browsers send OPTIONS with `Access-Control-Request-*`
+/// headers before media element fetches that have a non-simple Origin/cred
+/// configuration. Respond with permissive headers (token + Host already gate
+/// real access).
+async fn serve_options() -> Response {
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header("access-control-allow-origin", "*")
+        .header("access-control-allow-methods", "GET, OPTIONS")
+        .header("access-control-allow-headers", "Range, Content-Type")
+        .header("access-control-max-age", "86400")
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Return the size of a file in bytes. Used by the post-export toast.
 #[tauri::command]
 fn file_size(path: String) -> Result<u64, String> {
     std::fs::metadata(&path)
         .map(|m| m.len())
         .map_err(|e| format!("file_size {}: {}", path, e))
+}
+
+/// Sum the bytes used by every cached proxy/remux/waveform/project file.
+#[tauri::command]
+fn cache_size(app: AppHandle) -> Result<u64, String> {
+    let dir = match app.path().app_data_dir() {
+        Ok(d) => d.join("proxies"),
+        Err(_) => return Ok(0),
+    };
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut total: u64 = 0;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    total = total.saturating_add(meta.len());
+                }
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Wipe every file in the cache directory. Returns bytes freed.
+#[tauri::command]
+fn clear_cache(app: AppHandle) -> Result<u64, String> {
+    let dir = match app.path().app_data_dir() {
+        Ok(d) => d.join("proxies"),
+        Err(_) => return Ok(0),
+    };
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut freed: u64 = 0;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    let n = meta.len();
+                    if std::fs::remove_file(entry.path()).is_ok() {
+                        freed = freed.saturating_add(n);
+                    }
+                }
+            }
+        }
+    }
+    Ok(freed)
+}
+
+/// Auto-prune cache files that haven't been touched in `days` days. Runs on
+/// app start in a background thread so a slow disk doesn't block startup.
+fn prune_old_cache(dir: PathBuf, days: u64) {
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(days * 24 * 60 * 60));
+    let Some(cutoff) = cutoff else { return; };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return; };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue; };
+        if !meta.is_file() {
+            continue;
+        }
+        // Use mtime; access-time tracking is often disabled on Windows.
+        let touched = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if touched < cutoff {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// File path passed on the command line (Windows "Open with" or drag-on-exe
+/// invokes us as `Clippy.exe "C:\path\video.mp4"`). Parsed once at startup,
+/// then taken (cleared) by the frontend on first mount.
+struct InitialPath(Mutex<Option<String>>);
+
+fn parse_initial_path() -> Option<String> {
+    const VIDEO_EXTS: &[&str] = &["mp4", "mkv", "mov", "webm", "m4v", "avi"];
+    for arg in std::env::args().skip(1) {
+        if arg.starts_with('-') {
+            continue;
+        }
+        let lower = arg.to_lowercase();
+        let ext_ok = VIDEO_EXTS
+            .iter()
+            .any(|e| lower.ends_with(&format!(".{}", e)));
+        if ext_ok && std::path::Path::new(&arg).is_file() {
+            return Some(arg);
+        }
+    }
+    None
+}
+
+#[tauri::command]
+fn get_initial_path(state: State<'_, InitialPath>) -> Option<String> {
+    state.0.lock().ok().and_then(|mut g| g.take())
 }
 
 /// Open the OS file manager with the given file selected. Windows-specific:
@@ -320,6 +446,251 @@ fn encoder_args(encoder: &str) -> Vec<&'static str> {
     }
 }
 
+/// High-quality re-encode (visually lossless-ish). Used for crop+no-limit
+/// exports where the user expects the cropped output to look the same as the
+/// original frame. CQ/CRF ~20 is the conventional "indistinguishable from
+/// source" setting at typical screen-recording bitrates.
+fn encoder_args_high_quality(encoder: &str) -> Vec<&'static str> {
+    match encoder {
+        "h264_nvenc" => vec![
+            "-c:v", "h264_nvenc",
+            "-preset", "p5",
+            "-rc", "vbr",
+            "-cq", "20",
+            "-b:v", "0",
+        ],
+        "h264_amf" => vec![
+            "-c:v", "h264_amf",
+            "-quality", "balanced",
+            "-rc", "cqp",
+            "-qp_i", "20",
+            "-qp_p", "20",
+        ],
+        "h264_qsv" => vec![
+            "-c:v", "h264_qsv",
+            "-preset", "medium",
+            "-global_quality", "20",
+        ],
+        _ => vec![
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "20",
+        ],
+    }
+}
+
+/// Source-pixel crop rectangle. Frontend supplies these in source coordinates;
+/// backend just feeds them to the ffmpeg `crop` filter.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+struct Crop {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+impl Crop {
+    fn to_filter(self) -> String {
+        format!("crop={}:{}:{}:{}", self.w, self.h, self.x, self.y)
+    }
+}
+
+/// Per-region export descriptor for the concat commands. Each region carries
+/// its own optional crop + speed + audio mix, applied in stage 1 (cut).
+/// Normalize is a per-export setting handled at the concat level.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct RegionExport {
+    in_secs: f64,
+    out_secs: f64,
+    crop: Option<Crop>,
+    speed: Option<f64>,
+    /// Per-region audio mix override (track gains). When None, the function-
+    /// level track_mix is used as the fallback for this region.
+    #[serde(default)]
+    mix: Option<Vec<TrackGain>>,
+}
+
+impl RegionExport {
+    /// Effective duration after speed change. Used for progress + size math.
+    fn effective_duration(&self) -> f64 {
+        let raw = (self.out_secs - self.in_secs).max(0.0);
+        let s = self.speed.unwrap_or(1.0);
+        if s <= 0.0 { raw } else { raw / s }
+    }
+}
+
+/// `atempo` only supports 0.5..2.0 per filter instance. Chain multiple to
+/// reach the requested speed (0.25 → 0.5,0.5; 4.0 → 2.0,2.0).
+fn atempo_chain(speed: f64) -> String {
+    if (speed - 1.0).abs() < 1e-6 {
+        return "atempo=1.0".to_string();
+    }
+    let mut s = speed.max(0.0001);
+    let mut parts: Vec<String> = Vec::new();
+    while s < 0.5 {
+        parts.push("atempo=0.5".to_string());
+        s *= 2.0;
+    }
+    while s > 2.0 {
+        parts.push("atempo=2.0".to_string());
+        s /= 2.0;
+    }
+    parts.push(format!("atempo={:.4}", s));
+    parts.join(",")
+}
+
+/// loudnorm target chosen to match conversational/streaming loudness (≈ -16
+/// LUFS, -1.5 dBTP). Single-pass; not as precise as 2-pass but plenty for
+/// "make it actually audible on Discord".
+const LOUDNORM_FILTER: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
+
+/// Per-track gain in the user's audio mix. `volume` is a linear multiplier:
+/// 0.0 = muted, 1.0 = source level, 2.0 = +6 dB. Exports drop tracks whose
+/// effective volume rounds to zero, so muting a track is free.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+struct TrackGain {
+    index: u32,
+    volume: f64,
+}
+
+// (build_track_mix_filter removed — its logic now lives inline inside
+// build_audio_filter_complex below for cleaner composition with the
+// post-mix audio filter chain.)
+
+/// Build the `-vf` chain (crop + speed). Returns "" when there's nothing to do.
+fn build_video_filter(crop: Option<Crop>, speed: Option<f64>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(c) = crop {
+        parts.push(c.to_filter());
+    }
+    if let Some(s) = speed {
+        if (s - 1.0).abs() > 1e-6 && s > 0.0 {
+            parts.push(format!("setpts={:.6}*PTS", 1.0 / s));
+        }
+    }
+    parts.join(",")
+}
+
+/// Build the audio post-mix filter chain (speed atempo + normalize loudnorm).
+/// Applied AFTER track mixing, so the user's volume sliders drive the input
+/// to loudnorm rather than fighting it.
+fn build_audio_post_mix_filters(speed: Option<f64>, normalize: bool) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(s) = speed {
+        if (s - 1.0).abs() > 1e-6 && s > 0.0 {
+            parts.push(atempo_chain(s));
+        }
+    }
+    if normalize {
+        parts.push(LOUDNORM_FILTER.to_string());
+    }
+    parts.join(",")
+}
+
+/// Compose the audio half of `-filter_complex` from a track mix + post-mix
+/// filters. Returns `(Some(graph), "[aout]")` when audio needs processing or
+/// `(None, "0:a:0?")` when caller can use the source's first audio track
+/// straight through (the existing fast-path).
+///
+/// `total_tracks` validates indices coming from the frontend.
+fn build_audio_filter_complex(
+    track_mix: &[TrackGain],
+    total_tracks: usize,
+    post_mix_filters: &str,
+) -> (Option<String>, String) {
+    // A "default mix" is empty OR exactly one entry per source track at unity
+    // gain — same as just using the source audio.
+    let is_default_mix = track_mix.is_empty()
+        || (track_mix.len() == total_tracks
+            && track_mix.iter().all(|t| (t.volume - 1.0).abs() < 1e-6));
+    if is_default_mix && post_mix_filters.is_empty() {
+        return (None, "0:a:0?".to_string());
+    }
+
+    // Active tracks: present in mix AND non-zero gain. Muted = simply omitted.
+    let active: Vec<&TrackGain> = track_mix
+        .iter()
+        .filter(|t| t.volume > 0.001 && (t.index as usize) < total_tracks)
+        .collect();
+
+    // The final output label depends on whether post-mix filters are coming.
+    // Skip an unnecessary anull step by writing the mix output directly to
+    // [aout] when there are no post-mix filters.
+    let mix_output = if post_mix_filters.is_empty() { "[aout]" } else { "[m]" };
+
+    let mut parts: Vec<String> = Vec::new();
+    let mix_tag: String = if is_default_mix {
+        // Tracks unchanged but post-mix filters exist (e.g. just normalize).
+        "[0:a:0]".to_string()
+    } else if active.is_empty() {
+        // All muted — synthesize silence so the muxer still has an audio track.
+        parts.push(format!(
+            "anullsrc=channel_layout=stereo:sample_rate=48000{}",
+            mix_output
+        ));
+        mix_output.to_string()
+    } else if active.len() == 1 {
+        let t = active[0];
+        parts.push(format!(
+            "[0:a:{}]volume={:.4}{}",
+            t.index, t.volume, mix_output
+        ));
+        mix_output.to_string()
+    } else {
+        let mut tags = Vec::new();
+        for t in &active {
+            let tag = format!("a{}", t.index);
+            parts.push(format!("[0:a:{}]volume={:.4}[{}]", t.index, t.volume, tag));
+            tags.push(format!("[{}]", tag));
+        }
+        parts.push(format!(
+            "{}amix=inputs={}:duration=longest:dropout_transition=0:normalize=0{}",
+            tags.join(""),
+            active.len(),
+            mix_output
+        ));
+        mix_output.to_string()
+    };
+
+    if !post_mix_filters.is_empty() {
+        parts.push(format!("{}{}[aout]", mix_tag, post_mix_filters));
+    }
+
+    (Some(parts.join(";")), "[aout]".to_string())
+}
+
+/// Returns true if any filter in the export forces a video re-encode. Crop
+/// and speed change pixels/timestamps; normalize alone only touches audio.
+fn forces_video_reencode(crop: Option<Crop>, speed: Option<f64>) -> bool {
+    if crop.is_some() {
+        return true;
+    }
+    if let Some(s) = speed {
+        if (s - 1.0).abs() > 1e-6 {
+            return true;
+        }
+    }
+    false
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct AudioTrack {
+    /// Stream index *within the audio streams only* (0 = first audio track).
+    /// This is what ffmpeg's `0:a:N` selector wants, NOT the absolute stream
+    /// index, which differs across containers.
+    index: usize,
+    codec: String,
+    channels: u32,
+    /// Channel layout string from ffprobe (e.g. "stereo", "5.1"). Optional —
+    /// some containers don't report it.
+    layout: Option<String>,
+    /// Title from stream metadata. SteelSeries Sonar / OBS often set this to
+    /// "Game" / "Mic" / "Discord" etc; we surface it verbatim. None → fall
+    /// back to "Track N+1" in the UI.
+    title: Option<String>,
+    language: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct VideoInfo {
     duration_secs: f64,
@@ -327,7 +698,10 @@ struct VideoInfo {
     height: u32,
     fps: f64,
     video_codec: String,
+    /// First audio codec (kept for back-compat). Use `audio_tracks` for the
+    /// full list when handling multi-track sources.
     audio_codec: Option<String>,
+    audio_tracks: Vec<AudioTrack>,
     container: String,
     bit_rate_bps: Option<u64>,
 }
@@ -394,9 +768,36 @@ async fn probe_video_inner(app: &AppHandle, path: &str) -> Result<VideoInfo, Str
         .iter()
         .find(|s| s.get("codec_type").and_then(|v| v.as_str()) == Some("video"))
         .ok_or("no video stream")?;
-    let audio_stream = streams
-        .iter()
-        .find(|s| s.get("codec_type").and_then(|v| v.as_str()) == Some("audio"));
+
+    // Walk every audio stream and build the per-track list. Index here is
+    // a-stream-relative (0..N), matching ffmpeg's `0:a:N` selector.
+    let mut audio_tracks: Vec<AudioTrack> = Vec::new();
+    for s in streams.iter() {
+        if s.get("codec_type").and_then(|v| v.as_str()) != Some("audio") {
+            continue;
+        }
+        let idx = audio_tracks.len();
+        let codec = s.get("codec_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let channels = s.get("channels").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let layout = s.get("channel_layout").and_then(|v| v.as_str()).map(String::from);
+        let tags = s.get("tags");
+        let title = tags
+            .and_then(|t| t.get("title"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let language = tags
+            .and_then(|t| t.get("language"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        audio_tracks.push(AudioTrack {
+            index: idx,
+            codec,
+            channels,
+            layout,
+            title,
+            language,
+        });
+    }
 
     let width = video_stream
         .get("width")
@@ -416,11 +817,7 @@ async fn probe_video_inner(app: &AppHandle, path: &str) -> Result<VideoInfo, Str
         .and_then(|v| v.as_str())
         .unwrap_or("0/1");
     let fps = parse_rate(r_frame_rate);
-    let audio_codec = audio_stream.and_then(|s| {
-        s.get("codec_name")
-            .and_then(|v| v.as_str())
-            .map(|x| x.to_string())
-    });
+    let audio_codec = audio_tracks.first().map(|t| t.codec.clone());
 
     Ok(VideoInfo {
         duration_secs,
@@ -429,6 +826,7 @@ async fn probe_video_inner(app: &AppHandle, path: &str) -> Result<VideoInfo, Str
         fps,
         video_codec,
         audio_codec,
+        audio_tracks,
         container,
         bit_rate_bps,
     })
@@ -674,9 +1072,11 @@ async fn run_remux_pass(
 async fn generate_proxy(
     app: AppHandle,
     path: String,
-    duration_secs: f64,
+    info: VideoInfo,
 ) -> Result<ProxyResult, String> {
-    let info = probe_video_inner(&app, &path).await?;
+    // Caller has already probed; reuse the result so we don't pay another
+    // ffprobe spawn (~300-500 ms on big MKVs).
+    let duration_secs = info.duration_secs;
     let strategy = classify_strategy(&info);
     let start = std::time::Instant::now();
 
@@ -793,14 +1193,22 @@ async fn encode_fallback(
 
 const WAVEFORM_BINS: usize = 4000;
 
-/// Extract a peak-amplitude waveform from the source audio. Returns a vector of
-/// WAVEFORM_BINS f32 values in [0, 1] where each bin is the max sample magnitude
-/// over its slice of the timeline. Cached on disk per source-file fingerprint.
+/// Extract a peak-amplitude waveform from one audio track. Returns a vector
+/// of WAVEFORM_BINS f32 values in [0, 1] where each bin is the max sample
+/// magnitude over its slice of the timeline. Cached per (source, track) on
+/// disk so reopening the file is instant.
 #[tauri::command]
-async fn extract_waveform(app: AppHandle, path: String) -> Result<Vec<f32>, String> {
-    // Cache check
+async fn extract_waveform(
+    app: AppHandle,
+    path: String,
+    info: VideoInfo,
+    track_index: Option<u32>,
+) -> Result<Vec<f32>, String> {
+    let track_idx = track_index.unwrap_or(0);
     let key = proxy_cache_key(&path)?;
-    let cache_path = proxy_dir(&app)?.join(format!("{}.wave.f32", &key[..16]));
+    // Track-indexed cache name. Single-track sources end up with .wave-0.f32
+    // (was .wave.f32 in v1; old caches will simply re-extract once).
+    let cache_path = proxy_dir(&app)?.join(format!("{}.wave-{}.f32", &key[..16], track_idx));
     if cache_path.exists() {
         if let Ok(bytes) = std::fs::read(&cache_path) {
             if bytes.len() == WAVEFORM_BINS * 4 {
@@ -816,13 +1224,14 @@ async fn extract_waveform(app: AppHandle, path: String) -> Result<Vec<f32>, Stri
         }
     }
 
-    // Probe to know if there's audio at all and the duration.
-    let info = probe_video_inner(&app, &path).await?;
-    if info.audio_codec.is_none() || info.duration_secs <= 0.0 {
+    if info.audio_tracks.is_empty()
+        || (track_idx as usize) >= info.audio_tracks.len()
+        || info.duration_secs <= 0.0
+    {
         return Ok(vec![0.0; WAVEFORM_BINS]);
     }
 
-    // Stream raw mono 8kHz s16le PCM from ffmpeg's stdout.
+    // Stream raw mono 8kHz s16le PCM from ffmpeg's stdout for the target track.
     let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
     let (mut rx, _child) = sidecar
         .args([
@@ -830,6 +1239,7 @@ async fn extract_waveform(app: AppHandle, path: String) -> Result<Vec<f32>, Stri
             "-hide_banner",
             "-loglevel", "error",
             "-i", &path,
+            "-map", &format!("0:a:{}?", track_idx),
             "-vn",
             "-ac", "1",
             "-ar", "8000",
@@ -839,11 +1249,54 @@ async fn extract_waveform(app: AppHandle, path: String) -> Result<Vec<f32>, Stri
         .spawn()
         .map_err(|e| e.to_string())?;
 
-    let mut pcm: Vec<u8> = Vec::with_capacity((info.duration_secs * 8000.0 * 2.0) as usize + 1024);
+    // Stream-compute peaks per bin without buffering all PCM. A 60-min source
+    // at 8 kHz mono s16 would otherwise hold ~57 MB in RAM.
+    let total_expected_samples = (info.duration_secs * 8000.0).max(1.0);
+    let mut bins = vec![0.0f32; WAVEFORM_BINS];
+    let mut leftover: Option<u8> = None;
+    let mut samples_seen: u64 = 0;
+    let mut current_bin: usize = 0;
+    let mut current_max: f32 = 0.0;
     let mut stderr_buf = String::new();
+
     while let Some(event) = rx.recv().await {
         match event {
-            CommandEvent::Stdout(bytes) => pcm.extend_from_slice(&bytes),
+            CommandEvent::Stdout(bytes) => {
+                let len = bytes.len();
+                let mut idx = 0;
+                while idx < len {
+                    let (lo, hi) = if let Some(prev) = leftover.take() {
+                        let h = bytes[idx];
+                        idx += 1;
+                        (prev, h)
+                    } else if idx + 1 >= len {
+                        leftover = Some(bytes[idx]);
+                        break;
+                    } else {
+                        let l = bytes[idx];
+                        let h = bytes[idx + 1];
+                        idx += 2;
+                        (l, h)
+                    };
+                    let sample = i16::from_le_bytes([lo, hi]);
+                    let amp = (sample.unsigned_abs() as f32) / 32768.0;
+                    let bin_idx = (((samples_seen as f64) * (WAVEFORM_BINS as f64))
+                        / total_expected_samples)
+                        .floor() as usize;
+                    let bin_idx = bin_idx.min(WAVEFORM_BINS - 1);
+                    if bin_idx != current_bin {
+                        if current_max > bins[current_bin] {
+                            bins[current_bin] = current_max;
+                        }
+                        current_bin = bin_idx;
+                        current_max = 0.0;
+                    }
+                    if amp > current_max {
+                        current_max = amp;
+                    }
+                    samples_seen += 1;
+                }
+            }
             CommandEvent::Stderr(bytes) => {
                 stderr_buf.push_str(&String::from_utf8_lossy(&bytes));
             }
@@ -859,30 +1312,9 @@ async fn extract_waveform(app: AppHandle, path: String) -> Result<Vec<f32>, Stri
             _ => {}
         }
     }
-
-    let n_samples = pcm.len() / 2;
-    let mut bins = vec![0.0f32; WAVEFORM_BINS];
-    if n_samples > 0 {
-        let samples_per_bin = (n_samples as f64) / (WAVEFORM_BINS as f64);
-        for bin_idx in 0..WAVEFORM_BINS {
-            let start = (bin_idx as f64 * samples_per_bin).floor() as usize;
-            let end = (((bin_idx + 1) as f64) * samples_per_bin).ceil() as usize;
-            let end = end.min(n_samples);
-            if start >= end {
-                continue;
-            }
-            let mut max_amp: f32 = 0.0;
-            for i in start..end {
-                let lo = pcm[i * 2];
-                let hi = pcm[i * 2 + 1];
-                let sample = i16::from_le_bytes([lo, hi]);
-                let amp = (sample.unsigned_abs() as f32) / 32768.0;
-                if amp > max_amp {
-                    max_amp = amp;
-                }
-            }
-            bins[bin_idx] = max_amp;
-        }
+    // Flush the final in-progress bin.
+    if current_max > bins[current_bin] {
+        bins[current_bin] = current_max;
     }
 
     // Cache
@@ -981,13 +1413,27 @@ async fn export_clip_sized(
     out_secs: f64,
     output_path: String,
     target_size_mb: f64,
+    crop: Option<Crop>,
+    speed: Option<f64>,
+    normalize: Option<bool>,
+    track_mix: Option<Vec<TrackGain>>,
+    total_audio_tracks: Option<u32>,
 ) -> Result<(), String> {
     let duration = (out_secs - in_secs).max(0.0);
     if duration < 0.05 {
         return Err("selection too short".into());
     }
-    let video_bps = target_video_bitrate_bps(target_size_mb, duration);
+    let normalize = normalize.unwrap_or(false);
+    let mix = track_mix.unwrap_or_default();
+    let total_tracks = total_audio_tracks.unwrap_or(1) as usize;
+    // Effective output duration drives the bitrate calc — a 4× speed clip is a
+    // quarter as long, so the same byte budget gives 4× the per-second bitrate.
+    let effective_dur = duration / speed.unwrap_or(1.0).max(0.0001);
+    let video_bps = target_video_bitrate_bps(target_size_mb, effective_dur);
     let video_kbps = video_bps / 1000;
+    let vf = build_video_filter(crop, speed);
+    let post_filters = build_audio_post_mix_filters(speed, normalize);
+    let (audio_fc, audio_map) = build_audio_filter_complex(&mix, total_tracks, &post_filters);
 
     let chain = encoder_chain(&app).await;
     let mut last_err = String::from("no encoders available");
@@ -1000,8 +1446,14 @@ async fn export_clip_sized(
             "-to".into(), format!("{:.6}", out_secs),
             "-i".into(), src_path.clone(),
             "-map".into(), "0:v:0?".into(),
-            "-map".into(), "0:a:0?".into(),
+            "-map".into(), audio_map.clone(),
         ];
+        if !vf.is_empty() {
+            args.push("-vf".into()); args.push(vf.clone());
+        }
+        if let Some(fc) = &audio_fc {
+            args.push("-filter_complex".into()); args.push(fc.clone());
+        }
         args.extend(encoder_args_sized(enc, video_kbps));
         args.extend([
             "-c:a".into(), "aac".into(),
@@ -1010,7 +1462,7 @@ async fn export_clip_sized(
             "-map_chapters".into(), "-1".into(),
             output_path.clone(),
         ]);
-        match run_ffmpeg_with_progress(&app, args, duration, "export:progress").await {
+        match run_ffmpeg_with_progress(&app, args, effective_dur, "export:progress").await {
             Ok(()) => {
                 *WORKING_ENCODER.lock().unwrap() = Some(*enc);
                 return Ok(());
@@ -1031,19 +1483,41 @@ async fn export_clip_sized(
 async fn export_concat_sized(
     app: AppHandle,
     src_path: String,
-    regions: Vec<(f64, f64)>,
+    regions: Vec<RegionExport>,
     output_path: String,
     target_size_mb: f64,
+    normalize: Option<bool>,
+    track_mix: Option<Vec<TrackGain>>,
+    total_audio_tracks: Option<u32>,
 ) -> Result<(), String> {
     if regions.is_empty() {
         return Err("no regions to concat".into());
     }
-    let total_duration: f64 = regions.iter().map(|(a, b)| (b - a).max(0.0)).sum();
+    let normalize = normalize.unwrap_or(false);
+    let mix = track_mix.unwrap_or_default();
+    let total_tracks = total_audio_tracks.unwrap_or(1) as usize;
+    // Sized export is single-pass concat-demuxer + encoder, so per-region
+    // filters aren't supported. Frontend should gate this, but verify.
+    let first = regions[0].clone();
+    for (i, r) in regions.iter().enumerate().skip(1) {
+        if r.crop != first.crop || r.speed != first.speed || r.mix != first.mix {
+            return Err(format!(
+                "size-targeted stitched export needs uniform crop, speed, and audio mix across regions (region {} differs)",
+                i + 1
+            ));
+        }
+    }
+    let total_duration: f64 = regions.iter().map(|r| r.effective_duration()).sum();
     if total_duration < 0.05 {
         return Err("total duration too short".into());
     }
     let video_bps = target_video_bitrate_bps(target_size_mb, total_duration);
     let video_kbps = video_bps / 1000;
+    let vf = build_video_filter(first.crop, first.speed);
+    let post_filters = build_audio_post_mix_filters(first.speed, normalize);
+    // Per-region mix wins; falls back to function-level mix.
+    let active_mix: &[TrackGain] = first.mix.as_deref().unwrap_or(&mix);
+    let (audio_fc, audio_map) = build_audio_filter_complex(active_mix, total_tracks, &post_filters);
 
     // Write a concat list (forward slashes + escaped quotes for ffmpeg).
     let temp_dir = std::env::temp_dir().join("clippy");
@@ -1056,10 +1530,10 @@ async fn export_concat_sized(
     let normalized = src_path.replace('\\', "/");
     let escaped = normalized.replace('\'', "'\\''");
     let mut content = String::new();
-    for (in_t, out_t) in &regions {
+    for r in &regions {
         content.push_str(&format!("file '{}'\n", escaped));
-        content.push_str(&format!("inpoint {:.6}\n", in_t));
-        content.push_str(&format!("outpoint {:.6}\n", out_t));
+        content.push_str(&format!("inpoint {:.6}\n", r.in_secs));
+        content.push_str(&format!("outpoint {:.6}\n", r.out_secs));
     }
     std::fs::write(&list_file, &content).map_err(|e| e.to_string())?;
     let list_str = list_file.to_string_lossy().to_string();
@@ -1075,9 +1549,15 @@ async fn export_concat_sized(
             "-safe".into(), "0".into(),
             "-i".into(), list_str.clone(),
             "-map".into(), "0:v:0?".into(),
-            "-map".into(), "0:a:0?".into(),
+            "-map".into(), audio_map.clone(),
             "-fflags".into(), "+genpts".into(),
         ];
+        if !vf.is_empty() {
+            args.push("-vf".into()); args.push(vf.clone());
+        }
+        if let Some(fc) = &audio_fc {
+            args.push("-filter_complex".into()); args.push(fc.clone());
+        }
         args.extend(encoder_args_sized(enc, video_kbps));
         args.extend([
             "-c:a".into(), "aac".into(),
@@ -1103,47 +1583,123 @@ async fn export_concat_sized(
     Err(last_err)
 }
 
-/// Concatenate N regions from the same source into a single output file via
-/// the concat demuxer with stream-copy. Boundaries snap to source keyframes
-/// (~1s with OBS keyframe=1). No re-encode, ~constant time regardless of total
-/// region length.
-#[tauri::command]
-async fn export_concat(
-    app: AppHandle,
-    src_path: String,
-    regions: Vec<(f64, f64)>,
-    output_path: String,
+/// Cut a single region (with its own crop + speed + the export-wide track mix)
+/// into `out_path`. Three paths from fastest to slowest:
+///   * pure stream-copy (no filters at all)
+///   * audio-only re-encode (track mix only, video stream-copies)
+///   * full re-encode (crop/speed + maybe audio mix)
+/// Audio normalize is per-export and applied at the concat stage, never here.
+async fn cut_segment(
+    app: &AppHandle,
+    src_path: &str,
+    region: RegionExport,
+    out_path: &str,
+    track_mix: &[TrackGain],
+    total_audio_tracks: usize,
 ) -> Result<(), String> {
-    if regions.is_empty() {
-        return Err("no regions to concat".into());
-    }
-    let total_duration: f64 = regions
-        .iter()
-        .map(|(a, b)| (b - a).max(0.0))
-        .sum();
-    if total_duration < 0.05 {
-        return Err("total duration is too short to export".into());
+    let post_filters = build_audio_post_mix_filters(region.speed, false);
+    // Per-region mix override wins; fall back to the export-wide mix.
+    let active_mix: &[TrackGain] = region.mix.as_deref().unwrap_or(track_mix);
+    let (audio_fc, audio_map) =
+        build_audio_filter_complex(active_mix, total_audio_tracks, &post_filters);
+    let needs_video_reencode = forces_video_reencode(region.crop, region.speed);
+    let needs_audio_reencode = audio_fc.is_some();
+
+    if needs_video_reencode {
+        let vf = build_video_filter(region.crop, region.speed);
+        let chain = encoder_chain(app).await;
+        let mut last_err = String::from("no encoders available");
+        for enc in chain.iter() {
+            let mut args: Vec<String> = vec![
+                "-y".into(), "-hide_banner".into(),
+                "-loglevel".into(), "error".into(),
+                "-ss".into(), format!("{:.6}", region.in_secs),
+                "-to".into(), format!("{:.6}", region.out_secs),
+                "-i".into(), src_path.into(),
+                "-map".into(), "0:v:0?".into(),
+                "-map".into(), audio_map.clone(),
+            ];
+            if !vf.is_empty() {
+                args.push("-vf".into()); args.push(vf.clone());
+            }
+            if let Some(fc) = &audio_fc {
+                args.push("-filter_complex".into()); args.push(fc.clone());
+            }
+            args.extend(encoder_args_high_quality(enc).into_iter().map(String::from));
+            args.extend([
+                "-c:a".into(), "aac".into(),
+                "-b:a".into(), "160k".into(),
+                "-map_chapters".into(), "-1".into(),
+                out_path.into(),
+            ]);
+            let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
+            let (mut rx, _child) = sidecar.args(args).spawn().map_err(|e| e.to_string())?;
+            let mut stderr_buf = String::new();
+            let mut ok = false;
+            while let Some(event) = rx.recv().await {
+                match event {
+                    CommandEvent::Stderr(b) => stderr_buf.push_str(&String::from_utf8_lossy(&b)),
+                    CommandEvent::Terminated(payload) => {
+                        if payload.code == Some(0) { ok = true; }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if ok {
+                *WORKING_ENCODER.lock().unwrap() = Some(*enc);
+                return Ok(());
+            }
+            eprintln!("[clippy] crop/speed cut {} failed: {}", enc, stderr_buf);
+            let _ = std::fs::remove_file(out_path);
+            last_err = stderr_buf;
+        }
+        return Err(last_err);
     }
 
-    // Write a temporary concat list file. Use forward slashes for FFmpeg parser
-    // friendliness, and escape single quotes per the concat demuxer's grammar.
-    let temp_dir = std::env::temp_dir().join("clippy");
-    std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let list_file = temp_dir.join(format!("concat-{}.txt", stamp));
-    let normalized = src_path.replace('\\', "/");
-    let escaped = normalized.replace('\'', "'\\''");
-    let mut content = String::new();
-    for (in_t, out_t) in &regions {
-        content.push_str(&format!("file '{}'\n", escaped));
-        content.push_str(&format!("inpoint {:.6}\n", in_t));
-        content.push_str(&format!("outpoint {:.6}\n", out_t));
+    if needs_audio_reencode {
+        // Track mix changed but no crop/speed — video stream-copies, audio
+        // gets the filter_complex treatment. Same speed as a normalize-only export.
+        let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
+        let mut args: Vec<String> = vec![
+            "-y".into(), "-hide_banner".into(),
+            "-loglevel".into(), "error".into(),
+            "-ss".into(), format!("{:.6}", region.in_secs),
+            "-to".into(), format!("{:.6}", region.out_secs),
+            "-i".into(), src_path.into(),
+            "-map".into(), "0:v:0?".into(),
+            "-map".into(), audio_map.clone(),
+            "-c:v".into(), "copy".into(),
+        ];
+        if let Some(fc) = &audio_fc {
+            args.push("-filter_complex".into()); args.push(fc.clone());
+        }
+        args.extend([
+            "-c:a".into(), "aac".into(),
+            "-b:a".into(), "160k".into(),
+            "-avoid_negative_ts".into(), "make_zero".into(),
+            "-map_chapters".into(), "-1".into(),
+            out_path.into(),
+        ]);
+        let (mut rx, _child) = sidecar.args(args).spawn().map_err(|e| e.to_string())?;
+        let mut stderr_buf = String::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stderr(b) => stderr_buf.push_str(&String::from_utf8_lossy(&b)),
+                CommandEvent::Terminated(payload) => {
+                    if payload.code != Some(0) {
+                        return Err(format!(
+                            "segment cut (audio mix) exited with code {:?}: {}",
+                            payload.code, stderr_buf
+                        ));
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+        return Ok(());
     }
-    std::fs::write(&list_file, &content).map_err(|e| e.to_string())?;
-    let list_str = list_file.to_string_lossy().to_string();
 
     let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
     let (mut rx, _child) = sidecar
@@ -1151,22 +1707,171 @@ async fn export_concat(
             "-y",
             "-hide_banner",
             "-loglevel", "error",
-            "-progress", "pipe:1",
-            "-nostats",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", &list_str,
+            "-ss", &format!("{:.6}", region.in_secs),
+            "-to", &format!("{:.6}", region.out_secs),
+            "-i", src_path,
             "-map", "0:v:0?",
             "-map", "0:a:0?",
             "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
             "-map_chapters", "-1",
-            "-fflags", "+genpts",
-            &output_path,
+            out_path,
         ])
         .spawn()
         .map_err(|e| e.to_string())?;
+    let mut stderr_buf = String::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stderr(b) => stderr_buf.push_str(&String::from_utf8_lossy(&b)),
+            CommandEvent::Terminated(payload) => {
+                if payload.code != Some(0) {
+                    return Err(format!(
+                        "segment cut exited with code {:?}: {}",
+                        payload.code, stderr_buf
+                    ));
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
 
+/// Concatenate N regions from the same source into a single output file.
+///
+/// Two-stage stream-copy: cut each region into a clean intermediate MP4 first
+/// (keyframe-aligned input seek, self-contained file), then concat the
+/// intermediates with `-c copy`. Earlier versions fed `inpoint`/`outpoint` of
+/// the same source straight into the concat demuxer, which left mid-GOP frags
+/// at boundaries and caused frozen video while audio continued. Boundaries
+/// still snap to source keyframes (~1 s with OBS keyframe=1). No re-encode.
+#[tauri::command]
+async fn export_concat(
+    app: AppHandle,
+    src_path: String,
+    regions: Vec<RegionExport>,
+    output_path: String,
+    normalize: Option<bool>,
+    track_mix: Option<Vec<TrackGain>>,
+    total_audio_tracks: Option<u32>,
+) -> Result<(), String> {
+    if regions.is_empty() {
+        return Err("no regions to concat".into());
+    }
+    let normalize = normalize.unwrap_or(false);
+    let mix = track_mix.unwrap_or_default();
+    let total_tracks = total_audio_tracks.unwrap_or(1) as usize;
+    let mix_active = !mix.is_empty()
+        && !(mix.len() == total_tracks && mix.iter().all(|t| (t.volume - 1.0).abs() < 1e-6));
+    // Sum of post-speed durations — what the final output will actually be.
+    let total_duration: f64 = regions.iter().map(|r| r.effective_duration()).sum();
+    if total_duration < 0.05 {
+        return Err("total duration is too short to export".into());
+    }
+    // Stage 1 dominates wall-clock when any region needs re-encode (crop/speed).
+    let any_reencode = regions.iter().any(|r| forces_video_reencode(r.crop, r.speed));
+
+    let temp_dir = std::env::temp_dir().join("clippy");
+    std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    let cleanup = |segs: &[PathBuf], list: Option<&PathBuf>| {
+        for s in segs {
+            let _ = std::fs::remove_file(s);
+        }
+        if let Some(l) = list {
+            let _ = std::fs::remove_file(l);
+        }
+    };
+
+    // Stage 1: cut each region into its own clean MP4 intermediate. Per-region
+    // crop + speed are applied here; segments may have different dimensions if
+    // crops differ — the frontend gates that case for stitched mode.
     let start = std::time::Instant::now();
+    let mut temp_segments: Vec<PathBuf> = Vec::with_capacity(regions.len());
+    let mut produced_secs: f64 = 0.0;
+    for (idx, region) in regions.iter().enumerate() {
+        let seg_path = temp_dir.join(format!("seg-{}-{}.mp4", stamp, idx));
+        let seg_str = seg_path.to_string_lossy().to_string();
+        if let Err(e) = cut_segment(&app, &src_path, region.clone(), &seg_str, &mix, total_tracks).await {
+            cleanup(&temp_segments, None);
+            return Err(format!("region {} cut failed: {}", idx + 1, e));
+        }
+        temp_segments.push(seg_path);
+        produced_secs += region.effective_duration();
+        // With re-encodes (video filter or audio mix), stage 1 dominates.
+        let stage1_share = if any_reencode || mix_active { 0.85 } else { 0.4 };
+        let progress = (produced_secs / total_duration * stage1_share).clamp(0.0, stage1_share);
+        let _ = app.emit(
+            "export:progress",
+            ExportProgress {
+                progress,
+                elapsed_secs: start.elapsed().as_secs_f64(),
+            },
+        );
+    }
+
+    // Stage 2: concat the intermediates with stream copy. They're all from the
+    // same source, so codec/timescale match — the demuxer just glues them.
+    let list_file = temp_dir.join(format!("concat-{}.txt", stamp));
+    let mut content = String::new();
+    for seg in &temp_segments {
+        let normalized = seg.to_string_lossy().replace('\\', "/");
+        let escaped = normalized.replace('\'', "'\\''");
+        content.push_str(&format!("file '{}'\n", escaped));
+    }
+    if let Err(e) = std::fs::write(&list_file, &content) {
+        cleanup(&temp_segments, None);
+        return Err(e.to_string());
+    }
+    let list_str = list_file.to_string_lossy().to_string();
+
+    let sidecar = match app.shell().sidecar("ffmpeg") {
+        Ok(s) => s,
+        Err(e) => {
+            cleanup(&temp_segments, Some(&list_file));
+            return Err(e.to_string());
+        }
+    };
+    // Normalize forces an audio re-encode at concat time (filter incompatible
+    // with -c copy on the audio stream). Video can still stream-copy.
+    let mut concat_args: Vec<String> = vec![
+        "-y".into(), "-hide_banner".into(),
+        "-loglevel".into(), "error".into(),
+        "-progress".into(), "pipe:1".into(), "-nostats".into(),
+        "-f".into(), "concat".into(),
+        "-safe".into(), "0".into(),
+        "-i".into(), list_str.clone(),
+        "-map".into(), "0:v:0?".into(),
+        "-map".into(), "0:a:0?".into(),
+    ];
+    if normalize {
+        concat_args.extend([
+            "-c:v".into(), "copy".into(),
+            "-af".into(), LOUDNORM_FILTER.into(),
+            "-c:a".into(), "aac".into(),
+            "-b:a".into(), "160k".into(),
+        ]);
+    } else {
+        concat_args.extend(["-c".into(), "copy".into()]);
+    }
+    concat_args.extend([
+        "-movflags".into(), "+faststart".into(),
+        "-map_chapters".into(), "-1".into(),
+        output_path.clone(),
+    ]);
+    let (mut rx, _child) = match sidecar.args(concat_args).spawn() {
+        Ok(p) => p,
+        Err(e) => {
+            cleanup(&temp_segments, Some(&list_file));
+            return Err(e.to_string());
+        }
+    };
+
     let mut last_emit = std::time::Instant::now();
     let total_us = total_duration * 1_000_000.0;
     let mut latest_us: f64 = 0.0;
@@ -1186,11 +1891,13 @@ async fn export_concat(
                     }
                 }
                 if last_emit.elapsed().as_millis() >= 150 {
-                    let progress = if total_us > 0.0 {
+                    let stage2 = if total_us > 0.0 {
                         (latest_us / total_us).clamp(0.0, 1.0)
                     } else {
                         0.0
                     };
+                    let stage1_share = if any_reencode || mix_active { 0.85 } else { 0.4 };
+                    let progress = (stage1_share + stage2 * (1.0 - stage1_share)).min(1.0);
                     let _ = app.emit(
                         "export:progress",
                         ExportProgress {
@@ -1205,7 +1912,7 @@ async fn export_concat(
                 stderr_buf.push_str(&String::from_utf8_lossy(&line_bytes));
             }
             CommandEvent::Terminated(payload) => {
-                let _ = std::fs::remove_file(&list_file);
+                cleanup(&temp_segments, Some(&list_file));
                 if payload.code != Some(0) {
                     return Err(format!(
                         "ffmpeg concat exited with code {:?}: {}",
@@ -1235,10 +1942,98 @@ async fn export_clip(
     in_secs: f64,
     out_secs: f64,
     output_path: String,
+    crop: Option<Crop>,
+    speed: Option<f64>,
+    normalize: Option<bool>,
+    track_mix: Option<Vec<TrackGain>>,
+    total_audio_tracks: Option<u32>,
 ) -> Result<(), String> {
     let duration = (out_secs - in_secs).max(0.0);
     if duration < 0.05 {
         return Err("selection too short".into());
+    }
+    let normalize = normalize.unwrap_or(false);
+    let mix = track_mix.unwrap_or_default();
+    let total_tracks = total_audio_tracks.unwrap_or(1) as usize;
+    let post_filters = build_audio_post_mix_filters(speed, normalize);
+    let (audio_fc, audio_map) = build_audio_filter_complex(&mix, total_tracks, &post_filters);
+    let needs_audio_reencode = audio_fc.is_some();
+
+    // Four paths, fastest to slowest:
+    //   * pure stream-copy (no mix, no normalize, no crop/speed)
+    //   * audio re-encode only (track mix or normalize but no video filter)
+    //   * full re-encode (crop/speed + maybe audio mix/normalize)
+    if forces_video_reencode(crop, speed) {
+        let vf = build_video_filter(crop, speed);
+        let effective_dur = duration / speed.unwrap_or(1.0).max(0.0001);
+        let chain = encoder_chain(&app).await;
+        let mut last_err = String::from("no encoders available");
+        for enc in chain.iter() {
+            let mut args: Vec<String> = vec![
+                "-y".into(), "-hide_banner".into(),
+                "-loglevel".into(), "error".into(),
+                "-progress".into(), "pipe:1".into(), "-nostats".into(),
+                "-ss".into(), format!("{:.6}", in_secs),
+                "-to".into(), format!("{:.6}", out_secs),
+                "-i".into(), src_path.clone(),
+                "-map".into(), "0:v:0?".into(),
+                "-map".into(), audio_map.clone(),
+            ];
+            if !vf.is_empty() {
+                args.push("-vf".into()); args.push(vf.clone());
+            }
+            if let Some(fc) = &audio_fc {
+                args.push("-filter_complex".into()); args.push(fc.clone());
+            }
+            args.extend(encoder_args_high_quality(enc).into_iter().map(String::from));
+            args.extend([
+                "-c:a".into(), "aac".into(),
+                "-b:a".into(), "160k".into(),
+                "-movflags".into(), "+faststart".into(),
+                "-map_chapters".into(), "-1".into(),
+                output_path.clone(),
+            ]);
+            match run_ffmpeg_with_progress(&app, args, effective_dur, "export:progress").await {
+                Ok(()) => {
+                    *WORKING_ENCODER.lock().unwrap() = Some(*enc);
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("[clippy] crop/speed export {} failed: {}", enc, e);
+                    let _ = std::fs::remove_file(&output_path);
+                    last_err = e;
+                }
+            }
+        }
+        return Err(last_err);
+    }
+
+    if needs_audio_reencode {
+        // Video stream-copy, audio runs through filter_complex (track mix +
+        // optional normalize). Cheap — only the audio track is touched.
+        let mut args: Vec<String> = vec![
+            "-y".into(), "-hide_banner".into(),
+            "-loglevel".into(), "error".into(),
+            "-progress".into(), "pipe:1".into(), "-nostats".into(),
+            "-ss".into(), format!("{:.6}", in_secs),
+            "-to".into(), format!("{:.6}", out_secs),
+            "-i".into(), src_path.clone(),
+            "-map".into(), "0:v:0?".into(),
+            "-map".into(), audio_map.clone(),
+            "-c:v".into(), "copy".into(),
+        ];
+        if let Some(fc) = &audio_fc {
+            args.push("-filter_complex".into()); args.push(fc.clone());
+        }
+        args.extend([
+            "-c:a".into(), "aac".into(),
+            "-b:a".into(), "160k".into(),
+            "-avoid_negative_ts".into(), "make_zero".into(),
+            "-movflags".into(), "+faststart".into(),
+            "-map_chapters".into(), "-1".into(),
+            output_path.clone(),
+        ]);
+        return run_ffmpeg_with_progress(&app, args, duration, "export:progress").await;
     }
 
     let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
@@ -1322,14 +2117,562 @@ async fn export_clip(
     Ok(())
 }
 
+/// MP3 audio bitrate used for all audio-only exports. 192k is the conventional
+/// "small but sounds fine for music + voice" sweet spot.
+const MP3_BITRATE: &str = "192k";
+
+/// Export the audio of a single [in,out] slice as MP3. Always re-encodes via
+/// libmp3lame (source audio is almost always AAC, not MP3). Crops are ignored
+/// — there's no video stream in the output. Speed + normalize are honored
+/// because both are audio-only filters (atempo + loudnorm).
+#[tauri::command]
+async fn export_clip_audio(
+    app: AppHandle,
+    src_path: String,
+    in_secs: f64,
+    out_secs: f64,
+    output_path: String,
+    speed: Option<f64>,
+    normalize: Option<bool>,
+    track_mix: Option<Vec<TrackGain>>,
+    total_audio_tracks: Option<u32>,
+) -> Result<(), String> {
+    let duration = (out_secs - in_secs).max(0.0);
+    if duration < 0.05 {
+        return Err("selection too short".into());
+    }
+    let normalize = normalize.unwrap_or(false);
+    let mix = track_mix.unwrap_or_default();
+    let total_tracks = total_audio_tracks.unwrap_or(1) as usize;
+    let effective_dur = duration / speed.unwrap_or(1.0).max(0.0001);
+    let post_filters = build_audio_post_mix_filters(speed, normalize);
+    let (audio_fc, audio_map) = build_audio_filter_complex(&mix, total_tracks, &post_filters);
+
+    let mut args: Vec<String> = vec![
+        "-y".into(), "-hide_banner".into(),
+        "-loglevel".into(), "error".into(),
+        "-progress".into(), "pipe:1".into(), "-nostats".into(),
+        "-ss".into(), format!("{:.6}", in_secs),
+        "-to".into(), format!("{:.6}", out_secs),
+        "-i".into(), src_path,
+        "-vn".into(),
+        "-map".into(), audio_map,
+    ];
+    if let Some(fc) = audio_fc {
+        args.push("-filter_complex".into()); args.push(fc);
+    }
+    args.extend([
+        "-c:a".into(), "libmp3lame".into(),
+        "-b:a".into(), MP3_BITRATE.into(),
+        "-map_chapters".into(), "-1".into(),
+        output_path,
+    ]);
+    run_ffmpeg_with_progress(&app, args, effective_dur, "export:progress").await
+}
+
+/// Export N regions concatenated as a single MP3. Single-pass: ffmpeg's concat
+/// demuxer feeds the regions straight into libmp3lame. Speed/normalize apply
+/// uniformly across all regions (single-pass means we can't do per-region
+/// filters). Frontend should gate mixed-speed cases.
+#[tauri::command]
+async fn export_concat_audio(
+    app: AppHandle,
+    src_path: String,
+    regions: Vec<RegionExport>,
+    output_path: String,
+    normalize: Option<bool>,
+    track_mix: Option<Vec<TrackGain>>,
+    total_audio_tracks: Option<u32>,
+) -> Result<(), String> {
+    if regions.is_empty() {
+        return Err("no regions to concat".into());
+    }
+    let normalize = normalize.unwrap_or(false);
+    let mix = track_mix.unwrap_or_default();
+    let total_tracks = total_audio_tracks.unwrap_or(1) as usize;
+    let first = regions[0].clone();
+    for (i, r) in regions.iter().enumerate().skip(1) {
+        if r.speed != first.speed || r.mix != first.mix {
+            return Err(format!(
+                "stitched MP3 export needs uniform speed and audio mix across regions (region {} differs)",
+                i + 1
+            ));
+        }
+    }
+    let total_duration: f64 = regions.iter().map(|r| r.effective_duration()).sum();
+    if total_duration < 0.05 {
+        return Err("total duration too short".into());
+    }
+    let post_filters = build_audio_post_mix_filters(first.speed, normalize);
+    let active_mix: &[TrackGain] = first.mix.as_deref().unwrap_or(&mix);
+    let (audio_fc, audio_map) = build_audio_filter_complex(active_mix, total_tracks, &post_filters);
+
+    let temp_dir = std::env::temp_dir().join("clippy");
+    std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let list_file = temp_dir.join(format!("concat-mp3-{}.txt", stamp));
+    let normalized = src_path.replace('\\', "/");
+    let escaped = normalized.replace('\'', "'\\''");
+    let mut content = String::new();
+    for r in &regions {
+        content.push_str(&format!("file '{}'\n", escaped));
+        content.push_str(&format!("inpoint {:.6}\n", r.in_secs));
+        content.push_str(&format!("outpoint {:.6}\n", r.out_secs));
+    }
+    std::fs::write(&list_file, &content).map_err(|e| e.to_string())?;
+    let list_str = list_file.to_string_lossy().to_string();
+
+    let mut args: Vec<String> = vec![
+        "-y".into(), "-hide_banner".into(),
+        "-loglevel".into(), "error".into(),
+        "-progress".into(), "pipe:1".into(), "-nostats".into(),
+        "-f".into(), "concat".into(),
+        "-safe".into(), "0".into(),
+        "-i".into(), list_str,
+        "-vn".into(),
+        "-map".into(), audio_map,
+    ];
+    if let Some(fc) = audio_fc {
+        args.push("-filter_complex".into()); args.push(fc);
+    }
+    args.extend([
+        "-c:a".into(), "libmp3lame".into(),
+        "-b:a".into(), MP3_BITRATE.into(),
+        "-map_chapters".into(), "-1".into(),
+        output_path,
+    ]);
+    let result = run_ffmpeg_with_progress(&app, args, total_duration, "export:progress").await;
+    let _ = std::fs::remove_file(&list_file);
+    result
+}
+
+// ---- GIF + PNG export ----
+
+/// GIF target framerate. 15 fps is the conventional reaction-clip cadence —
+/// smooth enough to look intentional, small enough to keep file sizes sane.
+const GIF_FPS: u32 = 15;
+/// Default GIF width if the caller doesn't specify (≈ 720p widescreen height).
+const GIF_DEFAULT_WIDTH: u32 = 1280;
+
+/// Build the `-vf` filter for a GIF export. Combines optional crop + speed +
+/// the standard fps/scale/palettegen pipeline. The scale filter caps to
+/// `min(target, iw)` so requesting Source / over-resolution never upscales.
+fn gif_filter_chain(crop: Option<Crop>, speed: Option<f64>, target_width: u32) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(c) = crop {
+        parts.push(c.to_filter());
+    }
+    if let Some(s) = speed {
+        if (s - 1.0).abs() > 1e-6 && s > 0.0 {
+            parts.push(format!("setpts={:.6}*PTS", 1.0 / s));
+        }
+    }
+    parts.push(format!("fps={}", GIF_FPS));
+    parts.push(format!(
+        "scale='min({},iw)':-2:flags=lanczos",
+        target_width
+    ));
+    let pre = parts.join(",");
+    format!("{},split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5", pre)
+}
+
+/// Single-region GIF export. Crop + speed honored; no audio. `target_width`
+/// caps the long edge — `min(target_width, iw)` so over-spec never upscales.
+#[tauri::command]
+async fn export_clip_gif(
+    app: AppHandle,
+    src_path: String,
+    in_secs: f64,
+    out_secs: f64,
+    output_path: String,
+    crop: Option<Crop>,
+    speed: Option<f64>,
+    target_width: Option<u32>,
+) -> Result<(), String> {
+    let duration = (out_secs - in_secs).max(0.0);
+    if duration < 0.05 {
+        return Err("selection too short".into());
+    }
+    let effective_dur = duration / speed.unwrap_or(1.0).max(0.0001);
+    let filter = gif_filter_chain(crop, speed, target_width.unwrap_or(GIF_DEFAULT_WIDTH));
+    let args: Vec<String> = vec![
+        "-y".into(), "-hide_banner".into(),
+        "-loglevel".into(), "error".into(),
+        "-progress".into(), "pipe:1".into(), "-nostats".into(),
+        "-ss".into(), format!("{:.6}", in_secs),
+        "-to".into(), format!("{:.6}", out_secs),
+        "-i".into(), src_path,
+        "-an".into(),
+        "-filter_complex".into(), filter,
+        "-loop".into(), "0".into(),
+        output_path,
+    ];
+    run_ffmpeg_with_progress(&app, args, effective_dur, "export:progress").await
+}
+
+/// Stitched GIF: concat regions then apply the GIF pipeline. Two-stage like
+/// the video concat — stage 1 cuts each region (with per-region crop+speed
+/// pre-applied), stage 2 concatenates and runs through palettegen.
+#[tauri::command]
+async fn export_concat_gif(
+    app: AppHandle,
+    src_path: String,
+    regions: Vec<RegionExport>,
+    output_path: String,
+    target_width: Option<u32>,
+) -> Result<(), String> {
+    if regions.is_empty() {
+        return Err("no regions to concat".into());
+    }
+    let total_duration: f64 = regions.iter().map(|r| r.effective_duration()).sum();
+    if total_duration < 0.05 {
+        return Err("total duration too short".into());
+    }
+
+    let temp_dir = std::env::temp_dir().join("clippy");
+    std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    // Stage 1: cut each region (per-region filters baked in).
+    let start = std::time::Instant::now();
+    let mut temp_segments: Vec<PathBuf> = Vec::with_capacity(regions.len());
+    let mut produced_secs: f64 = 0.0;
+    for (idx, region) in regions.iter().enumerate() {
+        let seg_path = temp_dir.join(format!("seg-gif-{}-{}.mp4", stamp, idx));
+        let seg_str = seg_path.to_string_lossy().to_string();
+        // GIF drops audio in stage 2, so the mix is irrelevant here.
+        if let Err(e) = cut_segment(&app, &src_path, region.clone(), &seg_str, &[], 0).await {
+            for s in &temp_segments { let _ = std::fs::remove_file(s); }
+            return Err(format!("region {} cut failed: {}", idx + 1, e));
+        }
+        temp_segments.push(seg_path);
+        produced_secs += region.effective_duration();
+        let progress = (produced_secs / total_duration * 0.7).clamp(0.0, 0.7);
+        let _ = app.emit("export:progress", ExportProgress {
+            progress,
+            elapsed_secs: start.elapsed().as_secs_f64(),
+        });
+    }
+
+    // Stage 2: build a concat list, run through palette pipeline.
+    let list_file = temp_dir.join(format!("concat-gif-{}.txt", stamp));
+    let mut content = String::new();
+    for seg in &temp_segments {
+        let normalized = seg.to_string_lossy().replace('\\', "/");
+        let escaped = normalized.replace('\'', "'\\''");
+        content.push_str(&format!("file '{}'\n", escaped));
+    }
+    if let Err(e) = std::fs::write(&list_file, &content) {
+        for s in &temp_segments { let _ = std::fs::remove_file(s); }
+        return Err(e.to_string());
+    }
+    let list_str = list_file.to_string_lossy().to_string();
+    // Stage 2 filter: only fps + scale + palette (per-region crop/speed already
+    // applied in stage 1).
+    let target = target_width.unwrap_or(GIF_DEFAULT_WIDTH);
+    let filter = format!(
+        "fps={},scale='min({},iw)':-2:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5",
+        GIF_FPS, target
+    );
+    let args: Vec<String> = vec![
+        "-y".into(), "-hide_banner".into(),
+        "-loglevel".into(), "error".into(),
+        "-progress".into(), "pipe:1".into(), "-nostats".into(),
+        "-f".into(), "concat".into(),
+        "-safe".into(), "0".into(),
+        "-i".into(), list_str,
+        "-an".into(),
+        "-filter_complex".into(), filter,
+        "-loop".into(), "0".into(),
+        output_path,
+    ];
+    let result = run_ffmpeg_with_progress(&app, args, total_duration, "export:progress").await;
+    let _ = std::fs::remove_file(&list_file);
+    for s in &temp_segments { let _ = std::fs::remove_file(s); }
+    result
+}
+
+// ---- Per-track audio extraction (for WebAudio multi-track preview) ----
+//
+// SteelSeries Sonar / OBS produce MP4s with separate audio tracks for game,
+// mic, Discord, etc. The HTML5 video element only plays one track at a time,
+// so to give the user real per-track mute/volume sliders we extract each
+// audio stream into its own playable file and feed them through WebAudio.
+// The same fingerprint-keyed cache as proxies/waveforms.
+
+#[tauri::command]
+async fn extract_track(
+    app: AppHandle,
+    state: State<'_, ServerInfo>,
+    src_path: String,
+    track_index: u32,
+) -> Result<String, String> {
+    let key = proxy_cache_key(&src_path)?;
+    let cache_path = proxy_dir(&app)?.join(format!(
+        "{}.track-{}.m4a",
+        &key[..16],
+        track_index
+    ));
+    if !cache_path.exists() {
+        let cache_str = cache_path.to_string_lossy().to_string();
+        let temp_str = format!("{}.tmp.m4a", cache_str);
+        // Stream-copy the requested audio track into an MP4-in-M4A container.
+        // -bsf:a aac_adtstoasc handles the rare AAC-in-MPEG-TS case; harmless
+        // for already-clean AAC.
+        let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
+        let (mut rx, _child) = sidecar
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-i", &src_path,
+                "-map", &format!("0:a:{}?", track_index),
+                "-vn",
+                "-c:a", "copy",
+                "-bsf:a", "aac_adtstoasc",
+                "-map_chapters", "-1",
+                &temp_str,
+            ])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let mut stderr_buf = String::new();
+        let mut ok = false;
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stderr(b) => stderr_buf.push_str(&String::from_utf8_lossy(&b)),
+                CommandEvent::Terminated(payload) => {
+                    if payload.code == Some(0) { ok = true; }
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if !ok {
+            // Fallback: re-encode to AAC. Source might be a codec we can't
+            // copy into M4A (e.g. opus). Slow but always works.
+            let _ = std::fs::remove_file(&temp_str);
+            let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
+            let (mut rx, _child) = sidecar
+                .args([
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel", "error",
+                    "-i", &src_path,
+                    "-map", &format!("0:a:{}?", track_index),
+                    "-vn",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-map_chapters", "-1",
+                    &temp_str,
+                ])
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            stderr_buf.clear();
+            let mut ok2 = false;
+            while let Some(event) = rx.recv().await {
+                match event {
+                    CommandEvent::Stderr(b) => stderr_buf.push_str(&String::from_utf8_lossy(&b)),
+                    CommandEvent::Terminated(payload) => {
+                        if payload.code == Some(0) { ok2 = true; }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if !ok2 {
+                let _ = std::fs::remove_file(&temp_str);
+                return Err(format!("track extract failed: {}", stderr_buf));
+            }
+        }
+        std::fs::rename(&temp_str, &cache_path).map_err(|e| e.to_string())?;
+    }
+    // Register with the media server and return the playable URL.
+    let path_str = cache_path.to_string_lossy().to_string();
+    state.state.allowlist.lock().await.insert(cache_path);
+    let encoded = urlencoding::encode(&path_str).into_owned();
+    Ok(format!(
+        "http://127.0.0.1:{}/vid?token={}&p={}",
+        state.port, state.state.token, encoded
+    ))
+}
+
+// ---- Project state persistence ----
+//
+// Each source video gets a sidecar JSON in the proxy cache dir, named by the
+// same SHA-256(path+mtime+size) fingerprint as its proxy/waveform. Stores the
+// regions array verbatim; that's the only thing that meaningfully survives
+// across sessions (everything else is either app-global or transient).
+
+fn project_path(app: &AppHandle, src_path: &str) -> Result<PathBuf, String> {
+    let key = proxy_cache_key(src_path)?;
+    Ok(proxy_dir(app)?.join(format!("{}.project.json", &key[..16])))
+}
+
+#[tauri::command]
+fn load_project(app: AppHandle, src_path: String) -> Result<Option<serde_json::Value>, String> {
+    let path = project_path(&app, &src_path)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return Ok(None),
+    };
+    let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    Ok(Some(v))
+}
+
+#[tauri::command]
+fn save_project(
+    app: AppHandle,
+    src_path: String,
+    state: serde_json::Value,
+) -> Result<(), String> {
+    let path = project_path(&app, &src_path)?;
+    let bytes = serde_json::to_vec_pretty(&state).map_err(|e| e.to_string())?;
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())
+}
+
+/// Copy a single frame at `time_secs` to the OS clipboard as a raster image.
+/// Uses ffmpeg's rawvideo+rgba pipe so we don't need a PNG decoder in-process —
+/// arboard takes raw RGBA bytes directly.
+#[tauri::command]
+async fn copy_frame_to_clipboard(
+    app: AppHandle,
+    src_path: String,
+    time_secs: f64,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("invalid source dimensions".into());
+    }
+    let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
+    let (mut rx, _child) = sidecar
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-ss", &format!("{:.6}", time_secs),
+            "-i", &src_path,
+            "-frames:v", "1",
+            "-vsync", "0",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgba",
+            "pipe:1",
+        ])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    let expected_bytes = (width as usize) * (height as usize) * 4;
+    let mut buf: Vec<u8> = Vec::with_capacity(expected_bytes);
+    let mut stderr_buf = String::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stdout(b) => buf.extend_from_slice(&b),
+            CommandEvent::Stderr(b) => stderr_buf.push_str(&String::from_utf8_lossy(&b)),
+            CommandEvent::Terminated(payload) => {
+                if payload.code != Some(0) {
+                    return Err(format!(
+                        "frame extract failed (code {:?}): {}",
+                        payload.code, stderr_buf
+                    ));
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+    if buf.len() != expected_bytes {
+        return Err(format!(
+            "raw RGBA pipe returned {} bytes, expected {}",
+            buf.len(),
+            expected_bytes
+        ));
+    }
+    // arboard's set_image consumes the buffer. Done on a blocking task because
+    // Windows clipboard APIs aren't async-friendly.
+    let w = width as usize;
+    let h = height as usize;
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        let img = arboard::ImageData {
+            width: w,
+            height: h,
+            bytes: std::borrow::Cow::Owned(buf),
+        };
+        cb.set_image(img).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Save a single frame at `time_secs` as a PNG at source resolution.
+#[tauri::command]
+async fn export_frame_png(
+    app: AppHandle,
+    src_path: String,
+    time_secs: f64,
+    output_path: String,
+) -> Result<(), String> {
+    let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
+    let (mut rx, _child) = sidecar
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-ss", &format!("{:.6}", time_secs),
+            "-i", &src_path,
+            "-frames:v", "1",
+            "-vsync", "0",
+            "-q:v", "1",
+            &output_path,
+        ])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut stderr_buf = String::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stderr(b) => stderr_buf.push_str(&String::from_utf8_lossy(&b)),
+            CommandEvent::Terminated(payload) => {
+                if payload.code != Some(0) {
+                    return Err(format!(
+                        "frame export failed (code {:?}): {}",
+                        payload.code, stderr_buf
+                    ));
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
+            app.manage(InitialPath(Mutex::new(parse_initial_path())));
+
+            // Auto-prune cache files >30 days untouched. Background thread so a
+            // slow disk doesn't block startup. Manual "Clear cache" is exposed
+            // via the clear_cache command for users who want it now.
+            if let Ok(data_dir) = app.path().app_data_dir() {
+                let proxies = data_dir.join("proxies");
+                std::thread::spawn(move || prune_old_cache(proxies, 30));
+            }
+
             // Bind the listener synchronously so the port is known before any
             // frontend command can fire, then drive accept/serve on tokio.
             let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -1338,6 +2681,7 @@ pub fn run() {
             let token = generate_session_token();
             let state = ServerState {
                 token,
+                port,
                 allowlist: Arc::new(AsyncMutex::new(HashSet::new())),
             };
             app.manage(ServerInfo {
@@ -1353,7 +2697,7 @@ pub fn run() {
                     }
                 };
                 let app = Router::new()
-                    .route("/vid", get(serve_file))
+                    .route("/vid", get(serve_file).options(serve_options))
                     .with_state(state);
                 if let Err(e) = axum::serve(tokio_listener, app).await {
                     eprintln!("[clippy] media server stopped: {}", e);
@@ -1368,10 +2712,22 @@ pub fn run() {
             export_clip_sized,
             export_concat,
             export_concat_sized,
+            export_clip_audio,
+            export_concat_audio,
             register_file_url,
             extract_waveform,
             file_size,
-            reveal_in_folder
+            reveal_in_folder,
+            get_initial_path,
+            cache_size,
+            clear_cache,
+            export_clip_gif,
+            export_concat_gif,
+            export_frame_png,
+            copy_frame_to_clipboard,
+            load_project,
+            save_project,
+            extract_track
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -441,33 +441,75 @@ kbd {
   border-right-color: rgba(229, 185, 90, 0.65);
 }
 .region-band-num {
-  font-size: var(--fs-micro);
+  font-size: var(--fs-small);
   font-family: var(--font-mono);
-  color: rgba(255, 255, 255, 0.92);
-  background: hsla(var(--region-hue, 142), 55%, 45%, 0.85);
-  padding: 1px 6px;
+  color: #fff;
+  background: hsla(var(--region-hue, 142), 60%, 42%, 0.92);
+  padding: 2px 8px;
   border-radius: 0 0 var(--r-1) 0;
-  line-height: 1.4;
+  line-height: 1.25;
   pointer-events: none;
-  font-weight: 600;
-  letter-spacing: 0.3px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+/* Inline duration: shown on hover near the right edge of each band. */
+.region-band-dur {
+  position: absolute;
+  top: 4px;
+  right: 12px;
+  font-size: var(--fs-micro);
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(0, 0, 0, 0.55);
+  padding: 1px 6px;
+  border-radius: var(--r-1);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+.region-band:hover .region-band-dur {
+  opacity: 1;
+  transform: translateY(0);
+}
+/* Make the band itself accept hover events without breaking edge handle drag. */
+.region-band { pointer-events: auto; }
+.region-band:hover {
+  background: hsla(var(--region-hue, 142), 60%, 50%, 0.22);
 }
 
 .region-edge-handle {
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 8px;
+  width: 10px;
   pointer-events: auto;
   cursor: ew-resize;
   background: transparent;
-  transition: background var(--t-fast) var(--ease);
+  transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
 }
 .region-edge-handle.left  { left: 0; }
 .region-edge-handle.right { right: 0; }
+.region-edge-handle::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 3px;
+  height: 28px;
+  background: rgba(255, 255, 255, 0);
+  border-radius: 2px;
+  transition: background var(--t-fast) var(--ease);
+}
+.region-edge-handle:hover::before,
+.region-edge-handle.active::before {
+  background: rgba(255, 255, 255, 0.9);
+}
 .region-edge-handle:hover,
 .region-edge-handle.active {
-  background: rgba(255, 255, 255, 0.20);
+  background: rgba(255, 255, 255, 0.10);
 }
 
 .marker {
@@ -579,6 +621,509 @@ kbd {
 .region-chip-x:hover {
   color: var(--bad);
   background: rgba(239, 98, 102, 0.12);
+}
+.region-chip-crop {
+  font-size: var(--fs-micro);
+  color: var(--accent);
+  padding: 0 var(--s-1);
+  border-radius: var(--r-1);
+  background: rgba(79, 157, 255, 0.10);
+}
+.region-chip-crop-btn {
+  background: transparent;
+  border: 0;
+  padding: 0 var(--s-1);
+  color: var(--dim);
+  cursor: pointer;
+  font-size: var(--fs-small);
+  line-height: 1;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.region-chip-crop-btn:hover {
+  color: var(--accent);
+  background: rgba(79, 157, 255, 0.12);
+}
+.region-chip-crop-btn.active { color: var(--accent); }
+
+/* Speed picker pill on the region chip + popover */
+.speed-picker { position: relative; display: inline-flex; align-items: center; }
+.speed-pill {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--dim);
+  padding: 2px 7px;
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  border-radius: 999px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.speed-pill:hover { color: var(--text); background: var(--panel-3); }
+.speed-pill.active {
+  color: #0e1216;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.speed-popover {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 1000;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  min-width: 72px;
+  /* Portaled to body — stacks above everything (modal is z 100, overlay 30). */
+}
+.speed-popover-item {
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  padding: 5px 10px;
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  cursor: pointer;
+  border-radius: var(--r-1);
+}
+.speed-popover-item:hover { background: var(--panel-3); }
+.speed-popover-item.active {
+  background: rgba(79, 157, 255, 0.18);
+  color: var(--accent);
+}
+
+/* "Click again to confirm" state for the Save Frame button. */
+.btn-armed,
+button.btn-armed {
+  background: rgba(79, 157, 255, 0.18);
+  border-color: var(--accent);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px rgba(79, 157, 255, 0.4);
+}
+
+/* Tiny toast that confirms the frame was copied. Subtle, auto-dismisses. */
+.frame-toast {
+  position: fixed;
+  bottom: var(--s-4);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  background: rgba(20, 26, 36, 0.92);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 1px solid rgba(79, 157, 255, 0.4);
+  color: var(--text);
+  padding: 10px 16px;
+  border-radius: 999px;
+  font-size: var(--fs-small);
+  cursor: pointer;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+  animation: frame-toast-in var(--t-base) var(--ease);
+}
+@keyframes frame-toast-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* ---------------------------------------------------------- *
+ *  Track mixer (multi-audio sources)                           *
+ *  Each row carries the track's palette color via              *
+ *  --track-color (set inline). Same color shows on the         *
+ *  layered timeline waveform overlay.                          *
+ * ---------------------------------------------------------- */
+.track-mixer {
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  padding: 8px var(--s-4) 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.track-mixer-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+}
+.track-mixer-title {
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--dim);
+  font-weight: 600;
+}
+.track-mixer-context {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+  /* When a region's mix is in scope, --ctx-color tints both border + bg. */
+  border-color: var(--ctx-color, var(--border));
+  background:
+    linear-gradient(var(--panel-3), var(--panel-3)) padding-box,
+    var(--ctx-color, transparent) border-box;
+  cursor: help;
+  transition: background var(--t-fast) var(--ease);
+}
+.track-mixer-context::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ctx-color, var(--dim));
+  margin-right: 6px;
+  vertical-align: middle;
+  position: relative;
+  top: -1px;
+}
+.track-mixer-count {
+  font-size: var(--fs-micro);
+  color: var(--dim);
+  opacity: 0.7;
+}
+.track-mixer-reset {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--dim);
+  padding: 2px 10px;
+  font-size: var(--fs-micro);
+  border-radius: var(--r-1);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.track-mixer-reset:hover { color: var(--text); background: var(--panel-2); }
+.track-mixer-rows { display: flex; flex-direction: column; gap: 4px; }
+
+.track-row {
+  display: grid;
+  grid-template-columns: 4px 30px minmax(110px, 180px) 1fr 60px;
+  gap: var(--s-2);
+  align-items: center;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  padding: 5px var(--s-2) 5px 0;
+  font-size: var(--fs-small);
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.track-row:hover { background: var(--panel-3); }
+.track-row.muted { opacity: 0.55; }
+.track-stripe {
+  align-self: stretch;
+  background: var(--track-color);
+  border-radius: var(--r-2) 0 0 var(--r-2);
+}
+.track-mute {
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  padding: 0;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.track-mute:hover { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+.track-mute.active { color: var(--bad); }
+.track-mute.active:hover { background: rgba(239, 98, 102, 0.14); }
+.track-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+.track-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--track-color);
+  flex-shrink: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+/* Volume slider — uses --track-color for the thumb + filled portion. */
+.track-slider {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+  /* Filled track: track-color up to 100%, then a slightly hotter shade past 100%. */
+  background: linear-gradient(
+    to right,
+    var(--track-color) 0%,
+    var(--track-color) var(--fill-pct, 100%),
+    var(--panel-3) var(--fill-pct, 100%),
+    var(--panel-3) 100%
+  );
+}
+.track-slider::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--track-color);
+  cursor: grab;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  transition: transform var(--t-fast) var(--ease);
+}
+.track-slider::-webkit-slider-thumb:hover { transform: scale(1.1); }
+.track-slider:active::-webkit-slider-thumb { cursor: grabbing; }
+.track-slider:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: var(--panel-3);
+}
+/* Tick at the 50% point (which maps to 100% volume) — visual reference. */
+.track-slider::-webkit-slider-runnable-track {
+  position: relative;
+}
+.track-pct {
+  font-size: var(--fs-micro);
+  color: var(--dim);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+.track-pct.boost { color: var(--track-color); font-weight: 600; }
+
+/* Cache controls row inside keybinds modal */
+.cache-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-4);
+  border-top: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.cache-label {
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--dim);
+}
+.cache-size {
+  flex: 1;
+  font-size: var(--fs-small);
+  color: var(--text);
+}
+.cache-clear {
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 12px;
+  border-radius: var(--r-1);
+  font-size: var(--fs-small);
+  cursor: pointer;
+}
+.cache-clear:hover:not(:disabled) { background: var(--bg); }
+.cache-clear:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---------------------------------------------------------- *
+ *  Crop overlay                                                *
+ * ---------------------------------------------------------- */
+.crop-overlay { z-index: 30; }
+.crop-rect {
+  border: 1.5px solid var(--accent);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+  cursor: default;
+}
+.crop-rect-inner {
+  position: absolute;
+  inset: 6px;
+  cursor: move;
+}
+.crop-handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: var(--accent);
+  border: 1.5px solid #fff;
+  border-radius: 2px;
+  z-index: 2;
+}
+.crop-handle-nw { left: -7px; top: -7px;    cursor: nwse-resize; }
+.crop-handle-n  { left: 50%;  top: -7px;    cursor: ns-resize;   transform: translateX(-50%); }
+.crop-handle-ne { right: -7px; top: -7px;   cursor: nesw-resize; }
+.crop-handle-e  { right: -7px; top: 50%;    cursor: ew-resize;   transform: translateY(-50%); }
+.crop-handle-se { right: -7px; bottom: -7px; cursor: nwse-resize; }
+.crop-handle-s  { left: 50%;  bottom: -7px; cursor: ns-resize;   transform: translateX(-50%); }
+.crop-handle-sw { left: -7px; bottom: -7px; cursor: nesw-resize; }
+.crop-handle-w  { left: -7px; top: 50%;     cursor: ew-resize;   transform: translateY(-50%); }
+.crop-grid { position: absolute; inset: 0; pointer-events: none; }
+.crop-grid-line {
+  position: absolute;
+  background: rgba(255, 255, 255, 0.18);
+}
+.crop-grid-line.v { top: 0; bottom: 0; width: 1px; }
+.crop-grid-line.h { left: 0; right: 0; height: 1px; }
+.crop-dim-badge {
+  position: absolute;
+  top: -22px;
+  right: 0;
+  font-size: var(--fs-micro);
+  color: #fff;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 2px 6px;
+  border-radius: var(--r-1);
+  pointer-events: none;
+}
+.crop-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  padding: var(--s-1) var(--s-2);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  z-index: 3;
+}
+.crop-toolbar-label { color: var(--dim); margin-right: var(--s-2); }
+.crop-toolbar-btn {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 10px;
+  border-radius: var(--r-1);
+  font-size: var(--fs-small);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+}
+.crop-toolbar-btn:hover { background: var(--panel-3); }
+.crop-toolbar-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0e1216;
+}
+.crop-toolbar-btn.primary:hover { filter: brightness(1.06); }
+.crop-aspect-row {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-1);
+  padding: 2px;
+  margin: 0 var(--s-1);
+}
+.crop-aspect-btn {
+  background: transparent;
+  border: 0;
+  color: var(--dim);
+  padding: 3px 8px;
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.crop-aspect-btn:hover { color: var(--text); background: var(--panel-2); }
+.crop-aspect-btn.active {
+  background: var(--accent);
+  color: #0e1216;
+}
+
+/* ---------------------------------------------------------- *
+ *  Crop indicator (read-only, while playing/scrubbing)         *
+ *  Thin outline + bright corner brackets + a dimensions badge. *
+ * ---------------------------------------------------------- */
+.crop-indicator { z-index: 10; }
+.crop-indicator .ci-outline {
+  position: absolute;
+  inset: 0;
+  border: 1px solid rgba(79, 157, 255, 0.32);
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.35),
+    0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+.crop-indicator .ci-corner {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: 2.5px solid rgba(79, 157, 255, 0.92);
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.6));
+}
+.ci-tl { left: -2px;  top: -2px;    border-right: 0;  border-bottom: 0; }
+.ci-tr { right: -2px; top: -2px;    border-left: 0;   border-bottom: 0; }
+.ci-bl { left: -2px;  bottom: -2px; border-right: 0;  border-top: 0; }
+.ci-br { right: -2px; bottom: -2px; border-left: 0;   border-top: 0; }
+.ci-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: var(--fs-micro);
+  color: #fff;
+  background: rgba(0, 0, 0, 0.72);
+  border: 1px solid rgba(79, 157, 255, 0.4);
+  padding: 2px 7px;
+  border-radius: var(--r-1);
+  letter-spacing: 0.02em;
+}
+
+/* ---------------------------------------------------------- *
+ *  Loop badge (player corner, while a region is looping)       *
+ * ---------------------------------------------------------- */
+.loop-badge {
+  position: absolute;
+  top: var(--s-3);
+  left: var(--s-3);
+  z-index: 12;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: 6px 12px;
+  background: rgba(20, 26, 36, 0.78);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 1px solid rgba(74, 208, 142, 0.4);
+  border-radius: 999px;
+  color: var(--good);
+  font-size: var(--fs-small);
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+  animation: loop-badge-in var(--t-base) var(--ease);
+}
+.loop-badge:hover {
+  background: rgba(20, 26, 36, 0.92);
+  border-color: rgba(74, 208, 142, 0.7);
+}
+.loop-badge-icon {
+  display: inline-block;
+  animation: spin 2s linear infinite;
+  font-size: 1em;
+}
+.loop-badge-text { letter-spacing: 0.01em; }
+@keyframes loop-badge-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 /* ---------------------------------------------------------- *
@@ -734,26 +1279,106 @@ kbd {
 }
 
 /* Export modal */
-.export-modal { width: min(540px, calc(100% - 40px)); }
+.export-modal { width: min(560px, calc(100% - 40px)); }
 .export-body {
-  padding: var(--s-3) var(--s-4) var(--s-1);
+  padding: var(--s-3) var(--s-4) var(--s-2);
   display: flex;
   flex-direction: column;
   gap: var(--s-3);
 }
-.export-section {
-  border: 1px solid var(--border);
-  border-radius: var(--r-2);
-  padding: var(--s-2) var(--s-3) var(--s-2);
-  margin: 0;
-}
-.export-section legend {
+.export-section { display: flex; flex-direction: column; gap: 6px; }
+.export-section-label {
   font-size: var(--fs-micro);
   text-transform: uppercase;
-  letter-spacing: 0.6px;
+  letter-spacing: 0.7px;
   color: var(--dim);
-  padding: 0 var(--s-1);
 }
+
+/* Segmented button group: replaces fieldsets of radios with a row of cards. */
+.seg {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 6px;
+}
+.seg-btn {
+  appearance: none;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  padding: 10px 12px;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--t-fast) var(--ease),
+              border-color var(--t-fast) var(--ease),
+              color var(--t-fast) var(--ease);
+}
+.seg-btn:hover:not(.disabled):not(.active) {
+  background: var(--panel-3);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.seg-btn.active {
+  background: rgba(79, 157, 255, 0.14);
+  border-color: var(--accent);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px rgba(79, 157, 255, 0.35);
+}
+.seg-btn.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.seg-btn-label {
+  font-size: var(--fs-body);
+  font-weight: 500;
+  line-height: 1.1;
+}
+.seg-btn-sub {
+  font-size: var(--fs-micro);
+  color: var(--dim);
+  letter-spacing: 0.02em;
+}
+.seg-btn.active .seg-btn-sub { color: rgba(79, 157, 255, 0.9); }
+
+.export-toggle {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-column-gap: var(--s-2);
+  align-items: baseline;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  cursor: pointer;
+}
+.export-toggle:has(input:checked) {
+  background: rgba(79, 157, 255, 0.10);
+  border-color: rgba(79, 157, 255, 0.5);
+}
+.export-toggle input {
+  grid-row: 1 / span 2;
+  align-self: center;
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+}
+.export-toggle-label {
+  font-size: var(--fs-body);
+  font-weight: 500;
+  line-height: 1.1;
+}
+.export-toggle-sub {
+  grid-column: 2;
+  font-size: var(--fs-micro);
+  color: var(--dim);
+  letter-spacing: 0.02em;
+}
+
+/* Backwards compat (still used by the keybind editor radio rows). */
 .radio-row {
   display: flex;
   align-items: center;
@@ -764,6 +1389,7 @@ kbd {
 }
 .radio-row:hover { color: var(--text); }
 .radio-row input { accent-color: var(--accent); }
+.radio-row.disabled { opacity: 0.5; cursor: not-allowed; }
 
 .export-estimate {
   padding: var(--s-2) var(--s-3);
@@ -793,6 +1419,11 @@ kbd {
   margin-top: var(--s-1);
   font-size: var(--fs-small);
   color: var(--warn);
+}
+.estimate-note {
+  margin-top: var(--s-1);
+  font-size: var(--fs-small);
+  color: var(--dim);
 }
 .estimate-per-clip {
   list-style: none;

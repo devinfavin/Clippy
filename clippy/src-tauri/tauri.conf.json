@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.devin.clippy",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "corepack pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "corepack pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -20,11 +20,7 @@
       }
     ],
     "security": {
-      "csp": null,
-      "assetProtocol": {
-        "enable": true,
-        "scope": ["**"]
-      }
+      "csp": "default-src 'self' tauri: ipc: http://ipc.localhost; media-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data: tauri: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* ws: wss:"
     }
   },
   "bundle": {
@@ -39,6 +35,14 @@
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["mp4", "mkv", "mov", "webm", "m4v", "avi"],
+        "name": "Video",
+        "description": "Video file (Clippy)",
+        "role": "Editor"
+      }
     ]
   }
 }
