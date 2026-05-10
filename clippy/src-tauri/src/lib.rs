@@ -46,11 +46,11 @@ const DIAG_CAP: usize = 200;
 /// In-memory ring buffer of timestamped log entries. Bounded so it can't
 /// grow unboundedly over a long session. Never written to disk and never sent
 /// anywhere — the user copies it explicitly via the "Copy diagnostics" button.
-struct DiagLog(Mutex<VecDeque<String>>);
+struct DiagLog(Arc<Mutex<VecDeque<String>>>);
 
 impl DiagLog {
     fn new() -> Self {
-        DiagLog(Mutex::new(VecDeque::with_capacity(DIAG_CAP)))
+        DiagLog(Arc::new(Mutex::new(VecDeque::with_capacity(DIAG_CAP))))
     }
 }
 
@@ -63,13 +63,15 @@ fn diag(app: &AppHandle, msg: impl std::fmt::Display) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let entry = format!("[{:02}:{:02}:{:02}] {}", (secs / 3600) % 24, (secs / 60) % 60, secs % 60, msg);
-    let log = app.state::<DiagLog>();
-    if let Ok(mut buf) = log.0.lock() {
-        if buf.len() >= DIAG_CAP {
-            buf.pop_front();
-        }
-        buf.push_back(entry);
+    let arc = Arc::clone(&app.state::<DiagLog>().0);
+    let mut buf = match arc.lock() {
+        Ok(b) => b,
+        Err(e) => e.into_inner(),
+    };
+    if buf.len() >= DIAG_CAP {
+        buf.pop_front();
     }
+    buf.push_back(entry);
 }
 
 /// Strip the directory from a path so logs never contain the user's home
@@ -2881,8 +2883,8 @@ async fn export_frame_png(
 /// automatically. Full file paths are never logged; only basenames are used.
 #[tauri::command]
 fn get_diagnostics(app: AppHandle) -> String {
-    let log = app.state::<DiagLog>();
-    let buf = match log.0.lock() {
+    let arc = Arc::clone(&app.state::<DiagLog>().0);
+    let buf = match arc.lock() {
         Ok(b) => b,
         Err(e) => e.into_inner(),
     };
