@@ -278,11 +278,21 @@ fn get_initial_path(state: State<'_, InitialPath>) -> Option<String> {
 /// the parent directory.
 #[tauri::command]
 fn reveal_in_folder(path: String) -> Result<(), String> {
+    // Canonicalize first — both validates the path exists and resolves
+    // to a real local filesystem path, so a malformed `path` containing
+    // shell-meaningful chars or extra arguments can't reach the OS.
+    let canonical = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
+        // Pass `/select,<path>` as ONE argv entry via Command::arg. Rust's
+        // stdlib applies the correct CreateProcess quoting on Windows, so
+        // we don't need raw_arg + manual quoting (which was quote-injection
+        // prone if `path` contained `"`).
+        let mut s = std::ffi::OsString::from("/select,");
+        s.push(canonical.as_os_str());
         std::process::Command::new("explorer")
-            .raw_arg(format!("/select,\"{}\"", path))
+            .arg(s)
             .spawn()
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -290,7 +300,8 @@ fn reveal_in_folder(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .args(["-R", &path])
+            .arg("-R")
+            .arg(&canonical)
             .spawn()
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -298,7 +309,7 @@ fn reveal_in_folder(path: String) -> Result<(), String> {
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     {
         // Linux fallback: open the parent dir with xdg-open
-        let parent = std::path::Path::new(&path)
+        let parent = canonical
             .parent()
             .ok_or_else(|| "no parent directory".to_string())?;
         std::process::Command::new("xdg-open")
@@ -311,19 +322,42 @@ fn reveal_in_folder(path: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn register_file_url(
+    app: AppHandle,
     state: State<'_, ServerInfo>,
     path: String,
 ) -> Result<String, String> {
-    let p = PathBuf::from(&path);
-    if !p.exists() {
-        return Err(format!("path does not exist: {}", path));
+    // Scoped allowlist: a renderer-side bug (or a future XSS) must not be able
+    // to coerce the backend into serving arbitrary local files like
+    // NTUSER.DAT or SSH keys. Two cases are legitimate:
+    //   1. Files we generated under the proxy cache dir (remux / encode /
+    //      extracted track outputs).
+    //   2. Files generate_proxy already trusted on this session — for the
+    //      Direct strategy, that's the original source MP4.
+    // Anything else is rejected outright.
+    let canonical = std::fs::canonicalize(&path)
+        .map_err(|e| format!("canonicalize failed: {}", e))?;
+    let proxies = std::fs::canonicalize(proxy_dir(&app)?)
+        .map_err(|e| format!("proxy dir canonicalize failed: {}", e))?;
+    let in_proxies = canonical.starts_with(&proxies);
+    let already_trusted = state.state.allowlist.lock().await.contains(&canonical);
+    if !in_proxies && !already_trusted {
+        return Err("path not allowed".into());
     }
-    state.state.allowlist.lock().await.insert(p);
-    let encoded = urlencoding::encode(&path).into_owned();
+    state.state.allowlist.lock().await.insert(canonical.clone());
+    let encoded = urlencoding::encode(&canonical.to_string_lossy()).into_owned();
     Ok(format!(
         "http://127.0.0.1:{}/vid?token={}&p={}",
         state.port, state.state.token, encoded
     ))
+}
+
+/// Insert a path into the media-server allowlist directly. Used by backend
+/// commands (generate_proxy's Direct strategy) to pre-trust a source path
+/// that register_file_url would otherwise reject for being outside proxy_dir.
+async fn allowlist_trust(state: &ServerState, path: &std::path::Path) -> Result<(), String> {
+    let canonical = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+    state.allowlist.lock().await.insert(canonical);
+    Ok(())
 }
 
 // Cached encoder that we've actually verified works on this machine (set after a successful pass).
@@ -901,6 +935,17 @@ fn proxy_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Escape a path for ffmpeg's concat-demuxer text format ("file '...'").
+/// Rejects paths containing newline/CR — without this, a crafted filename
+/// like `evil\nfile '/etc/passwd'` would let the attacker inject additional
+/// concat directives and exfiltrate or substitute files into the output.
+fn escape_concat_path(p: &str) -> Result<String, String> {
+    if p.contains('\n') || p.contains('\r') {
+        return Err("path contains newline/CR characters".into());
+    }
+    Ok(p.replace('\\', "/").replace('\'', "'\\''"))
+}
+
 async fn run_proxy_pass(
     app: &AppHandle,
     src_path: &str,
@@ -1071,6 +1116,7 @@ async fn run_remux_pass(
 #[tauri::command]
 async fn generate_proxy(
     app: AppHandle,
+    state: State<'_, ServerInfo>,
     path: String,
     info: VideoInfo,
 ) -> Result<ProxyResult, String> {
@@ -1082,6 +1128,11 @@ async fn generate_proxy(
 
     match strategy {
         Strategy::Direct => {
+            // Direct path returns the source MP4 unchanged. It's outside
+            // proxy_dir, so register_file_url's scope check would otherwise
+            // reject it — pre-trust it here since the user explicitly
+            // selected this file.
+            allowlist_trust(&state.state, std::path::Path::new(&path)).await?;
             let _ = app.emit(
                 "proxy:progress",
                 ProxyProgress { progress: 1.0, elapsed_secs: 0.0, eta_secs: Some(0.0) },
@@ -1094,7 +1145,7 @@ async fn generate_proxy(
         }
         Strategy::Remux => {
             let key = proxy_cache_key(&path)?;
-            let out_path = proxy_dir(&app)?.join(format!("{}.remux.mp4", &key[..16]));
+            let out_path = proxy_dir(&app)?.join(format!("{}.remux.mp4", &key[..32]));
             if out_path.exists() {
                 return Ok(ProxyResult {
                     play_path: out_path.to_string_lossy().to_string(),
@@ -1137,7 +1188,7 @@ async fn encode_fallback(
     event_name: &str,
 ) -> Result<ProxyResult, String> {
     let key = proxy_cache_key(path)?;
-    let out_path = proxy_dir(app)?.join(format!("{}.proxy.mp4", &key[..16]));
+    let out_path = proxy_dir(app)?.join(format!("{}.proxy.mp4", &key[..32]));
     if out_path.exists() {
         return Ok(ProxyResult {
             play_path: out_path.to_string_lossy().to_string(),
@@ -1193,6 +1244,73 @@ async fn encode_fallback(
 
 const WAVEFORM_BINS: usize = 4000;
 
+/// List the timestamps (in seconds) of every video keyframe in the source.
+/// Cached per source-fingerprint as a binary f32 blob; second-open is free.
+/// Frontend uses these to draw faint tick marks on the timeline so the user
+/// can see where stream-copy cuts will actually snap.
+#[tauri::command]
+async fn probe_keyframes(app: AppHandle, path: String) -> Result<Vec<f32>, String> {
+    let key = proxy_cache_key(&path)?;
+    let cache_path = proxy_dir(&app)?.join(format!("{}.kf.f32", &key[..32]));
+    if cache_path.exists() {
+        if let Ok(bytes) = std::fs::read(&cache_path) {
+            if bytes.len() % 4 == 0 {
+                let mut out = Vec::with_capacity(bytes.len() / 4);
+                for i in (0..bytes.len()).step_by(4) {
+                    let arr: [u8; 4] = bytes[i..i + 4]
+                        .try_into()
+                        .map_err(|_| "bad cache slice".to_string())?;
+                    out.push(f32::from_le_bytes(arr));
+                }
+                return Ok(out);
+            }
+        }
+    }
+
+    // ffprobe: walk video packets, keep only those with the keyframe flag
+    // (`pict_type=I`). Stream as CSV for compactness.
+    let output = app
+        .shell()
+        .sidecar("ffprobe")
+        .map_err(|e| e.to_string())?
+        .args([
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-skip_frame", "nokey",
+            "-show_entries", "frame=pkt_pts_time",
+            "-of", "csv=print_section=0",
+            &path,
+        ])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "ffprobe (keyframes) failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut keyframes: Vec<f32> = Vec::new();
+    for line in stdout.lines() {
+        let s = line.trim();
+        if s.is_empty() || s == "N/A" { continue; }
+        if let Ok(v) = s.parse::<f32>() {
+            keyframes.push(v);
+        }
+    }
+
+    // Cache as raw little-endian f32s.
+    let mut buf = Vec::with_capacity(keyframes.len() * 4);
+    for &v in &keyframes {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    let _ = std::fs::write(&cache_path, &buf);
+
+    Ok(keyframes)
+}
+
 /// Extract a peak-amplitude waveform from one audio track. Returns a vector
 /// of WAVEFORM_BINS f32 values in [0, 1] where each bin is the max sample
 /// magnitude over its slice of the timeline. Cached per (source, track) on
@@ -1208,7 +1326,7 @@ async fn extract_waveform(
     let key = proxy_cache_key(&path)?;
     // Track-indexed cache name. Single-track sources end up with .wave-0.f32
     // (was .wave.f32 in v1; old caches will simply re-extract once).
-    let cache_path = proxy_dir(&app)?.join(format!("{}.wave-{}.f32", &key[..16], track_idx));
+    let cache_path = proxy_dir(&app)?.join(format!("{}.wave-{}.f32", &key[..32], track_idx));
     if cache_path.exists() {
         if let Ok(bytes) = std::fs::read(&cache_path) {
             if bytes.len() == WAVEFORM_BINS * 4 {
@@ -1527,8 +1645,7 @@ async fn export_concat_sized(
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let list_file = temp_dir.join(format!("concat-sized-{}.txt", stamp));
-    let normalized = src_path.replace('\\', "/");
-    let escaped = normalized.replace('\'', "'\\''");
+    let escaped = escape_concat_path(&src_path)?;
     let mut content = String::new();
     for r in &regions {
         content.push_str(&format!("file '{}'\n", escaped));
@@ -1820,8 +1937,7 @@ async fn export_concat(
     let list_file = temp_dir.join(format!("concat-{}.txt", stamp));
     let mut content = String::new();
     for seg in &temp_segments {
-        let normalized = seg.to_string_lossy().replace('\\', "/");
-        let escaped = normalized.replace('\'', "'\\''");
+        let escaped = escape_concat_path(&seg.to_string_lossy())?;
         content.push_str(&format!("file '{}'\n", escaped));
     }
     if let Err(e) = std::fs::write(&list_file, &content) {
@@ -2214,8 +2330,7 @@ async fn export_concat_audio(
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let list_file = temp_dir.join(format!("concat-mp3-{}.txt", stamp));
-    let normalized = src_path.replace('\\', "/");
-    let escaped = normalized.replace('\'', "'\\''");
+    let escaped = escape_concat_path(&src_path)?;
     let mut content = String::new();
     for r in &regions {
         content.push_str(&format!("file '{}'\n", escaped));
@@ -2364,8 +2479,7 @@ async fn export_concat_gif(
     let list_file = temp_dir.join(format!("concat-gif-{}.txt", stamp));
     let mut content = String::new();
     for seg in &temp_segments {
-        let normalized = seg.to_string_lossy().replace('\\', "/");
-        let escaped = normalized.replace('\'', "'\\''");
+        let escaped = escape_concat_path(&seg.to_string_lossy())?;
         content.push_str(&format!("file '{}'\n", escaped));
     }
     if let Err(e) = std::fs::write(&list_file, &content) {
@@ -2416,7 +2530,7 @@ async fn extract_track(
     let key = proxy_cache_key(&src_path)?;
     let cache_path = proxy_dir(&app)?.join(format!(
         "{}.track-{}.m4a",
-        &key[..16],
+        &key[..32],
         track_index
     ));
     if !cache_path.exists() {
@@ -2511,14 +2625,31 @@ async fn extract_track(
 
 fn project_path(app: &AppHandle, src_path: &str) -> Result<PathBuf, String> {
     let key = proxy_cache_key(src_path)?;
-    Ok(proxy_dir(app)?.join(format!("{}.project.json", &key[..16])))
+    Ok(proxy_dir(app)?.join(format!("{}.project.json", &key[..32])))
 }
+
+/// Cap on project sidecar size. The state we save is regions + track mix +
+/// colors + names — for any realistic session this is well under 50 KB.
+/// Hard cap at 1 MB so a tampered or corrupt sidecar can't OOM the renderer
+/// when we round-trip it back through IPC. (serde_json's default recursion
+/// limit of 128 already prevents a deep-nesting stack-blow on its own.)
+const PROJECT_FILE_MAX_BYTES: u64 = 1_000_000;
 
 #[tauri::command]
 fn load_project(app: AppHandle, src_path: String) -> Result<Option<serde_json::Value>, String> {
     let path = project_path(&app, &src_path)?;
     if !path.exists() {
         return Ok(None);
+    }
+    let meta = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => return Ok(None),
+    };
+    if meta.len() > PROJECT_FILE_MAX_BYTES {
+        return Err(format!(
+            "project file unreasonably large ({} bytes); refusing to load",
+            meta.len()
+        ));
     }
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
@@ -2716,6 +2847,7 @@ pub fn run() {
             export_concat_audio,
             register_file_url,
             extract_waveform,
+            probe_keyframes,
             file_size,
             reveal_in_folder,
             get_initial_path,

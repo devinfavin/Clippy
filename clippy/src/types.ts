@@ -29,25 +29,82 @@ export type TrackMix = Record<number, { volume: number; muted: boolean }>;
 /** Default human-readable name for an audio track. Uses the metadata title
  *  when present (SteelSeries/OBS often set "Game"/"Mic"/"Discord"); falls
  *  back to "Track N+1". */
-export function audioTrackLabel(t: AudioTrack): string {
+function audioTrackLabel(t: AudioTrack): string {
   if (t.title && t.title.trim().length > 0) return t.title.trim();
   return `Track ${t.index + 1}`;
 }
 
-/** Per-track color palette. Used in both the mixer UI and the timeline
- *  waveform overlay so a given track is always the same color. Picked to be
- *  visually distinct, accent-blue-friendly, and readable on a dark panel. */
+/** Per-track color palette — 9 warm slots arranged in spectrum order
+ *  (yellow → red → magenta → purple). Click the dot on a track row to
+ *  pick a different slot via the ColorPicker. Used in the mixer UI and
+ *  the timeline waveform overlay so a given track is always the same
+ *  color everywhere. */
 export const TRACK_COLORS = [
-  "#4f9dff", // blue (matches accent for track 0)
-  "#5fc88a", // green
-  "#ff9b3d", // orange
-  "#e572d0", // magenta
-  "#ffce4d", // yellow
-  "#7c5cff", // violet
+  "hsl(50, 70%, 60%)",  // gold
+  "hsl(42, 65%, 60%)",  // saffron
+  "hsl(28, 70%, 60%)",  // amber
+  "hsl(14, 65%, 64%)",  // coral
+  "hsl(355, 55%, 62%)", // crimson
+  "hsl(330, 50%, 65%)", // rose
+  "hsl(315, 55%, 68%)", // pink
+  "hsl(295, 45%, 62%)", // magenta
+  "hsl(280, 35%, 68%)", // lavender
 ];
 
-export function trackColor(index: number): string {
+function trackColor(index: number): string {
   return TRACK_COLORS[((index % TRACK_COLORS.length) + TRACK_COLORS.length) % TRACK_COLORS.length];
+}
+
+/** Per-region color palette — 9 cool slots arranged in spectrum order
+ *  (green → cyan → blue → indigo). Click the dot on a region chip to pick
+ *  a different slot. Used on chips, timeline bands, and the status strip
+ *  so a region is the same color everywhere. */
+export const REGION_COLORS = [
+  "hsl(150, 40%, 50%)", // emerald
+  "hsl(162, 38%, 55%)", // aquamarine
+  "hsl(178, 45%, 52%)", // teal
+  "hsl(188, 50%, 50%)", // sea
+  "hsl(196, 50%, 58%)", // cyan
+  "hsl(208, 50%, 60%)", // sky
+  "hsl(218, 28%, 58%)", // slate
+  "hsl(238, 35%, 62%)", // periwinkle
+  "hsl(255, 30%, 65%)", // indigo
+];
+
+function regionColor(index: number): string {
+  return REGION_COLORS[((index % REGION_COLORS.length) + REGION_COLORS.length) % REGION_COLORS.length];
+}
+
+/** Resolve a region's effective palette color: explicit override wins,
+ *  otherwise fall back to its natural index in the regions array. */
+export function resolveRegionColor(region: Region, naturalIndex: number): string {
+  return regionColor(region.colorIndex ?? naturalIndex);
+}
+
+/** Per-source map of audio-track-stream-index → palette-slot. Persisted in
+ *  the project state so user picks survive across reopens. Absent entry
+ *  means the track uses its natural index for color. */
+export type TrackColorOverrides = Record<number, number>;
+
+export function resolveTrackColor(
+  trackIndex: number,
+  overrides: TrackColorOverrides | undefined
+): string {
+  const slot = overrides?.[trackIndex] ?? trackIndex;
+  return trackColor(slot);
+}
+
+/** Per-source map of track-stream-index → user-renamed label. Falls back to
+ *  metadata title (set by Sonar/OBS) or "Track N+1" via audioTrackLabel. */
+export type TrackNameOverrides = Record<number, string>;
+
+export function resolveTrackName(
+  track: AudioTrack,
+  overrides: TrackNameOverrides | undefined
+): string {
+  const custom = overrides?.[track.index];
+  if (custom !== undefined && custom.trim().length > 0) return custom;
+  return audioTrackLabel(track);
 }
 
 /** Effective gain for a track in the export sense: muted → 0, otherwise volume. */
@@ -79,20 +136,6 @@ export function trackMixIsDefault(mix: TrackMix, totalTracks: number): boolean {
   return true;
 }
 
-/** True if two mixes resolve to the same effective gain for every track. */
-export function mixesEqual(
-  a: TrackMix | undefined,
-  b: TrackMix | undefined,
-  totalTracks: number
-): boolean {
-  const aa = a ?? {};
-  const bb = b ?? {};
-  for (let i = 0; i < totalTracks; i++) {
-    if (trackEffectiveGain(aa, i) !== trackEffectiveGain(bb, i)) return false;
-  }
-  return true;
-}
-
 export type ProxyResult = { play_path: string; cached: boolean; strategy: string };
 export type ProxyProgress = { progress: number; elapsed_secs: number; eta_secs: number | null };
 export type ExportProgress = { progress: number; elapsed_secs: number };
@@ -119,6 +162,9 @@ export type Region = {
   // Optional per-region audio mix override. Undefined → falls back to the
   // source-default mix for both live preview and export.
   mix?: TrackMix;
+  // Optional override of which palette slot this region uses (0..3 for cool
+  // palette). Undefined → the natural index in the regions array.
+  colorIndex?: number;
 };
 
 // Per-region speed presets shown in the chip popover.
@@ -209,4 +255,6 @@ export type ProjectState = {
   version: 1;
   regions: Region[];
   trackMix?: TrackMix;
+  trackColors?: TrackColorOverrides;
+  trackNames?: TrackNameOverrides;
 };

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -7,7 +7,9 @@ import {
   GIF_DEFAULT_RESOLUTION,
   newRegionId,
   SIZE_PRESETS,
-  trackColor,
+  resolveRegionColor,
+  resolveTrackColor,
+  REGION_COLORS,
   trackMixIsDefault,
   trackMixToBackend,
   type Crop,
@@ -21,10 +23,12 @@ import {
   type ProxyResult,
   type Region,
   type SizeLimit,
+  type TrackColorOverrides,
   type TrackMix,
+  type TrackNameOverrides,
   type VideoInfo,
 } from "./types";
-import { fmtTime, fmtEta } from "./formatters";
+import { fmtTime } from "./formatters";
 import {
   ACTION_LABELS,
   captureKeybind,
@@ -38,18 +42,16 @@ import {
   type Keybinds,
 } from "./keybinds";
 import { ExportModal } from "./ExportModal";
-import { ExportToast } from "./ExportToast";
 import { CropOverlay } from "./CropOverlay";
 import { CropIndicator } from "./CropIndicator";
 import { SpeedPicker } from "./SpeedPicker";
 import { TrackMixer } from "./TrackMixer";
 import { useAudioTracks } from "./useAudioTracks";
+import { StatusStrip, type StatusContent } from "./StatusStrip";
+import { ColorPicker } from "./ColorPicker";
+import { TipsModal } from "./TipsModal";
+import { OnboardingHint } from "./OnboardingHint";
 import "./App.css";
-
-// Per-region hue offsets so 3+ regions are visually distinguishable on the
-// timeline. All hues live in the green/teal/lime range so the bands still read
-// as "selection / keep" rather than being a rainbow.
-const REGION_HUES = [142, 132, 152, 122, 162, 138, 148, 128, 158];
 
 /** "#rrggbb" + alpha → "rgba(r, g, b, a)". Used for waveform fill colors so we
  *  can blend the per-track palette colors with translucency. */
@@ -88,6 +90,9 @@ export default function App() {
   const [listeningAction, setListeningAction] = useState<ActionId | null>(null);
   useEffect(() => { saveKeybinds(keybinds); }, [keybinds]);
 
+  // Tips modal — opened by the "?" button in the topbar.
+  const [tipsOpen, setTipsOpen] = useState(false);
+
   // Export modal state
   const [exportOpen, setExportOpen] = useState(false);
   const [exportSize, setExportSize] = useState<SizeLimit>(SIZE_PRESETS[0]);
@@ -96,6 +101,11 @@ export default function App() {
   const [exportNormalize, setExportNormalize] = useState(false);
   // Per-track mute + volume for multi-audio sources. Persisted with project.
   const [trackMix, setTrackMix] = useState<TrackMix>({});
+  // Per-track color overrides (palette-slot per stream-index). User picks via
+  // ColorPicker on the mixer's dot. Persisted with project.
+  const [trackColors, setTrackColors] = useState<TrackColorOverrides>({});
+  // Per-track user-renamed labels (click track name in the mixer to edit).
+  const [trackNames, setTrackNames] = useState<TrackNameOverrides>({});
   const [exportGifResolution, setExportGifResolution] =
     useState<GifResolution>(GIF_DEFAULT_RESOLUTION);
   // Post-export toast: list of files just produced.
@@ -106,6 +116,11 @@ export default function App() {
   const [waveforms, setWaveforms] = useState<Map<number, Float32Array>>(new Map());
   const waveformIdRef = useRef(0);
   const waveCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Keyframe timestamps (seconds) for the source video. Drawn as faint ticks
+  // on the timeline so the user can see where stream-copy cuts will snap to.
+  const [keyframes, setKeyframes] = useState<Float32Array | null>(null);
+  const keyframeCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Convert the file path to an http://127.0.0.1:PORT/vid?... URL via the
   // in-process media server. Chromium plays HTTP files much more reliably than
@@ -166,6 +181,7 @@ export default function App() {
       // Invalidate any in-flight waveform extraction.
       waveformIdRef.current += 1;
       setWaveforms(new Map());
+      setKeyframes(null);
 
       // Stop any active loop, since regions are about to clear.
       loopingRegionIdRef.current = null;
@@ -179,6 +195,8 @@ export default function App() {
       setDraftOut(null);
       setCurrentTime(0);
       setTrackMix({});
+      setTrackColors({});
+      setTrackNames({});
       setPhase({ kind: "probing" });
 
       const probed = await invoke<VideoInfo>("probe_video", { path: selected });
@@ -206,6 +224,12 @@ export default function App() {
         }
         if (saved && saved.trackMix && typeof saved.trackMix === "object") {
           setTrackMix(saved.trackMix as TrackMix);
+        }
+        if (saved && saved.trackColors && typeof saved.trackColors === "object") {
+          setTrackColors(saved.trackColors as TrackColorOverrides);
+        }
+        if (saved && saved.trackNames && typeof saved.trackNames === "object") {
+          setTrackNames(saved.trackNames as TrackNameOverrides);
         }
       } catch (err) {
         console.warn("[clippy] load_project failed:", err);
@@ -236,6 +260,17 @@ export default function App() {
             console.error(`[clippy] waveform extract (track ${idx}) failed:`, err);
           });
       }
+
+      // Probe keyframes in parallel — non-blocking, draws ticks when ready.
+      invoke<number[]>("probe_keyframes", { path: selected })
+        .then((times) => {
+          if (waveId !== waveformIdRef.current) return;
+          setKeyframes(new Float32Array(times));
+        })
+        .catch((err) => {
+          if (waveId !== waveformIdRef.current) return;
+          console.warn("[clippy] probe_keyframes failed:", err);
+        });
     } catch (e) {
       setPhase({ kind: "error", message: String(e) });
     }
@@ -342,18 +377,18 @@ export default function App() {
     else v.pause();
   }, []);
 
-  // Debounced save of the project state (regions, crops, speeds, track mix)
-  // to a sidecar JSON next to the proxy cache.
+  // Debounced save of the project state (regions, crops, speeds, track mix,
+  // track colors, track names) to a sidecar JSON next to the proxy cache.
   useEffect(() => {
     if (!srcPath) return;
     const handle = window.setTimeout(() => {
-      const state: ProjectState = { version: 1, regions, trackMix };
+      const state: ProjectState = { version: 1, regions, trackMix, trackColors, trackNames };
       invoke("save_project", { srcPath, state }).catch((err) =>
         console.warn("[clippy] save_project failed:", err)
       );
     }, 600);
     return () => window.clearTimeout(handle);
-  }, [srcPath, regions, trackMix]);
+  }, [srcPath, regions, trackMix, trackColors, trackNames]);
 
   // Loop playback state (declared up here so seek/scrubTo can reference it
   // for the auto-stop-when-outside check below). The actual loop logic is
@@ -763,7 +798,7 @@ export default function App() {
     // Convert a TrackMix → backend payload. Returns null when the mix is at
     // defaults so the backend takes the fast single-track path.
     const mixToPayload = (m: TrackMix | undefined): Array<{ index: number; volume: number }> | null => {
-      if (totalTracks <= 1) return null;
+      if (totalTracks < 1) return null;
       const eff = m ?? trackMix;
       if (trackMixIsDefault(eff, totalTracks)) return null;
       return trackMixToBackend(eff, totalTracks);
@@ -1109,6 +1144,19 @@ export default function App() {
     [duration]
   );
 
+  // High-DPI mice fire pointermove at 200-1000Hz; running scrubTo on every
+  // event re-renders the entire App tree per pointer tick. Coalesce to a
+  // single rAF flush so we never run more than one scrub per frame.
+  const scrubXRef = useRef<number | null>(null);
+  const scrubRafRef = useRef<number | null>(null);
+  const flushScrub = useCallback(() => {
+    scrubRafRef.current = null;
+    const x = scrubXRef.current;
+    if (x == null) return;
+    scrubXRef.current = null;
+    scrubTo(timeFromPointer(x));
+  }, [scrubTo, timeFromPointer]);
+
   const onTimelinePointerDown = (e: React.PointerEvent) => {
     if (phase.kind !== "ready" && phase.kind !== "exporting") return;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -1126,13 +1174,21 @@ export default function App() {
   const onTimelinePointerMove = (e: React.PointerEvent) => {
     if (!(e.buttons & 1)) return;
     if (!isScrubbing) return;
-    const t = timeFromPointer(e.clientX);
-    scrubTo(t);
+    scrubXRef.current = e.clientX;
+    if (scrubRafRef.current == null) {
+      scrubRafRef.current = requestAnimationFrame(flushScrub);
+    }
   };
   const onTimelinePointerUp = (e: React.PointerEvent) => {
     if (!isScrubbing) return;
     (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     setIsScrubbing(false);
+    // Drop any pending coalesced scrub — the seek() below is the final value.
+    if (scrubRafRef.current != null) {
+      cancelAnimationFrame(scrubRafRef.current);
+      scrubRafRef.current = null;
+    }
+    scrubXRef.current = null;
     const v = videoRef.current;
     if (v) v.muted = wasMutedRef.current;
     // Apply final position, then restore play state if it was playing before scrub.
@@ -1231,7 +1287,7 @@ export default function App() {
       for (const [idx, bins] of entries) {
         const N = bins.length;
         if (N === 0) continue;
-        ctx.fillStyle = hexWithAlpha(trackColor(idx), baseAlpha);
+        ctx.fillStyle = hexWithAlpha(resolveTrackColor(idx, trackColors), baseAlpha);
         for (let x = 0; x < cssW; x++) {
           const m = xMixes[x][idx];
           if (m?.muted) continue;
@@ -1256,7 +1312,54 @@ export default function App() {
     const ro = new ResizeObserver(draw);
     ro.observe(container);
     return () => ro.disconnect();
-  }, [waveforms, trackMix, regions, duration]);
+  }, [waveforms, trackMix, regions, duration, trackColors]);
+
+  // Draw keyframe ticks. Faint vertical hairlines at every video keyframe so
+  // the user can see where stream-copy cuts will snap. Sits below the wave
+  // canvas in the stacking order — the waveform additively blends on top so
+  // these ticks don't compete visually during playback.
+  useEffect(() => {
+    const canvas = keyframeCanvasRef.current;
+    const container = timelineRef.current;
+    if (!canvas || !container) return;
+
+    const draw = () => {
+      const cssW = canvas.clientWidth;
+      const cssH = canvas.clientHeight;
+      if (cssW === 0 || cssH === 0) return;
+      const dpr = window.devicePixelRatio || 1;
+      if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+        canvas.width = Math.round(cssW * dpr);
+        canvas.height = Math.round(cssH * dpr);
+      }
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, cssW, cssH);
+      if (!keyframes || keyframes.length === 0 || duration <= 0) return;
+
+      // Hairline ticks. Color is intentionally low-contrast — these are
+      // navigational hints, not decoration. Use crisp 1px integer x.
+      ctx.fillStyle = "rgba(255, 255, 255, 0.10)";
+      let lastX = -2;
+      for (let i = 0; i < keyframes.length; i++) {
+        const t = keyframes[i];
+        if (t < 0 || t > duration) continue;
+        const x = Math.round((t / duration) * cssW);
+        // Skip duplicates at the same pixel — many keyframes can collapse
+        // into one column on a wide source / narrow timeline.
+        if (x === lastX) continue;
+        lastX = x;
+        ctx.fillRect(x, 0, 1, cssH);
+      }
+    };
+
+    draw();
+    const ro = new ResizeObserver(draw);
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, [keyframes, duration]);
 
   const playheadPct = duration > 0 ? (currentTime / duration) * 100 : 0;
   const draftInPct = draftIn != null && duration > 0 ? (draftIn / duration) * 100 : null;
@@ -1269,45 +1372,85 @@ export default function App() {
       ? 1
       : 0;
 
-  const phaseBanner = (() => {
-    switch (phase.kind) {
-      case "idle":
-        return null;
-      case "probing":
-        return <Banner label="Reading file metadata…" />;
-      case "proxying":
-        return (
-          <Banner
-            label={`Preparing source… ${(phase.progress * 100).toFixed(0)}%  ·  ETA ${fmtEta(phase.eta)}`}
-            progress={phase.progress}
-          />
-        );
-      case "exporting":
-        return (
-          <Banner
-            label={
-              phase.total > 1
-                ? `Exporting clip ${phase.current}/${phase.total}… ${(phase.progress * 100).toFixed(0)}%`
-                : `Exporting clip (stream copy)… ${(phase.progress * 100).toFixed(0)}%`
-            }
-            progress={phase.progress}
-          />
-        );
-      case "error":
-        return <Banner label={`Error: ${phase.message}`} error />;
-      case "ready":
-        return null;
+  // Compute the single status to surface in the strip. Highest-priority
+  // state wins. Order, top to bottom: error > work-in-flight > export-done
+  // confirmation > frame-copied confirmation > scrubbing > looping > nothing.
+  // Single status surface for the app.
+  //
+  // Memoized so the StatusStrip's prop reference is stable across renders
+  // that don't actually change what the strip should show — without this,
+  // every timeupdate (60 Hz) during normal playback creates a fresh object
+  // and the strip re-renders even though the displayed content is identical.
+  const statusContent = useMemo<StatusContent | null>(() => {
+    if (phase.kind === "error") {
+      return {
+        kind: "error",
+        message: phase.message,
+        onDismiss: () => setPhase({ kind: srcPath ? "ready" : "idle" }),
+      };
     }
-  })();
+    if (phase.kind === "probing") {
+      return { kind: "phase", label: "Reading file metadata…" };
+    }
+    if (phase.kind === "proxying") {
+      return {
+        kind: "phase",
+        label: `Preparing source · ${(phase.progress * 100).toFixed(0)}%`,
+        progress: phase.progress,
+        etaSecs: phase.eta,
+      };
+    }
+    if (phase.kind === "exporting") {
+      const label =
+        phase.total > 1
+          ? `Exporting clip ${phase.current}/${phase.total}`
+          : `Exporting`;
+      return { kind: "phase", label, progress: phase.progress };
+    }
+    if (lastExport) {
+      return {
+        kind: "export-done",
+        paths: lastExport.paths,
+        onDismiss: () => setLastExport(null),
+      };
+    }
+    if (frameToast) {
+      return { kind: "frame-copied", onDismiss: clearFrameMode };
+    }
+    if (isScrubbing) {
+      return { kind: "scrubbing", time: currentTime };
+    }
+    if (loopingRegion) {
+      return {
+        kind: "looping",
+        regionIndex: loopingRegionIndex,
+        regionColor: resolveRegionColor(loopingRegion, loopingRegionIndex),
+        onStop: () => toggleLoopRegion(loopingRegion.id),
+      };
+    }
+    return null;
+  }, [
+    phase,
+    srcPath,
+    lastExport,
+    frameToast,
+    isScrubbing,
+    currentTime,
+    loopingRegion,
+    loopingRegionIndex,
+    clearFrameMode,
+    toggleLoopRegion,
+  ]);
 
   return (
     <div className="app">
+      <OnboardingHint />
       <header className="topbar">
         <div className="brand" title="Clippy">
           <div className="brand-mark" aria-hidden />
           <span className="brand-name">Clippy</span>
         </div>
-        <button className="btn" onClick={handleOpen} title={formatKeybind(keybinds.openFile)}>
+        <button className="ghost" onClick={handleOpen} title={formatKeybind(keybinds.openFile)}>
           Open video…
         </button>
         <div className="filemeta">
@@ -1333,6 +1476,14 @@ export default function App() {
           )}
         </div>
         <button
+          className="help-button"
+          onClick={() => setTipsOpen(true)}
+          title="Tips & shortcuts"
+          aria-label="Tips and shortcuts"
+        >
+          ?
+        </button>
+        <button
           className="btn primary"
           onClick={openExport}
           disabled={phase.kind !== "ready" || !srcPath || exportableCount === 0}
@@ -1342,21 +1493,7 @@ export default function App() {
         </button>
       </header>
 
-      {phaseBanner}
-
       <main className="stage">
-        {loopingRegion && proxySrc && (
-          <button
-            className="loop-badge"
-            onClick={() => toggleLoopRegion(loopingRegion.id)}
-            title="Click to stop looping (or scrub outside the region)"
-          >
-            <span className="loop-badge-icon">↻</span>
-            <span className="loop-badge-text">
-              Looping #{loopingRegionIndex + 1}
-            </span>
-          </button>
-        )}
         {proxySrc ? (
           <video
             ref={videoRef}
@@ -1410,6 +1547,12 @@ export default function App() {
         )}
       </main>
 
+      {/* Bottom zone — status strip (consolidated) + transport (always) +
+          tool slots (conditional, in fixed-height containers so adding the
+          first region or loading a multi-track source doesn't shift earlier
+          layout). */}
+      <section className="shell-bottom">
+      <StatusStrip content={statusContent} />
       <section className="transport">
         <div className="time-readout">
           <span className="mono">{fmtTime(currentTime)}</span>
@@ -1450,77 +1593,108 @@ export default function App() {
         </div>
       </section>
 
-      {info && info.audio_tracks.length > 1 && (
+      {info && info.audio_tracks.length >= 1 && (
         <TrackMixer
           tracks={info.audio_tracks}
           mix={effectiveMix}
           onChange={setEffectiveMix}
+          trackColors={trackColors}
+          onTrackColorsChange={setTrackColors}
+          trackNames={trackNames}
+          onTrackNamesChange={setTrackNames}
           contextLabel={
             playheadRegion ? `Region ${playheadRegionIndex + 1}` : "Default"
           }
           contextColor={
             playheadRegion
-              ? `hsl(${REGION_HUES[playheadRegionIndex % REGION_HUES.length]}, 60%, 55%)`
+              ? resolveRegionColor(playheadRegion, playheadRegionIndex)
               : null
           }
         />
       )}
 
+      {/* Reserved chips slot — empty until the first region is created so
+          the timeline below doesn't shift when chips appear. */}
+      <div className="shell-slot-chips">
       {regions.length > 0 && (
         <section className="region-list">
-          {regions.map((r, i) => (
+          {regions.map((r, i) => {
+            const colorSlot = r.colorIndex ?? (i % REGION_COLORS.length);
+            const color = resolveRegionColor(r, i);
+            return (
             <span
               key={r.id}
-              className={`region-chip${loopingRegionId === r.id ? " looping" : ""}`}
+              className="region-chip"
               onClick={() => seek(r.inSecs)}
               title="Click to jump playhead to this region's in-point"
-              style={{ ["--region-hue" as any]: REGION_HUES[i % REGION_HUES.length] }}
+              style={{ ["--region-color" as never]: color }}
             >
+              <ColorPicker
+                className="region-chip-dot"
+                colors={REGION_COLORS}
+                selectedSlot={colorSlot}
+                title="Change this region's color"
+                onChange={(newSlot) => {
+                  setRegions((rs) =>
+                    rs.map((x) => (x.id === r.id ? { ...x, colorIndex: newSlot } : x))
+                  );
+                }}
+              />
               <span className="region-chip-num">{i + 1}</span>
               <span className="region-chip-times mono">
                 {fmtTime(r.inSecs)} → {fmtTime(r.outSecs)}
               </span>
               <span className="region-chip-len mono dim">
-                ({fmtTime(r.outSecs - r.inSecs)})
+                {fmtTime(r.outSecs - r.inSecs)}
               </span>
               {r.crop && (
                 <span className="region-chip-crop mono" title={`Crop ${r.crop.w}×${r.crop.h} at ${r.crop.x},${r.crop.y}`}>
                   ✂ {r.crop.w}×{r.crop.h}
                 </span>
               )}
-              <button
-                className={`region-chip-crop-btn${r.crop ? " active" : ""}`}
-                onClick={(e) => { e.stopPropagation(); startCropEdit(r.id); }}
-                title={r.crop ? "Edit crop" : "Add a crop to this region"}
-              >
-                ✂
-              </button>
-              <span onClick={(e) => e.stopPropagation()}>
-                <SpeedPicker
-                  value={r.speed}
-                  onChange={(v) =>
-                    setRegions((rs) => rs.map((x) => x.id === r.id ? { ...x, speed: v } : x))
-                  }
-                />
+              {r.speed != null && r.speed !== 1 && (
+                <span className="region-chip-speed-badge mono" title={`Playback speed: ${r.speed}×`}>
+                  {r.speed}×
+                </span>
+              )}
+              <span className="region-chip-divider" aria-hidden />
+              <span className="region-chip-actions">
+                <button
+                  className={`region-chip-action${r.crop ? " active" : ""}`}
+                  onClick={(e) => { e.stopPropagation(); startCropEdit(r.id); }}
+                  title={r.crop ? "Edit crop" : "Add a crop to this region"}
+                >
+                  ✂
+                </button>
+                <span onClick={(e) => e.stopPropagation()}>
+                  <SpeedPicker
+                    value={r.speed}
+                    onChange={(v) =>
+                      setRegions((rs) => rs.map((x) => x.id === r.id ? { ...x, speed: v } : x))
+                    }
+                  />
+                </span>
+                <button
+                  className={`region-chip-action${loopingRegionId === r.id ? " active-loop" : ""}`}
+                  onClick={(e) => { e.stopPropagation(); toggleLoopRegion(r.id); }}
+                  title={loopingRegionId === r.id ? "Stop looping" : "Loop this region"}
+                >
+                  ↻
+                </button>
+                <button
+                  className="region-chip-action region-chip-delete"
+                  onClick={(e) => { e.stopPropagation(); deleteRegion(r.id); }}
+                  title="Delete region"
+                >
+                  ×
+                </button>
               </span>
-              <button
-                className={`region-chip-loop-btn${loopingRegionId === r.id ? " active" : ""}`}
-                onClick={(e) => { e.stopPropagation(); toggleLoopRegion(r.id); }}
-                title={loopingRegionId === r.id ? "Stop looping" : "Loop this region"}
-              >
-                ↻
-              </button>
-              <button
-                className="region-chip-x"
-                onClick={(e) => { e.stopPropagation(); deleteRegion(r.id); }}
-                title="Delete region"
-              >
-                ×
-              </button>
             </span>
-          ))}
+            );
+          })}
         </section>
       )}
+      </div>
 
       <section
         className="timeline"
@@ -1530,6 +1704,7 @@ export default function App() {
         onPointerUp={onTimelinePointerUp}
         onPointerCancel={onTimelinePointerUp}
       >
+        <canvas ref={keyframeCanvasRef} className="keyframes" />
         <canvas ref={waveCanvasRef} className="waveform" />
         {/* committed regions (one band per region; edges are draggable) */}
         {regions.map((r, i) => {
@@ -1537,12 +1712,12 @@ export default function App() {
           const left = (r.inSecs / duration) * 100;
           const width = Math.max(0, ((r.outSecs - r.inSecs) / duration) * 100);
           const isResizingThis = resizingEdge?.regionId === r.id;
-          const hue = REGION_HUES[i % REGION_HUES.length];
+          const color = resolveRegionColor(r, i);
           return (
             <div
               key={r.id}
               className="region-band"
-              style={{ left: `${left}%`, width: `${width}%`, ["--region-hue" as any]: hue }}
+              style={{ left: `${left}%`, width: `${width}%`, ["--region-color" as never]: color }}
               title={`Region ${i + 1}: ${fmtTime(r.inSecs)} → ${fmtTime(r.outSecs)} — drag edges to adjust`}
             >
               <div
@@ -1599,6 +1774,7 @@ export default function App() {
           edit shortcuts…
         </button>
       </footer>
+      </section>{/* /.shell-bottom */}
 
       {exportOpen && (
         <ExportModal
@@ -1619,16 +1795,6 @@ export default function App() {
           onCancel={() => setExportOpen(false)}
           onConfirm={runExport}
         />
-      )}
-
-      {lastExport && (
-        <ExportToast paths={lastExport.paths} onClose={() => setLastExport(null)} />
-      )}
-
-      {frameToast && (
-        <div className="frame-toast" onClick={clearFrameMode}>
-          {frameToast}
-        </div>
       )}
 
       {isDraggingFile && (
@@ -1663,6 +1829,8 @@ export default function App() {
           crop={activeCroppedRegion.crop}
         />
       )}
+
+      {tipsOpen && <TipsModal onClose={() => setTipsOpen(false)} />}
 
       {keybindsOpen && (
         <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setKeybindsOpen(false); }}>
@@ -1772,18 +1940,3 @@ function CacheControls() {
   );
 }
 
-function Banner(props: { label: string; progress?: number; error?: boolean }) {
-  return (
-    <div className={`banner${props.error ? " error" : ""}`}>
-      <div className="banner-label">{props.label}</div>
-      {typeof props.progress === "number" && (
-        <div className="banner-bar">
-          <div
-            className="banner-fill"
-            style={{ width: `${(props.progress * 100).toFixed(1)}%` }}
-          />
-        </div>
-      )}
-    </div>
-  );
-}

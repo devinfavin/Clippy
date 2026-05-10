@@ -4,28 +4,34 @@
 :root {
   color-scheme: dark;
 
-  /* Surfaces */
-  --bg:        #0e1216;
-  --panel:     #171b22;
-  --panel-2:   #1f2530;
-  --panel-3:   #2a3140;
-  --border:    #232a33;
-  --border-2:  #353d49;
+  /* Two coexisting token systems are in use across this file:
+       1. Short legacy names — --bg, --panel, --s-N, --r-N, --t-fast,
+          --fs-body etc. The majority of existing components consume these.
+       2. Verbose new names — --c-bg, --c-surface, --space-N, --radius-N,
+          --motion-base, --type-body etc. Newer components prefer these.
+     Both expand to the same underlying values. Convergence to one system
+     is a v1.1 task — for now, just don't introduce a third spelling.    */
+  --bg:        hsl(220, 8%, 9%);
+  --panel:     hsl(220, 8%, 11%);
+  --panel-2:   hsl(220, 8%, 13%);
+  --panel-3:   hsl(220, 8%, 15%);
+  --border:    hsla(0, 0%, 100%, 0.06);
+  --border-2:  hsla(0, 0%, 100%, 0.12);
 
-  /* Text */
-  --text:      #e7ecf2;
-  --text-2:    #b9c2cc;
-  --dim:       #707a86;
+  /* Text — switched to alpha-on-white for natural contrast at any tone. */
+  --text:      hsla(0, 0%, 100%, 0.92);
+  --text-2:    hsla(0, 0%, 100%, 0.65);
+  --dim:       hsla(0, 0%, 100%, 0.42);
 
-  /* Single accent */
-  --accent:      #4f9dff;
-  --accent-2:    #2d6ec5;
-  --accent-tint: rgba(79, 157, 255, 0.18);
+  /* Single accent — desaturated blue, primary action only */
+  --accent:      hsl(213, 50%, 60%);
+  --accent-2:    hsl(213, 50%, 50%);
+  --accent-tint: hsla(213, 50%, 60%, 0.16);
 
   /* Semantic */
-  --good:      #4ad08e;
-  --warn:      #e5b95a;
-  --bad:       #ef6266;
+  --good:      hsl(142, 45%, 55%);
+  --warn:      hsl(38, 75%, 60%);
+  --bad:       hsl(2, 65%, 60%);
 
   /* Functional roles */
   --in:        var(--good);
@@ -65,9 +71,93 @@
   --t-slow: 280ms;
   --ease:   cubic-bezier(0.4, 0, 0.2, 1);
 
-  /* Type families */
-  --font-sans: ui-sans-serif, "Segoe UI Variable", "Segoe UI", system-ui, Roboto, sans-serif;
-  --font-mono: ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  /* Type families — system font stack (matches macOS Sonoma references). */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "SF Mono", Menlo, Consolas, "Courier New", monospace;
+
+  /* ---------- Verbose token aliases (newer components) ---------- *
+   * Same color/spacing/motion values as the short tokens above, just
+   * spelled out for self-documentation at the call site.            */
+
+  /* Surfaces — 2% lightness steps; panels delineate by tone, not borders */
+  --c-bg:            hsl(220, 8%, 9%);
+  --c-surface:       hsl(220, 8%, 11%);
+  --c-surface-2:     hsl(220, 8%, 13%);
+  --c-surface-3:     hsl(220, 8%, 15%);
+  --c-surface-hover: hsl(220, 8%, 17%);
+
+  /* Borders — barely visible; tone shift preferred */
+  --c-border:        hsla(0, 0%, 100%, 0.06);
+  --c-border-strong: hsla(0, 0%, 100%, 0.12);
+
+  /* Text — opacity on white for natural contrast at any surface level */
+  --c-text:           hsla(0, 0%, 100%, 0.92);
+  --c-text-secondary: hsla(0, 0%, 100%, 0.65);
+  --c-text-muted:     hsla(0, 0%, 100%, 0.42);
+
+  /* Accent — desaturated blue. Primary action, focus, brand. Nothing else. */
+  --c-accent:        hsl(213, 50%, 60%);
+  --c-accent-hover:  hsl(213, 50%, 63%);
+  --c-accent-focus:  hsla(213, 60%, 65%, 0.18);
+  --c-accent-fg:     hsl(220, 30%, 12%);
+
+  /* Status — semantic only */
+  --c-success: hsl(142, 45%, 55%);
+  --c-warning: hsl(38, 75%, 60%);
+  --c-error:   hsl(2, 65%, 60%);
+
+  /* Track palette · warms (saffron / coral / rose / lavender) */
+  --c-track-1: hsl(42, 65%, 60%);
+  --c-track-2: hsl(14, 65%, 64%);
+  --c-track-3: hsl(330, 50%, 65%);
+  --c-track-4: hsl(280, 35%, 68%);
+
+  /* Region palette · cools (teal / cyan / slate / aquamarine) */
+  --c-region-1: hsl(178, 45%, 52%);
+  --c-region-2: hsl(196, 50%, 58%);
+  --c-region-3: hsl(218, 28%, 58%);
+  --c-region-4: hsl(162, 38%, 55%);
+
+  /* Crop indicator — chromatically neutral; identity carried by dashed line */
+  --c-crop: hsla(0, 0%, 100%, 0.85);
+
+  /* Type scale */
+  --type-hint:      11px;
+  --type-meta:      12px;
+  --type-control:   13px;
+  --type-section:   13px;
+  --type-body:      14px;
+  --type-emphasis:  15px;
+  --type-heading:   18px;
+  --type-display:   22px;
+
+  --weight-regular:  400;
+  --weight-medium:   500;
+  --weight-semibold: 600;
+
+  /* Spacing (4px grid) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
+
+  /* Radius */
+  --radius-1: 4px;
+  --radius-2: 6px;
+  --radius-3: 8px;
+  --radius-4: 12px;
+
+  /* Motion */
+  --motion-quick: 150ms;
+  --motion-base:  200ms;
+  --motion-slow:  280ms;
+  --ease-out:     cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out:  cubic-bezier(0.4, 0, 0.2, 1);
+
 }
 
 /* ---------------------------------------------------------- *
@@ -102,33 +192,83 @@ button {
 }
 button:hover:not(:disabled) { background: var(--panel-3); }
 button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  box-shadow: 0 0 0 2px var(--c-accent-focus);
 }
 button:disabled {
   opacity: 0.42;
   cursor: not-allowed;
 }
 button.primary {
-  background: var(--accent-2);
-  border-color: var(--accent-2);
-  color: white;
-}
-button.primary:hover:not(:disabled) {
   background: var(--accent);
   border-color: var(--accent);
+  color: var(--c-accent-fg);
+  font-weight: var(--weight-medium);
 }
+button.primary:hover:not(:disabled) {
+  background: var(--c-accent-hover);
+  border-color: var(--c-accent-hover);
+}
+/* Ghost — quiet at rest with just a hairline outline so it still reads
+   as interactive, fills on hover. */
 button.ghost {
   background: transparent;
-  border-color: transparent;
+  border-color: var(--border);
+  color: var(--text-2);
 }
 button.ghost:hover:not(:disabled) {
   background: var(--panel-2);
   border-color: var(--border-2);
+  color: var(--text);
 }
 
 .mono { font-family: var(--font-mono); }
 .dim  { color: var(--dim); }
+
+/* ---------------------------------------------------------- *
+ *  Section title treatment                                     *
+ *  Uniform across panels: 13 semibold sentence-case, full      *
+ *  text color. Reads as a real heading, not a footnote tag.    *
+ * ---------------------------------------------------------- */
+.section-title {
+  font-size: var(--type-section);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+  letter-spacing: 0;
+}
+
+/* ---------------------------------------------------------- *
+ *  Color picker popover                                        *
+ *  Portaled to body with fixed positioning so it never gets    *
+ *  clipped (chip overflow, mixer panel bounds, etc).           *
+ * ---------------------------------------------------------- */
+.color-popover {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  z-index: 1000;
+}
+.color-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: transform var(--motion-quick) var(--ease-out),
+              border-color var(--motion-quick) var(--ease-out);
+}
+.color-swatch:hover {
+  transform: scale(1.12);
+}
+.color-swatch.active {
+  border-color: var(--text);
+}
 
 kbd {
   font-family: var(--font-mono);
@@ -163,6 +303,163 @@ kbd {
 }
 
 /* ---------------------------------------------------------- *
+ *  Shell layout                                                *
+ *  Three zones — topbar / stage / shell-bottom — with slots    *
+ *  inside the bottom that reserve space so adding the first    *
+ *  region or kicking off a long task doesn't shift the page.   *
+ * ---------------------------------------------------------- */
+
+/* Wrapper around everything below the player — structural only. */
+.shell-bottom {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+/* Region-chips slot: reserves one chip-row's height even when no
+   regions exist, so creating the first region doesn't push the
+   timeline downward. */
+.shell-slot-chips {
+  min-height: 44px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------------------------------------------------------- *
+ *  Status strip                                                *
+ *  Single strip above transport. Holds error / phase /         *
+ *  scrubbing / loop / frame-copied / export-done — one visual  *
+ *  language: tint stripe + icon + text + optional progress +   *
+ *  optional inline actions.                                    *
+ * ---------------------------------------------------------- */
+.status-strip {
+  /* Collapsed by default. Animates open when content is set. */
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height var(--motion-base) var(--ease-in-out);
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+  flex-shrink: 0;
+}
+.status-strip.visible {
+  /* Roomy enough for one row of 13px text + 8px padding top/bottom. */
+  max-height: 40px;
+}
+.status-strip-inner {
+  display: flex;
+  align-items: stretch;
+  height: 40px;
+  padding: 0 var(--space-4);
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  font-size: var(--type-control);
+  color: var(--c-text);
+  border-left: 3px solid transparent;
+  padding-left: var(--space-3);
+  margin-left: calc(-1 * var(--space-3));
+}
+
+.status-tone-info    { border-left-color: var(--c-accent); }
+.status-tone-accent  { border-left-color: var(--c-accent); }
+.status-tone-muted   { border-left-color: var(--c-border-strong); color: var(--c-text-secondary); }
+.status-tone-success { border-left-color: var(--c-success); }
+.status-tone-error   { border-left-color: var(--c-error); }
+.status-tone-error .status-icon { color: var(--c-error); }
+.status-tone-success .status-icon { color: var(--c-success); }
+.status-tone-info .status-icon,
+.status-tone-accent .status-icon { color: var(--c-accent); }
+.status-tone-muted .status-icon { color: var(--c-text-muted); }
+
+.status-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  flex-shrink: 0;
+}
+.status-icon-spin { animation: status-spin 1.4s linear infinite; }
+@keyframes status-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+.status-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.status-aux {
+  font-size: var(--type-meta);
+  font-family: var(--font-mono);
+  color: var(--c-text-muted);
+  flex-shrink: 0;
+}
+.status-progress {
+  width: 110px;
+  height: 3px;
+  background: var(--c-surface-3);
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.status-progress > span {
+  display: block;
+  height: 100%;
+  background: var(--c-accent);
+  transition: width var(--motion-base) var(--ease-out);
+}
+
+.status-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.status-action {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--c-text-secondary);
+  font-family: inherit;
+  font-size: var(--type-meta);
+  font-weight: var(--weight-medium);
+  padding: 3px 9px;
+  border-radius: var(--radius-1);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  min-width: 24px;
+  transition: background var(--motion-quick) var(--ease-out),
+              color var(--motion-quick) var(--ease-out);
+}
+.status-action:hover { background: var(--c-surface-hover); color: var(--c-text); }
+
+/* Inline region pill embedded in status text (used by "Looping Region 2"). */
+.status-region-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  background: var(--c-surface-2);
+  border-radius: 999px;
+  font-weight: var(--weight-medium);
+}
+.status-region-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--region-color, var(--c-accent));
+}
+
+/* ---------------------------------------------------------- *
  *  Top bar                                                     *
  * ---------------------------------------------------------- */
 .topbar {
@@ -173,14 +470,15 @@ kbd {
   background: var(--panel);
   border-bottom: 1px solid var(--border);
 }
+/* Brand sits left, present but recedes when a file is loaded so the
+   filename can be the answer to "what am I working on". */
 .brand {
   display: flex;
   align-items: center;
   gap: var(--s-2);
-  font-weight: 600;
-  letter-spacing: 0.2px;
-  color: var(--text);
+  color: var(--text-2);
   user-select: none;
+  flex-shrink: 0;
 }
 .brand-mark {
   width: 22px;
@@ -199,8 +497,9 @@ kbd {
   clip-path: polygon(0 0, 60% 0, 100% 50%, 60% 100%, 0 100%);
 }
 .brand-name {
-  font-size: var(--fs-h);
-  letter-spacing: -0.1px;
+  font-size: var(--type-control);     /* recedes — 13px regular */
+  font-weight: var(--weight-medium);
+  letter-spacing: 0;
 }
 
 .filemeta {
@@ -208,53 +507,25 @@ kbd {
   flex-direction: column;
   flex: 1;
   min-width: 0;
+  gap: 2px;
 }
+/* Filename is the loudest text in the topbar — answers
+   "what am I working on". */
 .filename {
   white-space: nowrap;
   text-overflow: ellipsis;
   overflow: hidden;
-  font-weight: 500;
-  font-size: var(--fs-body);
+  font-weight: var(--weight-medium);
+  font-size: var(--type-emphasis);
   color: var(--text);
+  letter-spacing: -0.1px;
 }
 .filemeta .dim {
-  font-size: var(--fs-small);
+  font-size: var(--type-meta);
+  font-family: var(--font-mono);
   color: var(--dim);
-  margin-top: 2px;
 }
-.encoder-badge { color: var(--good); }
-
-/* ---------------------------------------------------------- *
- *  Banner (loading / error / progress)                         *
- * ---------------------------------------------------------- */
-.banner {
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-  padding: var(--s-2) var(--s-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-}
-.banner.error {
-  background: rgba(239, 98, 102, 0.10);
-  border-bottom-color: rgba(239, 98, 102, 0.25);
-  color: #ffd0d2;
-}
-.banner-label {
-  font-size: var(--fs-body);
-}
-.banner-bar {
-  width: 100%;
-  height: 3px;
-  background: var(--panel-3);
-  border-radius: 2px;
-  overflow: hidden;
-}
-.banner-fill {
-  height: 100%;
-  background: var(--accent);
-  transition: width var(--t-base) linear;
-}
+.encoder-badge { color: var(--text-2); font-family: var(--font-mono); }
 
 /* ---------------------------------------------------------- *
  *  Video stage                                                 *
@@ -328,14 +599,26 @@ kbd {
   background: var(--panel);
   border-top: 1px solid var(--border);
 }
+/* Current position is the loudest text in the transport — answers
+   "where am I in the file". Total time recedes to one tier dimmer. */
 .time-readout {
-  font-size: var(--fs-display);
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   min-width: 200px;
-  letter-spacing: -0.2px;
+  font-size: var(--type-display);     /* 22px — the live position */
+  font-weight: var(--weight-medium);
+  color: var(--text);
+  letter-spacing: -0.4px;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
 }
-.time-readout .dim { font-size: var(--fs-body); }
+.time-readout .dim {
+  font-size: var(--type-control);     /* 13px — the duration reference */
+  font-weight: var(--weight-regular);
+  color: var(--dim);
+  letter-spacing: 0;
+}
 
 .transport-buttons {
   display: flex;
@@ -354,14 +637,20 @@ kbd {
   border-color: var(--border-2);
   color: var(--text);
 }
+/* Play button — loudest control in the transport row.
+   Filled with a light accent tint so the eye lands on it first. */
 .transport-buttons .play {
-  width: 50px;
-  background: var(--panel-2);
-  border-color: var(--border-2);
-  color: var(--text);
+  width: 56px;
+  height: 36px;
+  font-size: var(--type-emphasis);
+  background: var(--accent-tint);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  color: var(--accent);
 }
 .transport-buttons .play:hover:not(:disabled) {
-  background: var(--panel-3);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: var(--accent);
+  color: var(--text);
 }
 
 .mark-buttons {
@@ -405,6 +694,18 @@ kbd {
   display: block;
 }
 
+/* Keyframe ticks. Rendered before .waveform in DOM so the waveform bars
+   paint on top — keyframes stay visible in the gaps as a faint navigation
+   hint, strongest on long sources where keyframe spacing matters. */
+.keyframes {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  display: block;
+}
+
 .selection {
   position: absolute;
   top: 0;
@@ -419,15 +720,15 @@ kbd {
   position: absolute;
   top: 0;
   bottom: 0;
-  /* Per-region hue varies via --region-hue (set inline in JSX). */
-  background: hsla(var(--region-hue, 142), 50%, 50%, 0.16);
+  /* Per-region color comes via --region-color (set inline in JSX, cool palette). */
+  background: color-mix(in srgb, var(--region-color, hsl(178, 45%, 52%)) 14%, transparent);
   border-left: 2px solid var(--in);
   border-right: 2px solid var(--out);
   pointer-events: none;
   display: flex;
   align-items: flex-start;
   justify-content: flex-start;
-  animation: region-fade-in var(--t-slow) var(--ease);
+  animation: region-fade-in var(--motion-base) var(--ease-out);
 }
 @keyframes region-fade-in {
   from { opacity: 0; transform: translateY(-2px); }
@@ -441,18 +742,15 @@ kbd {
   border-right-color: rgba(229, 185, 90, 0.65);
 }
 .region-band-num {
-  font-size: var(--fs-small);
+  font-size: var(--type-meta);
   font-family: var(--font-mono);
-  color: #fff;
-  background: hsla(var(--region-hue, 142), 60%, 42%, 0.92);
+  color: var(--bg);
+  background: var(--region-color, hsl(178, 45%, 52%));
   padding: 2px 8px;
   border-radius: 0 0 var(--r-1) 0;
   line-height: 1.25;
   pointer-events: none;
-  font-weight: 700;
-  letter-spacing: 0.4px;
-  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  font-weight: var(--weight-semibold);
 }
 /* Inline duration: shown on hover near the right edge of each band. */
 .region-band-dur {
@@ -476,7 +774,7 @@ kbd {
 /* Make the band itself accept hover events without breaking edge handle drag. */
 .region-band { pointer-events: auto; }
 .region-band:hover {
-  background: hsla(var(--region-hue, 142), 60%, 50%, 0.22);
+  background: color-mix(in srgb, var(--region-color, hsl(178, 45%, 52%)) 22%, transparent);
 }
 
 .region-edge-handle {
@@ -538,115 +836,147 @@ kbd {
 .region-list {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--s-1);
+  gap: var(--s-2);
   padding: var(--s-2) var(--s-4);
   background: var(--panel);
   border-top: 1px solid var(--border);
-  max-height: 96px;
+  max-height: 120px;
   overflow-y: auto;
 }
+
+/* Region chip — showcase pattern.
+   Identity carried by a small color dot at the leading edge (NOT a heavy
+   filled badge with the number, NOT a colored border). Number is plain text.
+   A hairline divider separates the data from the action tray. */
 .region-chip {
   display: inline-flex;
   align-items: center;
-  gap: var(--s-1);
-  padding: 3px var(--s-1) 3px var(--s-2);
+  gap: var(--s-2);
+  padding: 5px 5px 5px 12px;
   background: var(--panel-2);
-  border: 1px solid var(--border-2);
-  border-radius: 14px;
-  font-size: var(--fs-small);
-  line-height: 1.3;
+  border-radius: 999px;
+  font-size: var(--type-control);
   cursor: pointer;
-  transition: background var(--t-fast) var(--ease),
-              border-color var(--t-fast) var(--ease),
-              transform var(--t-fast) var(--ease);
-  animation: chip-fade-in var(--t-base) var(--ease);
+  transition: background var(--motion-quick) var(--ease-out);
+  animation: chip-fade-in var(--motion-base) var(--ease-out);
 }
 @keyframes chip-fade-in {
-  from { opacity: 0; transform: scale(0.96); }
-  to   { opacity: 1; transform: scale(1); }
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
-.region-chip:hover {
-  background: var(--panel-3);
-  border-color: var(--accent);
+.region-chip:hover { background: var(--panel-3); }
+
+/* Region chip dot — now clickable (opens ColorPicker). Slightly larger
+   than a non-clickable indicator for an easy hit area. */
+.region-chip-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--region-color, var(--accent));
+  flex-shrink: 0;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  transition: transform var(--motion-quick) var(--ease-out);
 }
-.region-chip.looping {
-  border-color: var(--good);
-  background: rgba(74, 208, 142, 0.10);
+.region-chip-dot:hover {
+  transform: scale(1.2);
 }
 .region-chip-num {
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  min-width: 10px;
+}
+.region-chip-times {
+  font-size: var(--type-control);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.region-chip-len {
+  font-size: var(--type-meta);
+  color: var(--dim);
+}
+.region-chip-crop,
+.region-chip-speed-badge {
+  font-size: var(--type-meta);
+  color: var(--text-2);
+  padding: 1px var(--s-2);
+  border-radius: var(--r-1);
+  background: var(--panel-3);
+  font-family: var(--font-mono);
+}
+
+/* Progressive disclosure
+   The action tray (crop edit / loop / delete) and its divider are hidden
+   at rest. Hover reveals them via a max-width + opacity transition so the
+   chip grows in place rather than reflowing siblings. Status badges
+   (crop dimensions, looping spinner via .active-loop) stay visible at
+   rest because they're INFORMATION about the region, not actions. */
+.region-chip-divider {
+  width: 1px;
+  height: 16px;
+  background: var(--border-2);
+  flex-shrink: 0;
+  margin: 0 2px;
+  opacity: 0;
+  max-width: 0;
+  overflow: hidden;
+  transition: opacity var(--motion-quick) var(--ease-out),
+              max-width var(--motion-base) var(--ease-out),
+              margin var(--motion-base) var(--ease-out);
+}
+.region-chip:hover .region-chip-divider,
+.region-chip:focus-within .region-chip-divider {
+  opacity: 1;
+  max-width: 1px;
+}
+
+.region-chip-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0;
+  max-width: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition: opacity var(--motion-quick) var(--ease-out),
+              max-width var(--motion-base) var(--ease-out);
+}
+.region-chip:hover .region-chip-actions,
+.region-chip:focus-within .region-chip-actions {
+  opacity: 1;
+  max-width: 240px;
+  pointer-events: auto;
+}
+.region-chip-action {
+  background: transparent;
+  border: 0;
+  color: var(--text-2);
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-1);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: hsla(var(--region-hue, 142), 55%, 45%, 1);
-  color: white;
-  font-weight: 700;
-  font-size: var(--fs-micro);
+  padding: 0;
+  transition: background var(--motion-quick) var(--ease-out),
+              color var(--motion-quick) var(--ease-out);
 }
-.region-chip-times { font-size: var(--fs-small); font-variant-numeric: tabular-nums; }
-.region-chip-len   { font-size: var(--fs-micro); }
-.region-chip-loop-btn {
-  background: transparent;
-  border: 0;
-  padding: 0 var(--s-1);
-  font-size: var(--fs-h);
-  line-height: 1;
-  color: var(--dim);
-  cursor: pointer;
-  border-radius: 50%;
-  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
-}
-.region-chip-loop-btn:hover { color: var(--good); background: rgba(74, 208, 142, 0.12); }
-.region-chip-loop-btn.active {
+.region-chip-action:hover { background: var(--panel-3); color: var(--text); }
+.region-chip-action.active { color: var(--accent); }
+.region-chip-action.active-loop {
   color: var(--good);
   animation: spin 2s linear infinite;
 }
+.region-chip-action.region-chip-delete:hover { color: var(--bad); }
 @keyframes spin {
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
 }
-.region-chip-x {
-  background: transparent;
-  border: 0;
-  padding: 0 var(--s-1);
-  font-size: var(--fs-h);
-  line-height: 1;
-  color: var(--dim);
-  cursor: pointer;
-  border-radius: 50%;
-  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
-}
-.region-chip-x:hover {
-  color: var(--bad);
-  background: rgba(239, 98, 102, 0.12);
-}
-.region-chip-crop {
-  font-size: var(--fs-micro);
-  color: var(--accent);
-  padding: 0 var(--s-1);
-  border-radius: var(--r-1);
-  background: rgba(79, 157, 255, 0.10);
-}
-.region-chip-crop-btn {
-  background: transparent;
-  border: 0;
-  padding: 0 var(--s-1);
-  color: var(--dim);
-  cursor: pointer;
-  font-size: var(--fs-small);
-  line-height: 1;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
-}
-.region-chip-crop-btn:hover {
-  color: var(--accent);
-  background: rgba(79, 157, 255, 0.12);
-}
-.region-chip-crop-btn.active { color: var(--accent); }
 
 /* Speed picker pill on the region chip + popover */
 .speed-picker { position: relative; display: inline-flex; align-items: center; }
@@ -708,30 +1038,6 @@ button.btn-armed {
   box-shadow: inset 0 0 0 1px rgba(79, 157, 255, 0.4);
 }
 
-/* Tiny toast that confirms the frame was copied. Subtle, auto-dismisses. */
-.frame-toast {
-  position: fixed;
-  bottom: var(--s-4);
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 50;
-  background: rgba(20, 26, 36, 0.92);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  border: 1px solid rgba(79, 157, 255, 0.4);
-  color: var(--text);
-  padding: 10px 16px;
-  border-radius: 999px;
-  font-size: var(--fs-small);
-  cursor: pointer;
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
-  animation: frame-toast-in var(--t-base) var(--ease);
-}
-@keyframes frame-toast-in {
-  from { opacity: 0; transform: translate(-50%, 8px); }
-  to   { opacity: 1; transform: translate(-50%, 0); }
-}
-
 /* ---------------------------------------------------------- *
  *  Track mixer (multi-audio sources)                           *
  *  Each row carries the track's palette color via              *
@@ -752,11 +1058,10 @@ button.btn-armed {
   gap: var(--s-2);
 }
 .track-mixer-title {
-  font-size: var(--fs-micro);
-  text-transform: uppercase;
-  letter-spacing: 0.7px;
-  color: var(--dim);
-  font-weight: 600;
+  font-size: var(--type-section);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+  letter-spacing: 0;
 }
 .track-mixer-context {
   display: inline-block;
@@ -853,16 +1158,77 @@ button.btn-armed {
   text-overflow: ellipsis;
   color: var(--text);
 }
+/* Resolved name as plain text — clicking switches to the input below. */
+.track-name-text {
+  cursor: text;
+  padding: 2px 6px;
+  margin: -2px -6px;        /* keep label sitting in same position despite padding */
+  border-radius: var(--radius-1);
+  transition: background var(--motion-quick) var(--ease-out);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.track-name-text:hover {
+  background: var(--panel-3);
+}
+/* Input shown while renaming. Inherits parent typography exactly so the
+   transition click → editing doesn't jolt the layout. */
+.track-name-input {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-1);
+  padding: 1px 5px;
+  margin: -2px -6px;
+  outline: none;
+  width: 140px;
+  min-width: 0;
+  box-shadow: 0 0 0 2px var(--c-accent-focus);
+}
+/* Track dot — clickable color identity. Click opens the ColorPicker
+   popover. Slightly larger than a non-clickable dot for an easy hit area. */
 .track-dot {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: var(--track-color);
   flex-shrink: 0;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  transition: transform var(--motion-quick) var(--ease-out);
+}
+.track-dot:hover {
+  transform: scale(1.2);
 }
 
-/* Volume slider — uses --track-color for the thumb + filled portion. */
+/* Volume slider — center-detent. Empty at 100% (unity); fill grows from
+   center outward toward the thumb in either direction. Track color
+   carries identity. A small tick at center marks unity. */
+.track-slider-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+.track-slider-tick {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 12px;
+  background: var(--text-2);
+  opacity: 0.5;
+  border-radius: 1px;
+  pointer-events: none;
+  z-index: 0;
+}
 .track-slider {
   appearance: none;
   -webkit-appearance: none;
@@ -871,14 +1237,18 @@ button.btn-armed {
   border-radius: 3px;
   outline: none;
   cursor: pointer;
-  /* Filled track: track-color up to 100%, then a slightly hotter shade past 100%. */
+  position: relative;
+  z-index: 1;
   background: linear-gradient(
     to right,
-    var(--track-color) 0%,
-    var(--track-color) var(--fill-pct, 100%),
-    var(--panel-3) var(--fill-pct, 100%),
+    var(--panel-3) 0%,
+    var(--panel-3) var(--fill-start, 50%),
+    var(--track-color) var(--fill-start, 50%),
+    var(--track-color) var(--fill-end, 50%),
+    var(--panel-3) var(--fill-end, 50%),
     var(--panel-3) 100%
   );
+  transition: background var(--motion-quick) var(--ease-out);
 }
 .track-slider::-webkit-slider-thumb {
   appearance: none;
@@ -890,7 +1260,7 @@ button.btn-armed {
   border: 2px solid var(--track-color);
   cursor: grab;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
-  transition: transform var(--t-fast) var(--ease);
+  transition: transform var(--motion-quick) var(--ease-out);
 }
 .track-slider::-webkit-slider-thumb:hover { transform: scale(1.1); }
 .track-slider:active::-webkit-slider-thumb { cursor: grabbing; }
@@ -898,10 +1268,6 @@ button.btn-armed {
   opacity: 0.4;
   cursor: not-allowed;
   background: var(--panel-3);
-}
-/* Tick at the 50% point (which maps to 100% volume) — visual reference. */
-.track-slider::-webkit-slider-runnable-track {
-  position: relative;
 }
 .track-pct {
   font-size: var(--fs-micro);
@@ -922,10 +1288,9 @@ button.btn-armed {
   background: var(--panel-2);
 }
 .cache-label {
-  font-size: var(--fs-micro);
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--dim);
+  font-size: var(--type-meta);
+  color: var(--text-2);
+  letter-spacing: 0;
 }
 .cache-size {
   flex: 1;
@@ -993,60 +1358,77 @@ button.btn-armed {
   border-radius: var(--r-1);
   pointer-events: none;
 }
+/* Crop overlay toolbar — same materials/spacing as modals so the floating
+   panel feels like part of the same design system, not a glued-on widget. */
 .crop-toolbar {
   display: flex;
   align-items: center;
   gap: var(--s-2);
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: var(--r-2);
-  padding: var(--s-1) var(--s-2);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  border-radius: var(--radius-3);
+  padding: 6px var(--s-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   z-index: 3;
 }
-.crop-toolbar-label { color: var(--dim); margin-right: var(--s-2); }
-.crop-toolbar-btn {
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  color: var(--text);
-  padding: 4px 10px;
-  border-radius: var(--r-1);
-  font-size: var(--fs-small);
-  cursor: pointer;
-  transition: background var(--t-fast) var(--ease);
+.crop-toolbar-label {
+  color: var(--text-2);
+  font-size: var(--type-meta);
+  font-family: var(--font-mono);
+  margin-right: var(--s-2);
+  padding-left: var(--s-1);
 }
-.crop-toolbar-btn:hover { background: var(--panel-3); }
+.crop-toolbar-btn {
+  background: transparent;
+  border: 1px solid var(--border-2);
+  color: var(--text);
+  padding: 5px 12px;
+  border-radius: var(--radius-2);
+  font-size: var(--type-control);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  font-family: inherit;
+  transition: background var(--motion-quick) var(--ease-out),
+              border-color var(--motion-quick) var(--ease-out);
+}
+.crop-toolbar-btn:hover { background: var(--panel-2); }
 .crop-toolbar-btn.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #0e1216;
+  color: var(--c-accent-fg);
 }
-.crop-toolbar-btn.primary:hover { filter: brightness(1.06); }
+.crop-toolbar-btn.primary:hover {
+  background: var(--c-accent-hover);
+  border-color: var(--c-accent-hover);
+}
+
+/* Aspect-ratio segmented picker inside the toolbar. */
 .crop-aspect-row {
   display: inline-flex;
   gap: 2px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--r-1);
-  padding: 2px;
+  background: var(--panel-2);
+  border-radius: var(--radius-2);
+  padding: 3px;
   margin: 0 var(--s-1);
 }
 .crop-aspect-btn {
   background: transparent;
   border: 0;
-  color: var(--dim);
-  padding: 3px 8px;
-  font-size: var(--fs-micro);
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  border-radius: 3px;
+  color: var(--text-2);
+  padding: 4px 10px;
+  font-size: var(--type-meta);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0;
+  border-radius: var(--radius-1);
   cursor: pointer;
-  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+  font-family: inherit;
+  transition: background var(--motion-quick) var(--ease-out),
+              color var(--motion-quick) var(--ease-out);
 }
-.crop-aspect-btn:hover { color: var(--text); background: var(--panel-2); }
+.crop-aspect-btn:hover { color: var(--text); background: var(--panel-3); }
 .crop-aspect-btn.active {
   background: var(--accent);
-  color: #0e1216;
+  color: var(--c-accent-fg);
 }
 
 /* ---------------------------------------------------------- *
@@ -1084,46 +1466,6 @@ button.btn-armed {
   padding: 2px 7px;
   border-radius: var(--r-1);
   letter-spacing: 0.02em;
-}
-
-/* ---------------------------------------------------------- *
- *  Loop badge (player corner, while a region is looping)       *
- * ---------------------------------------------------------- */
-.loop-badge {
-  position: absolute;
-  top: var(--s-3);
-  left: var(--s-3);
-  z-index: 12;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s-1);
-  padding: 6px 12px;
-  background: rgba(20, 26, 36, 0.78);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  border: 1px solid rgba(74, 208, 142, 0.4);
-  border-radius: 999px;
-  color: var(--good);
-  font-size: var(--fs-small);
-  font-weight: 500;
-  cursor: pointer;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
-  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
-  animation: loop-badge-in var(--t-base) var(--ease);
-}
-.loop-badge:hover {
-  background: rgba(20, 26, 36, 0.92);
-  border-color: rgba(74, 208, 142, 0.7);
-}
-.loop-badge-icon {
-  display: inline-block;
-  animation: spin 2s linear infinite;
-  font-size: 1em;
-}
-.loop-badge-text { letter-spacing: 0.01em; }
-@keyframes loop-badge-in {
-  from { opacity: 0; transform: translateY(-4px); }
-  to   { opacity: 1; transform: translateY(0); }
 }
 
 /* ---------------------------------------------------------- *
@@ -1173,12 +1515,13 @@ button.btn-armed {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(2px);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 100;
-  animation: overlay-fade-in var(--t-base) var(--ease);
+  animation: overlay-fade-in var(--motion-base) var(--ease-out);
 }
 @keyframes overlay-fade-in {
   from { opacity: 0; }
@@ -1186,14 +1529,14 @@ button.btn-armed {
 }
 .modal {
   background: var(--panel);
-  border: 1px solid var(--border-2);
-  border-radius: var(--r-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-4);
   width: min(560px, calc(100% - 40px));
   max-height: calc(100% - 60px);
   display: flex;
   flex-direction: column;
-  box-shadow: var(--sh-3);
-  animation: modal-rise var(--t-base) var(--ease);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  animation: modal-rise var(--motion-slow) var(--ease-out);
 }
 @keyframes modal-rise {
   from { opacity: 0; transform: translateY(8px) scale(0.98); }
@@ -1208,31 +1551,42 @@ button.btn-armed {
 }
 .modal-header h2 {
   margin: 0;
-  font-size: var(--fs-h);
-  font-weight: 600;
-  letter-spacing: -0.1px;
+  font-size: var(--type-heading);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.2px;
 }
+/* Close button — matches the pattern used by the StatusStrip's × action:
+   28×28 hit area, ghost at rest, fills lightly on hover. */
 .modal-close {
   background: transparent;
   border: 0;
-  font-size: 22px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  font-size: 20px;
   line-height: 1;
-  color: var(--dim);
-  padding: 0 var(--s-1);
+  color: var(--text-2);
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background var(--motion-quick) var(--ease-out),
+              color var(--motion-quick) var(--ease-out);
 }
 .modal-close:hover {
   color: var(--text);
-  background: transparent;
+  background: var(--panel-2);
 }
 .modal-footer {
   display: flex;
   justify-content: space-between;
   padding: var(--s-3) var(--s-4);
   border-top: 1px solid var(--border);
-  gap: var(--s-3);
+  gap: var(--s-2);
 }
-.modal-footer .primary { background: var(--accent-2); border-color: var(--accent-2); }
-.modal-footer .primary:hover { background: var(--accent); border-color: var(--accent); }
+/* No .primary override here: the global button.primary (full accent at
+   rest, +3% lift on hover) wins inside modals too. */
 
 /* Keybind editor list */
 .kb-list {
@@ -1248,34 +1602,34 @@ button.btn-armed {
   border-bottom: 1px solid var(--border);
 }
 .kb-row:last-child { border-bottom: none; }
-.kb-row.has-conflict { background: rgba(229, 185, 90, 0.06); }
-.kb-label { font-size: var(--fs-body); }
+.kb-row.has-conflict { background: color-mix(in srgb, var(--warn) 8%, transparent); }
+.kb-label { font-size: var(--type-control); }
 .kb-binding {
   min-width: 130px;
   font-family: var(--font-mono);
-  font-size: var(--fs-small);
+  font-size: var(--type-meta);
   text-align: center;
   background: var(--panel-2);
-  border: 1px solid var(--border-2);
-  border-radius: var(--r-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  color: var(--text);
   padding: 6px var(--s-3);
+  cursor: pointer;
+  transition: background var(--motion-quick) var(--ease-out),
+              border-color var(--motion-quick) var(--ease-out);
 }
 .kb-binding:hover { background: var(--panel-3); }
+/* Listening — clear, non-decorative state. Static accent border + tinted bg
+   reads as "this slot is armed" without needing a pulse animation. */
 .kb-binding.listening {
-  background: var(--accent-2);
+  background: var(--accent-tint);
   border-color: var(--accent);
-  color: white;
-  animation: kb-pulse 1.4s ease-in-out infinite;
-}
-@keyframes kb-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(79, 157, 255, 0.5); }
-  50%      { box-shadow: 0 0 0 6px rgba(79, 157, 255, 0); }
+  color: var(--text);
 }
 .kb-conflict {
   color: var(--warn);
-  font-size: var(--fs-micro);
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
+  font-size: var(--type-meta);
+  font-weight: var(--weight-medium);
 }
 
 /* Export modal */
@@ -1288,10 +1642,10 @@ button.btn-armed {
 }
 .export-section { display: flex; flex-direction: column; gap: 6px; }
 .export-section-label {
-  font-size: var(--fs-micro);
-  text-transform: uppercase;
-  letter-spacing: 0.7px;
-  color: var(--dim);
+  font-size: var(--type-section);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+  letter-spacing: 0;
 }
 
 /* Segmented button group: replaces fieldsets of radios with a row of cards. */
@@ -1404,10 +1758,9 @@ button.btn-armed {
   gap: var(--s-3);
 }
 .estimate-label {
-  font-size: var(--fs-micro);
-  color: var(--dim);
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
+  font-size: var(--type-meta);
+  color: var(--text-2);
+  letter-spacing: 0;
 }
 .estimate-value {
   font-size: var(--fs-display);
@@ -1449,78 +1802,183 @@ button.btn-armed {
 }
 
 /* ---------------------------------------------------------- *
- *  Post-export toast                                           *
+ *  Tips modal                                                  *
+ *  Surfaces the non-obvious tricks the UI doesn't otherwise    *
+ *  advertise. Triggered by the "?" button in the topbar.       *
  * ---------------------------------------------------------- */
-.export-toast {
-  position: fixed;
-  right: var(--s-4);
-  bottom: var(--s-4);
-  width: 380px;
-  max-height: 60vh;
-  background: var(--panel);
-  border: 1px solid var(--border-2);
-  border-radius: var(--r-3);
-  box-shadow: var(--sh-3);
-  display: flex;
-  flex-direction: column;
-  z-index: 150;
-  animation: toast-in var(--t-base) var(--ease);
+.tips-modal {
+  width: min(640px, calc(100% - 40px));
+  max-height: calc(100% - 60px);
 }
-@keyframes toast-in {
-  from { transform: translateY(20px); opacity: 0; }
-  to   { transform: translateY(0);    opacity: 1; }
-}
-.toast-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--s-2) var(--s-3);
-  border-bottom: 1px solid var(--border);
-}
-.toast-header h3 {
-  margin: 0;
-  font-size: var(--fs-body);
-  font-weight: 600;
-  color: var(--good);
-}
-.toast-files {
-  padding: var(--s-2);
+.tips-body {
+  padding: var(--s-3) var(--s-4);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: var(--s-2);
+  gap: var(--s-4);
 }
-.toast-file {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: center;
-  gap: var(--s-2);
-  padding: var(--s-2);
-  background: var(--panel-2);
-  border: 1px solid var(--border-2);
-  border-radius: var(--r-2);
-}
-.toast-file-info { min-width: 0; }
-.toast-file-name {
-  font-size: var(--fs-small);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.toast-file-meta {
-  font-size: var(--fs-micro);
-  margin-top: 2px;
-  font-variant-numeric: tabular-nums;
-}
-.toast-actions {
+.tips-section {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--s-2);
 }
-.toast-actions button {
-  font-size: var(--fs-micro);
-  padding: 4px var(--s-2);
+.tips-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tip-row {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: var(--s-3);
+  align-items: baseline;
+}
+/* When no kbd is present, keep the body in the same column so left-edges align. */
+.tip-row:not(:has(.tip-kbd)) .tip-body {
+  grid-column: 2;
+}
+.tip-kbd {
+  font-family: var(--font-mono);
+  font-size: var(--type-meta);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-1);
+  padding: 1px 6px;
+  color: var(--text);
+  text-align: center;
   white-space: nowrap;
+}
+.tip-body {
+  font-size: var(--type-control);
+  color: var(--text-2);
+  line-height: 1.5;
+}
+.tip-body b { color: var(--text); font-weight: var(--weight-semibold); }
+.tip-body code {
+  font-family: var(--font-mono);
+  font-size: var(--type-meta);
+  background: var(--panel-2);
+  padding: 1px 5px;
+  border-radius: var(--radius-1);
+  color: var(--text-2);
+}
+.tips-footer {
+  align-items: center;
+}
+.tips-footer .dim {
+  font-size: var(--type-meta);
+}
+
+/* ---------------------------------------------------------- *
+ *  Onboarding coachmark                                        *
+ *  One-shot first-launch overlay. Anchored top-right pointing  *
+ *  at the "?" button. Backdrop is barely darkened so the live  *
+ *  app stays visible behind.                                   *
+ * ---------------------------------------------------------- */
+.onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  display: flex;
+  justify-content: flex-end;
+  padding: 60px 20px 0 0;
+  opacity: 0;
+  transition: opacity var(--motion-base) var(--ease-out);
+  cursor: pointer;
+}
+.onboarding-overlay.shown { opacity: 1; }
+
+.onboarding-bubble {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-3);
+  padding: var(--s-4);
+  max-width: 380px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  cursor: default;
+  transform: translateY(-8px);
+  opacity: 0;
+  transition: transform var(--motion-slow) var(--ease-out),
+              opacity var(--motion-base) var(--ease-out);
+}
+.onboarding-overlay.shown .onboarding-bubble {
+  transform: translateY(0);
+  opacity: 1;
+}
+/* Little triangle pointing up at the help button. */
+.onboarding-arrow {
+  position: absolute;
+  top: -8px;
+  right: 90px;
+  width: 14px;
+  height: 14px;
+  background: var(--panel);
+  border-left: 1px solid var(--border-2);
+  border-top: 1px solid var(--border-2);
+  transform: rotate(45deg);
+}
+.onboarding-title {
+  font-size: var(--type-emphasis);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+  margin-bottom: var(--s-2);
+}
+.onboarding-body {
+  font-size: var(--type-control);
+  color: var(--text-2);
+  line-height: 1.5;
+}
+.onboarding-body ul {
+  margin: var(--s-2) 0 0;
+  padding: 0 0 0 var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.onboarding-body li { padding-left: 4px; }
+.onboarding-body b { color: var(--text); font-weight: var(--weight-semibold); }
+.onboarding-body kbd {
+  font-family: var(--font-mono);
+  font-size: var(--type-meta);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-1);
+  padding: 1px 6px;
+  color: var(--text);
+}
+.onboarding-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--s-3);
+}
+
+/* "?" help button in the topbar — quiet by default, fills on hover. */
+.help-button {
+  background: transparent;
+  border: 1px solid var(--border);
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--type-control);
+  font-weight: var(--weight-semibold);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background var(--motion-quick) var(--ease-out),
+              color var(--motion-quick) var(--ease-out),
+              border-color var(--motion-quick) var(--ease-out);
+}
+.help-button:hover {
+  background: var(--panel-2);
+  border-color: var(--border-2);
+  color: var(--text);
 }
 
 /* ---------------------------------------------------------- *

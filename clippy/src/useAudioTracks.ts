@@ -39,8 +39,8 @@ export function useAudioTracks(opts: {
 
   // Set up extraction + playback graph whenever the source or track set changes.
   useEffect(() => {
-    if (!videoElement || !srcPath || tracks.length < 2) {
-      // Single-track: leave the video element's native audio as-is.
+    if (!videoElement || !srcPath || tracks.length < 1) {
+      // Source has no audio at all — nothing to mix.
       videoElement && (videoElement.muted = false);
       return;
     }
