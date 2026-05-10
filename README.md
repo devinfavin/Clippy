@@ -1,8 +1,8 @@
 # Clippy
 
-**A focused video clip editor for Windows.** Open a recording, mark the moments you want, and export — as MP4, MP3, or GIF — in seconds.
+**A focused video clip editor for Windows.** Open a recording, mark the moments you want, and export as MP4, MP3, or GIF in seconds.
 
-Built for the OBS → Discord workflow: drag a recording onto the window, set your regions, and ship.
+For editing a clip to send to buddies on discord, the options I had for video editing tools felt like cutting a steak with either a plastic knife or a chainsaw. The tools were either too complicated, or too simple. Clippy is the sweet middle ground.
 
 <!-- HERO: Insert a short screen recording or GIF showing the full open → trim → export flow here -->
 <!-- Suggested: ~15s recording at 1280×720, showing file open → timeline scrub → F/Shift+F region marks → Ctrl+E export → status strip "Exported" -->
@@ -68,15 +68,7 @@ If your source has multiple audio tracks (SteelSeries Sonar, OBS multi-track, or
 
 ---
 
-### Waveform + keyframe visualization
-
-The timeline shows a layered waveform for every audio track in its palette color. Faint vertical ticks mark every video keyframe — useful for knowing exactly where a stream-copy cut will land.
-
-<!-- SCREENSHOT: Timeline close-up showing overlapping colored waveform layers and thin white keyframe tick marks -->
-
----
-
-### Export to MP4, MP3, or GIF
+### Export to MP4, MP3, or GIF 
 
 Open the export panel with **Ctrl+E**.
 
@@ -88,25 +80,9 @@ Open the export panel with **Ctrl+E**.
 
 **GIF** — Silent looping animation at 15 fps. Resolution presets: Small (480 px wide), Medium (960 px), Large (1280 px), or source width.
 
+**X Clips or Stitched** — Export as many files as you selected, or stitch them together into one 
+
 **Normalize loudness** — One checkbox to bring quiet game audio up to a Discord-friendly level (~−16 LUFS target) without touching the per-track mixer.
-
-After export finishes, the status strip shows **Open folder** and **Copy path** buttons so you can get the file out immediately.
-
-<!-- SCREENSHOT: The status strip in "export done" state showing filename, file size, and the two action buttons -->
-
----
-
-### Frame capture
-
-Press **Shift+S** to copy the current frame to the clipboard. Press again within 5 seconds to write it as a PNG file to disk instead.
-
-<!-- SCREENSHOT: Status strip showing the "Frame copied to clipboard — click Save Frame again to write a PNG" confirmation -->
-
----
-
-### Project persistence
-
-Regions, crops, speeds, audio mix, track colors, and track renames all auto-save per source file. Reopen the same recording later and everything is exactly where you left it.
 
 ---
 
