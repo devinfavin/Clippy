@@ -181,7 +181,14 @@ Hit the **?** button in the top bar to pull up a curated list of things that are
 
 ## Building from source
 
-**Prerequisites:** [Rust](https://rustup.rs/), [Node.js 20+](https://nodejs.org/), [pnpm](https://pnpm.io/). FFmpeg and FFprobe binaries need to be placed in `clippy/src-tauri/binaries/` using Tauri's sidecar naming convention (`ffmpeg-x86_64-pc-windows-msvc.exe` / `ffprobe-x86_64-pc-windows-msvc.exe`).
+**Prerequisites:** [Rust](https://rustup.rs/), [Node.js 20+](https://nodejs.org/), [pnpm](https://pnpm.io/), and FFmpeg/FFprobe.
+
+**FFmpeg sidecars** are not included in this repo (LGPL). Download a Windows x64 build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) (the `ffmpeg-release-essentials` zip is sufficient), then copy and rename the two executables into `clippy/src-tauri/binaries/`:
+
+```
+ffmpeg.exe  →  clippy/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
+ffprobe.exe →  clippy/src-tauri/binaries/ffprobe-x86_64-pc-windows-msvc.exe
+```
 
 ```sh
 git clone https://github.com/yourname/clippy

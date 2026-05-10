@@ -18,5 +18,11 @@ Thumbs.db
 npm-debug.log*
 pnpm-debug.log*
 
+# FFmpeg sidecars — download separately (see README)
+clippy/src-tauri/binaries/
+
+# Internal planning docs
+PROJECT.md
+
 # Local Claude state
 .claude/
