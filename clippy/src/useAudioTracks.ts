@@ -8,17 +8,21 @@ import { trackEffectiveGain } from "./types";
  * WebAudio graph, with a per-track GainNode so the mixer's sliders/mutes
  * affect playback in real time.
  *
- * High-level shape:
- *   • Extract each audio track to its own playable file (cached) at file open.
- *   • For each, build `<audio>` → MediaElementSource → GainNode → destination.
- *   • Mute the video's native audio so we don't double-play track 0.
- *   • Mirror video's play/pause/seek/rate to every audio element.
- *   • Periodically resync if any audio drifts from video.currentTime.
+ * Two modes depending on track count:
  *
- * Behavior intentionally degrades gracefully:
- *   • Single-track sources skip the whole pipeline (just leaves video.muted=false).
- *   • While extraction is in flight, video plays its native audio normally.
- *   • If a track fails to extract, the others still mix; failed track is silent.
+ *   Single-track: route the <video> element itself through a GainNode.
+ *     No separate <audio> elements, no sync gap, no drift.
+ *     The video stays "muted" from the browser's perspective (its native
+ *     output is taken over by createMediaElementSource) but the GainNode
+ *     feeds the AudioContext destination.
+ *
+ *   Multi-track: extract each track to its own cached file, build one
+ *     <audio> → GainNode per track, mirror play/pause/seek from the video.
+ *     Drift correction every 2 s catches any slip between elements.
+ *
+ * Graceful degradation:
+ *   • No tracks → video plays unmuted, hook is a no-op.
+ *   • Extract failure → that track is silent; others still play.
  */
 export function useAudioTracks(opts: {
   videoElement: HTMLVideoElement | null;
@@ -28,19 +32,20 @@ export function useAudioTracks(opts: {
 }) {
   const { videoElement, srcPath, tracks, mix } = opts;
 
-  // One <audio> + GainNode per track, indexed by track index.
   const audioCtxRef = useRef<AudioContext | null>(null);
+  // Single-track path: GainNode wired directly to the video element's source.
+  const videoGainRef = useRef<GainNode | null>(null);
+  const videoSrcRef = useRef<MediaElementAudioSourceNode | null>(null);
+  // Multi-track path: one <audio> + GainNode per extracted track.
   const audiosRef = useRef<Map<number, HTMLAudioElement>>(new Map());
   const gainsRef = useRef<Map<number, GainNode>>(new Map());
   const sourcesRef = useRef<Map<number, MediaElementAudioSourceNode>>(new Map());
-  // Latest mix values, for the gain update effect (avoids re-attaching listeners).
+
   const mixRef = useRef(mix);
   useEffect(() => { mixRef.current = mix; }, [mix]);
 
-  // Set up extraction + playback graph whenever the source or track set changes.
   useEffect(() => {
     if (!videoElement || !srcPath || tracks.length < 1) {
-      // Source has no audio at all — nothing to mix.
       videoElement && (videoElement.muted = false);
       return;
     }
@@ -50,8 +55,6 @@ export function useAudioTracks(opts: {
     const gains = gainsRef.current;
     const sources = sourcesRef.current;
 
-    // Fresh AudioContext per source. Created lazily on first user gesture
-    // (Chromium will keep it suspended otherwise — we resume after first play).
     let ctx = audioCtxRef.current;
     if (!ctx) {
       try {
@@ -62,11 +65,42 @@ export function useAudioTracks(opts: {
       }
     }
 
-    // Mute the <video> immediately — we'll play the multi-track mix instead.
-    videoElement.muted = true;
+    // ── Single-track: wire the video element directly through a GainNode ──
+    // No extraction, no separate element, no sync problem.
+    if (tracks.length === 1) {
+      // createMediaElementSource can only be called once per element; reuse
+      // the existing source node if the video element hasn't changed.
+      let vSrc = videoSrcRef.current;
+      if (!vSrc) {
+        try {
+          vSrc = ctx.createMediaElementSource(videoElement);
+          videoSrcRef.current = vSrc;
+        } catch {
+          videoElement.muted = false;
+          return;
+        }
+      }
+      const gain = videoGainRef.current ?? ctx.createGain();
+      videoGainRef.current = gain;
+      const m = mixRef.current[tracks[0].index];
+      gain.gain.value = m ? (m.muted ? 0 : m.volume) : 1;
+      vSrc.connect(gain).connect(ctx.destination);
+      gains.set(tracks[0].index, gain);
 
-    // Extract each track in parallel, build the graph as each one resolves.
+      const onPlay = () => ctx!.resume().catch(() => {});
+      videoElement.addEventListener("play", onPlay);
+      return () => {
+        videoElement.removeEventListener("play", onPlay);
+        gains.clear();
+        // Leave vSrc connected — it persists with the video element across
+        // sources. Only disconnect if the video element itself is torn down.
+      };
+    }
+
+    // ── Multi-track: extract each track, play via separate <audio> elements ──
+    videoElement.muted = true;
     const cleanups: Array<() => void> = [];
+
     for (const t of tracks) {
       invoke<string>("extract_track", { srcPath, trackIndex: t.index })
         .then((url) => {
@@ -85,18 +119,14 @@ export function useAudioTracks(opts: {
           sources.set(t.index, src);
           gains.set(t.index, gain);
 
-          // Sync this audio to the current video state.
           audio.currentTime = videoElement.currentTime;
-          if (!videoElement.paused) {
-            audio.play().catch(() => {});
-          }
+          if (!videoElement.paused) audio.play().catch(() => {});
         })
         .catch((err) => {
           console.warn(`[clippy] extract_track ${t.index} failed:`, err);
         });
     }
 
-    // Sync handlers: mirror every video state change to every audio element.
     const syncTime = () => {
       const vt = videoElement.currentTime;
       audios.forEach((a) => {
@@ -130,7 +160,6 @@ export function useAudioTracks(opts: {
       videoElement.removeEventListener("ratechange", onRateChange);
     });
 
-    // Drift correction: every 2s while playing, resync any audio that's slipped.
     const driftTimer = window.setInterval(() => {
       if (videoElement.paused) return;
       const vt = videoElement.currentTime;
@@ -143,7 +172,6 @@ export function useAudioTracks(opts: {
     return () => {
       cancelled = true;
       cleanups.forEach((fn) => fn());
-      // Tear down per-track audio elements + nodes for the next source.
       audios.forEach((a) => {
         try { a.pause(); } catch {}
         try { a.removeAttribute("src"); a.load(); } catch {}
@@ -153,16 +181,14 @@ export function useAudioTracks(opts: {
       audios.clear();
       sources.clear();
       gains.clear();
-      // Restore native video audio for next source / single-track case.
       videoElement.muted = false;
     };
   }, [videoElement, srcPath, tracks]);
 
-  // Push the latest mix into the GainNodes whenever it changes.
+  // Push mix changes into GainNodes (both paths share gainsRef).
   useEffect(() => {
     gainsRef.current.forEach((g, idx) => {
       const v = trackEffectiveGain(mix, idx);
-      // Smooth small ramps so slider drags don't click.
       try {
         g.gain.cancelScheduledValues(0);
         g.gain.setTargetAtTime(v, audioCtxRef.current?.currentTime ?? 0, 0.02);

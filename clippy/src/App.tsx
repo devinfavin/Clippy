@@ -1867,6 +1867,7 @@ export default function App() {
               })}
             </div>
             <CacheControls />
+            <DiagnosticsButton />
             <footer className="modal-footer">
               <button onClick={() => setKeybinds(DEFAULT_KEYBINDS)}>Reset to defaults</button>
               <button className="primary" onClick={() => setKeybindsOpen(false)}>Done</button>
@@ -1894,6 +1895,36 @@ function HintKbd(props: {
       )}{" "}
       {props.label}
     </span>
+  );
+}
+
+/** Copies the in-memory diagnostic log to the clipboard. The log records
+ *  every significant backend operation (probe, proxy strategy, ffmpeg args,
+ *  export path decisions) so you can paste it when reporting a bug. Nothing
+ *  is written to disk or sent anywhere automatically. */
+function DiagnosticsButton() {
+  const [state, setState] = useState<"idle" | "copied" | "error">("idle");
+  const copy = async () => {
+    try {
+      const text = await invoke<string>("get_diagnostics");
+      await navigator.clipboard.writeText(text);
+      setState("copied");
+      setTimeout(() => setState("idle"), 2500);
+    } catch {
+      setState("error");
+      setTimeout(() => setState("idle"), 2500);
+    }
+  };
+  return (
+    <div className="cache-row">
+      <span className="cache-label">Diagnostics</span>
+      <span className="cache-size mono" style={{ fontSize: "var(--type-xs)", opacity: 0.6 }}>
+        {state === "copied" ? "Copied to clipboard" : state === "error" ? "Copy failed" : "operation log"}
+      </span>
+      <button className="cache-clear" onClick={copy} title="Copy the diagnostic log to clipboard — paste it when reporting a bug">
+        Copy log
+      </button>
+    </div>
   );
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use axum::body::Body;
@@ -37,6 +37,53 @@ struct ServerState {
 struct ServerInfo {
     port: u16,
     state: ServerState,
+}
+
+// ----- diagnostic log -----
+
+const DIAG_CAP: usize = 200;
+
+/// In-memory ring buffer of timestamped log entries. Bounded so it can't
+/// grow unboundedly over a long session. Never written to disk and never sent
+/// anywhere — the user copies it explicitly via the "Copy diagnostics" button.
+struct DiagLog(Mutex<VecDeque<String>>);
+
+impl DiagLog {
+    fn new() -> Self {
+        DiagLog(Mutex::new(VecDeque::with_capacity(DIAG_CAP)))
+    }
+}
+
+/// Append a timestamped entry. The lock is held only for a VecDeque push so
+/// this is effectively non-blocking in any context.
+fn diag(app: &AppHandle, msg: impl std::fmt::Display) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let entry = format!("[{:02}:{:02}:{:02}] {}", (secs / 3600) % 24, (secs / 60) % 60, secs % 60, msg);
+    let log = app.state::<DiagLog>();
+    if let Ok(mut buf) = log.0.lock() {
+        if buf.len() >= DIAG_CAP {
+            buf.pop_front();
+        }
+        buf.push_back(entry);
+    }
+}
+
+/// Strip the directory from a path so logs never contain the user's home
+/// directory or other path components. Returns the filename only.
+fn basename(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
+}
+
+/// Truncate a string to `max` bytes for log entries, appending "…" if cut.
+fn trunc(s: &str, max: usize) -> String {
+    if s.len() <= max { s.to_string() } else { format!("{}…", &s[..max]) }
 }
 
 #[derive(Deserialize)]
@@ -632,49 +679,53 @@ fn build_audio_filter_complex(
     total_tracks: usize,
     post_mix_filters: &str,
 ) -> (Option<String>, String) {
-    // A "default mix" is empty OR exactly one entry per source track at unity
-    // gain — same as just using the source audio.
     let is_default_mix = track_mix.is_empty()
         || (track_mix.len() == total_tracks
             && track_mix.iter().all(|t| (t.volume - 1.0).abs() < 1e-6));
-    if is_default_mix && post_mix_filters.is_empty() {
+
+    // Fast path only for single-stream sources with nothing to process.
+    // Multi-track sources must still amix all streams even at default gain —
+    // returning "0:a:0?" would silently drop every track past the first.
+    if is_default_mix && post_mix_filters.is_empty() && total_tracks <= 1 {
         return (None, "0:a:0?".to_string());
     }
 
-    // Active tracks: present in mix AND non-zero gain. Muted = simply omitted.
-    let active: Vec<&TrackGain> = track_mix
-        .iter()
-        .filter(|t| t.volume > 0.001 && (t.index as usize) < total_tracks)
-        .collect();
+    // Build the active track list. For a default mix with multiple source
+    // tracks, all are active at unity; the explicit mix controls the rest.
+    let active: Vec<(usize, f64)> = if is_default_mix {
+        (0..total_tracks).map(|i| (i, 1.0)).collect()
+    } else {
+        track_mix
+            .iter()
+            .filter(|t| t.volume > 0.001 && (t.index as usize) < total_tracks)
+            .map(|t| (t.index as usize, t.volume))
+            .collect()
+    };
 
-    // The final output label depends on whether post-mix filters are coming.
-    // Skip an unnecessary anull step by writing the mix output directly to
-    // [aout] when there are no post-mix filters.
     let mix_output = if post_mix_filters.is_empty() { "[aout]" } else { "[m]" };
-
     let mut parts: Vec<String> = Vec::new();
-    let mix_tag: String = if is_default_mix {
-        // Tracks unchanged but post-mix filters exist (e.g. just normalize).
-        "[0:a:0]".to_string()
-    } else if active.is_empty() {
-        // All muted — synthesize silence so the muxer still has an audio track.
+
+    let mix_tag: String = if active.is_empty() {
+        // All tracks muted — synthesize silence so the muxer still has audio.
         parts.push(format!(
             "anullsrc=channel_layout=stereo:sample_rate=48000{}",
             mix_output
         ));
         mix_output.to_string()
     } else if active.len() == 1 {
-        let t = active[0];
-        parts.push(format!(
-            "[0:a:{}]volume={:.4}{}",
-            t.index, t.volume, mix_output
-        ));
-        mix_output.to_string()
+        let (idx, vol) = active[0];
+        if (vol - 1.0).abs() < 1e-6 {
+            // Unity gain, single active stream — route directly into post-mix.
+            format!("[0:a:{}]", idx)
+        } else {
+            parts.push(format!("[0:a:{}]volume={:.4}{}", idx, vol, mix_output));
+            mix_output.to_string()
+        }
     } else {
         let mut tags = Vec::new();
-        for t in &active {
-            let tag = format!("a{}", t.index);
-            parts.push(format!("[0:a:{}]volume={:.4}[{}]", t.index, t.volume, tag));
+        for (idx, vol) in &active {
+            let tag = format!("a{}", idx);
+            parts.push(format!("[0:a:{}]volume={:.4}[{}]", idx, vol, tag));
             tags.push(format!("[{}]", tag));
         }
         parts.push(format!(
@@ -852,18 +903,27 @@ async fn probe_video_inner(app: &AppHandle, path: &str) -> Result<VideoInfo, Str
         .unwrap_or("0/1");
     let fps = parse_rate(r_frame_rate);
     let audio_codec = audio_tracks.first().map(|t| t.codec.clone());
-
-    Ok(VideoInfo {
+    let info = VideoInfo {
         duration_secs,
         width,
         height,
         fps,
-        video_codec,
-        audio_codec,
-        audio_tracks,
-        container,
+        video_codec: video_codec.clone(),
+        audio_codec: audio_codec.clone(),
+        audio_tracks: audio_tracks.clone(),
+        container: container.clone(),
         bit_rate_bps,
-    })
+    };
+    diag(app, format!(
+        "probe: {} → {}/{}, {}×{} @ {:.2}fps, {} audio track(s), {:.1}s",
+        basename(path),
+        video_codec,
+        audio_codec.as_deref().unwrap_or("none"),
+        width, height, fps,
+        audio_tracks.len(),
+        duration_secs,
+    ));
+    Ok(info)
 }
 
 #[tauri::command]
@@ -1137,6 +1197,8 @@ async fn generate_proxy(
                 "proxy:progress",
                 ProxyProgress { progress: 1.0, elapsed_secs: 0.0, eta_secs: Some(0.0) },
             );
+            diag(&app, format!("proxy: Direct — {}/{} in {} container, played as-is",
+                info.video_codec, info.audio_codec.as_deref().unwrap_or("none"), info.container));
             Ok(ProxyResult {
                 play_path: path,
                 cached: true,
@@ -1147,17 +1209,20 @@ async fn generate_proxy(
             let key = proxy_cache_key(&path)?;
             let out_path = proxy_dir(&app)?.join(format!("{}.remux.mp4", &key[..32]));
             if out_path.exists() {
+                diag(&app, "proxy: Remux — cache hit");
                 return Ok(ProxyResult {
                     play_path: out_path.to_string_lossy().to_string(),
                     cached: true,
                     strategy: "remux".to_string(),
                 });
             }
+            diag(&app, format!("proxy: Remux — {} container, remuxing to MP4", info.container));
             let out_str = out_path.to_string_lossy().to_string();
             let temp_str = format!("{}.tmp.mp4", out_str);
             let result = run_remux_pass(&app, &path, &temp_str, duration_secs, start).await;
             if let Err(e) = result {
                 let _ = std::fs::remove_file(&temp_str);
+                diag(&app, format!("proxy: Remux failed ({}), falling back to encode", trunc(&e, 120)));
                 eprintln!("[clippy] remux failed: {} — falling back to encode", e);
                 return encode_fallback(&app, &path, duration_secs, start, "proxy:progress").await;
             }
@@ -1170,6 +1235,7 @@ async fn generate_proxy(
                     eta_secs: Some(0.0),
                 },
             );
+            diag(&app, format!("proxy: Remux done in {:.1}s", start.elapsed().as_secs_f64()));
             Ok(ProxyResult {
                 play_path: out_str,
                 cached: false,
@@ -1190,12 +1256,14 @@ async fn encode_fallback(
     let key = proxy_cache_key(path)?;
     let out_path = proxy_dir(app)?.join(format!("{}.proxy.mp4", &key[..32]));
     if out_path.exists() {
+        diag(app, "proxy: Encode — cache hit");
         return Ok(ProxyResult {
             play_path: out_path.to_string_lossy().to_string(),
             cached: true,
             strategy: "encode (cached)".to_string(),
         });
     }
+    diag(app, "proxy: Encode — codec/container needs re-encode for playback");
     let out_str = out_path.to_string_lossy().to_string();
     let temp_str = format!("{}.tmp.mp4", out_str);
 
@@ -1212,6 +1280,7 @@ async fn encode_fallback(
                 break;
             }
             Err(e) => {
+                diag(app, format!("proxy: encoder {} failed — trying next", enc));
                 eprintln!("[clippy] encoder {} failed: {}", enc, e);
                 last_err = e;
             }
@@ -1227,6 +1296,7 @@ async fn encode_fallback(
     };
 
     std::fs::rename(&temp_str, &out_path).map_err(|e| e.to_string())?;
+    diag(app, format!("proxy: Encode done via {} in {:.1}s", used, start.elapsed().as_secs_f64()));
     let _ = app.emit(
         event_name,
         ProxyProgress {
@@ -1724,6 +1794,11 @@ async fn cut_segment(
 
     if needs_video_reencode {
         let vf = build_video_filter(region.crop, region.speed);
+        if let Some(ref fc) = audio_fc {
+            diag(app, format!("export: full re-encode — vf=[{}] fc=[{}]", trunc(&vf, 80), trunc(fc, 120)));
+        } else {
+            diag(app, format!("export: full re-encode — vf=[{}]", trunc(&vf, 80)));
+        }
         let chain = encoder_chain(app).await;
         let mut last_err = String::from("no encoders available");
         for enc in chain.iter() {
@@ -1749,6 +1824,7 @@ async fn cut_segment(
                 "-map_chapters".into(), "-1".into(),
                 out_path.into(),
             ]);
+            let t0 = std::time::Instant::now();
             let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
             let (mut rx, _child) = sidecar.args(args).spawn().map_err(|e| e.to_string())?;
             let mut stderr_buf = String::new();
@@ -1764,9 +1840,11 @@ async fn cut_segment(
                 }
             }
             if ok {
+                diag(app, format!("ffmpeg: exit 0 via {} in {:.1}s", enc, t0.elapsed().as_secs_f64()));
                 *WORKING_ENCODER.lock().unwrap() = Some(*enc);
                 return Ok(());
             }
+            diag(app, format!("ffmpeg: exit non-0 via {} — {}", enc, trunc(&stderr_buf, 200)));
             eprintln!("[clippy] crop/speed cut {} failed: {}", enc, stderr_buf);
             let _ = std::fs::remove_file(out_path);
             last_err = stderr_buf;
@@ -1777,6 +1855,9 @@ async fn cut_segment(
     if needs_audio_reencode {
         // Track mix changed but no crop/speed — video stream-copies, audio
         // gets the filter_complex treatment. Same speed as a normalize-only export.
+        if let Some(ref fc) = audio_fc {
+            diag(app, format!("export: audio re-encode — fc=[{}]", trunc(fc, 160)));
+        }
         let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
         let mut args: Vec<String> = vec![
             "-y".into(), "-hide_banner".into(),
@@ -1798,6 +1879,7 @@ async fn cut_segment(
             "-map_chapters".into(), "-1".into(),
             out_path.into(),
         ]);
+        let t0 = std::time::Instant::now();
         let (mut rx, _child) = sidecar.args(args).spawn().map_err(|e| e.to_string())?;
         let mut stderr_buf = String::new();
         while let Some(event) = rx.recv().await {
@@ -1805,6 +1887,7 @@ async fn cut_segment(
                 CommandEvent::Stderr(b) => stderr_buf.push_str(&String::from_utf8_lossy(&b)),
                 CommandEvent::Terminated(payload) => {
                     if payload.code != Some(0) {
+                        diag(app, format!("ffmpeg: exit non-0 (audio mix) — {}", trunc(&stderr_buf, 200)));
                         return Err(format!(
                             "segment cut (audio mix) exited with code {:?}: {}",
                             payload.code, stderr_buf
@@ -1815,8 +1898,11 @@ async fn cut_segment(
                 _ => {}
             }
         }
+        diag(app, format!("ffmpeg: exit 0 (audio re-encode) in {:.1}s", t0.elapsed().as_secs_f64()));
         return Ok(());
     }
+
+    diag(app, "export: stream-copy (no crop/speed/mix change)");
 
     let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
     let (mut rx, _child) = sidecar
@@ -1879,6 +1965,8 @@ async fn export_concat(
     let normalize = normalize.unwrap_or(false);
     let mix = track_mix.unwrap_or_default();
     let total_tracks = total_audio_tracks.unwrap_or(1) as usize;
+    diag(&app, format!("export_concat: {} region(s) → {} (normalize={})",
+        regions.len(), basename(&output_path), normalize));
     let mix_active = !mix.is_empty()
         && !(mix.len() == total_tracks && mix.iter().all(|t| (t.volume - 1.0).abs() < 1e-6));
     // Sum of post-speed durations — what the final output will actually be.
@@ -2030,11 +2118,13 @@ async fn export_concat(
             CommandEvent::Terminated(payload) => {
                 cleanup(&temp_segments, Some(&list_file));
                 if payload.code != Some(0) {
+                    diag(&app, format!("ffmpeg: concat failed — {}", trunc(&stderr_buf, 200)));
                     return Err(format!(
                         "ffmpeg concat exited with code {:?}: {}",
                         payload.code, stderr_buf
                     ));
                 }
+                diag(&app, format!("export_concat: done in {:.1}s", start.elapsed().as_secs_f64()));
                 let _ = app.emit(
                     "export:progress",
                     ExportProgress {
@@ -2786,6 +2876,28 @@ async fn export_frame_png(
     Ok(())
 }
 
+/// Return the in-memory diagnostic log as a plain-text string. Called only
+/// when the user explicitly clicks "Copy diagnostics" — never sent anywhere
+/// automatically. Full file paths are never logged; only basenames are used.
+#[tauri::command]
+fn get_diagnostics(app: AppHandle) -> String {
+    let log = app.state::<DiagLog>();
+    let buf = match log.0.lock() {
+        Ok(b) => b,
+        Err(e) => e.into_inner(),
+    };
+    let mut out = format!(
+        "Clippy v{} — diagnostic log ({} entries)\n---\n",
+        env!("CARGO_PKG_VERSION"),
+        buf.len()
+    );
+    for entry in buf.iter() {
+        out.push_str(entry);
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2794,6 +2906,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
+            app.manage(DiagLog::new());
             app.manage(InitialPath(Mutex::new(parse_initial_path())));
 
             // Auto-prune cache files >30 days untouched. Background thread so a
@@ -2859,7 +2972,8 @@ pub fn run() {
             copy_frame_to_clipboard,
             load_project,
             save_project,
-            extract_track
+            extract_track,
+            get_diagnostics
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

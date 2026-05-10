@@ -4,8 +4,7 @@
 
 For editing a clip to send to buddies on discord, the options I had for video editing tools felt like cutting a steak with either a plastic knife or a chainsaw. The tools were either too complicated, or too simple. Clippy is the sweet middle ground.
 
-<!-- HERO: Insert a short screen recording or GIF showing the full open → trim → export flow here -->
-<!-- Suggested: ~15s recording at 1280×720, showing file open → timeline scrub → F/Shift+F region marks → Ctrl+E export → status strip "Exported" -->
+![Clippy workflow — open a recording, mark regions, export a clip](docs/HERO.gif)
 
 ---
 
@@ -15,7 +14,7 @@ For editing a clip to send to buddies on discord, the options I had for video ed
 
 Drop a video file onto the window, drag it onto the `.exe`, or use **Ctrl+O**. MP4/H.264/AAC files play immediately — no re-encode on load. MKV and other containers remux in the background while you work, so you can start trimming before the background job finishes.
 
-<!-- SCREENSHOT: The app with a video loaded, showing the player, timeline waveform, and region chips -->
+![App with a video loaded — player, waveform timeline, and region chips](docs/OpenAnythingScreenshot.png)
 
 ---
 
@@ -23,7 +22,7 @@ Drop a video file onto the window, drag it onto the `.exe`, or use **Ctrl+O**. M
 
 Press **F** to mark an in-point at the playhead, **Shift+F** to mark the out-point. Regions appear as color-coded bands on the timeline and as chips above it. Build as many as you need — each is independent.
 
-<!-- GIF: Pressing F and Shift+F to mark two regions, chips appearing, dragging a region edge to nudge the boundary -->
+![Marking in/out points with F and Shift+F, region chips appearing on the timeline](docs/RegionBasedEditing.gif)
 
 - Drag the edges of a region band on the timeline to fine-tune in/out after the fact
 - Jump to any region instantly with number keys (**1–9**)
@@ -35,7 +34,7 @@ Press **F** to mark an in-point at the playhead, **Shift+F** to mark the out-poi
 
 Press **Shift+C** (or click **Crop** on a region chip) to open the crop overlay. Draw a rectangle over the video, lock to a preset aspect ratio, and confirm. The crop is baked in at export — the rest of the frame is discarded.
 
-<!-- GIF: Opening the crop overlay on a region, drawing a selection with an aspect lock active, confirming and seeing the crop badge appear on the chip -->
+![Opening the crop overlay, drawing a selection with aspect lock, confirming](docs/PerRegionCrop.gif)
 
 | Aspect lock | Use case |
 |-------------|----------|
@@ -52,7 +51,7 @@ Press **Shift+C** (or click **Crop** on a region chip) to open the crop overlay.
 
 Click the speed badge on a region chip (shown as **1×** by default) to change playback rate: **0.25×, 0.5×, 1×, 2×, 4×**. Audio is pitch-corrected automatically at export using the `atempo` filter.
 
-<!-- SCREENSHOT: A region chip with the speed picker popover open, showing the five presets -->
+![Region chip with speed picker popover open](docs/PerRegionSpeed.png)
 
 ---
 
@@ -60,7 +59,7 @@ Click the speed badge on a region chip (shown as **1×** by default) to change p
 
 If your source has multiple audio tracks (SteelSeries Sonar, OBS multi-track, or any multi-audio container), the mixer panel appears below the video. Each track gets a color-coded row with a volume slider and a mute button.
 
-<!-- SCREENSHOT: The track mixer with 3–4 colored rows (Game, Mic, Discord), one muted, sliders at different levels -->
+![Multi-track audio mixer with color-coded rows, mute buttons, and volume sliders](docs/Multi-TrackAudio.jpg)
 
 - **Click a track's colored dot** to recolor it — the same color appears on the row stripe, the slider thumb, and that track's waveform layer on the timeline
 - **Click a track's label** to rename it inline (turn "Track 2" into "Discord")
@@ -72,7 +71,7 @@ If your source has multiple audio tracks (SteelSeries Sonar, OBS multi-track, or
 
 Open the export panel with **Ctrl+E**.
 
-<!-- SCREENSHOT: The export dialog with format tabs (MP4 / MP3 / GIF), size-limit picker, and normalize checkbox -->
+![Export dialog showing format tabs, size-limit picker, and normalize option](docs/ExportDialog.png)
 
 **MP4** — Hardware-accelerated encode using the best encoder your GPU supports (NVENC → AMF → QSV → libx264 software fallback). Export regions as separate clips or stitched into one file. Optional size target (10 MB, 50 MB, 500 MB, or none) for Discord's upload limits.
 
@@ -90,7 +89,7 @@ Open the export panel with **Ctrl+E**.
 
 Every action is bound to a key. Click any shortcut label in the footer to open the keybind editor and remap it to whatever you prefer.
 
-<!-- SCREENSHOT: The keybind editor overlay showing all actions with their current bindings -->
+![Keybind editor showing all actions and their current bindings](docs/KeyboardShortcuts.png)
 
 Default bindings:
 
@@ -115,7 +114,7 @@ Default bindings:
 
 Hit the **?** button in the top bar to pull up a curated list of things that aren't obvious from just looking at the UI.
 
-<!-- SCREENSHOT: The tips modal open, showing a few tip entries -->
+![Tips modal](docs/Tips.png)
 
 ---
 
