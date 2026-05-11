@@ -3512,6 +3512,12 @@ pub fn run() {
             // No CLI args — Clippy autodetects state from saved settings.
             None,
         ))
+        // Self-updating: checks the configured endpoint for a newer signed
+        // installer; the frontend drives check/download/install via the JS
+        // plugin. `process` is needed so the app can restart itself after
+        // installing the update.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             app.manage(DiagLog::new());
             app.manage(InitialPath(Mutex::new(parse_initial_path())));
@@ -3677,6 +3683,7 @@ pub fn run() {
             replay::replay_add_game,
             replay::replay_add_current_game,
             replay::replay_remove_game,
+            replay::replay_recent_games,
             replay::replay_get_save_dir,
             replay::replay_set_save_dir,
             replay::replay_reset_save_dir,

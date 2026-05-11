@@ -61,6 +61,66 @@ export const ACTION_LABELS: Record<ActionId, string> = {
   jumpRegion9: "Jump to region 9",
 };
 
+export type ActionGroup = "playback" | "selection" | "regions" | "capture" | "exports";
+
+export const ACTION_GROUP_LABELS: Record<ActionGroup, string> = {
+  playback:  "Playback",
+  selection: "Selection",
+  regions:   "Regions",
+  capture:   "Capture",
+  exports:   "Saves & Exports",
+};
+
+export const ACTION_GROUPS: Record<ActionId, ActionGroup> = {
+  playPause:    "playback",
+  frameBack:    "playback",
+  frameForward: "playback",
+  jumpStart:    "playback",
+  jumpEnd:      "playback",
+  setIn:        "selection",
+  setOut:       "selection",
+  loopRegion:   "regions",
+  cropRegion:   "regions",
+  jumpRegion1:  "regions",
+  jumpRegion2:  "regions",
+  jumpRegion3:  "regions",
+  jumpRegion4:  "regions",
+  jumpRegion5:  "regions",
+  jumpRegion6:  "regions",
+  jumpRegion7:  "regions",
+  jumpRegion8:  "regions",
+  jumpRegion9:  "regions",
+  saveReplay:   "capture",
+  openFile:     "exports",
+  export:       "exports",
+  saveFrame:    "exports",
+};
+
+export const ACTION_DESCRIPTIONS: Record<ActionId, string> = {
+  openFile:     "Pick a video file to load into the editor.",
+  playPause:    "Toggles playback at the current playhead.",
+  frameBack:    "Step a single frame backward.",
+  frameForward: "Step a single frame forward.",
+  jumpStart:    "Move the playhead to the start of the file.",
+  jumpEnd:      "Move the playhead to the end of the file.",
+  setIn:        "Mark the start of a new region at the playhead.",
+  setOut:       "Mark the end of the in-progress region.",
+  export:       "Open the export dialog with the current regions.",
+  loopRegion:   "Toggle loop playback for the region under the playhead.",
+  cropRegion:   "Open the crop overlay for the region under the playhead.",
+  saveFrame:    "Save the current frame as a PNG to your save folder.",
+  saveReplay:   "Flush the replay buffer to MP4. Fires while Clippy is unfocused.",
+  jumpRegion1:  "Jump the playhead to region 1.",
+  jumpRegion2:  "Jump the playhead to region 2.",
+  jumpRegion3:  "Jump the playhead to region 3.",
+  jumpRegion4:  "Jump the playhead to region 4.",
+  jumpRegion5:  "Jump the playhead to region 5.",
+  jumpRegion6:  "Jump the playhead to region 6.",
+  jumpRegion7:  "Jump the playhead to region 7.",
+  jumpRegion8:  "Jump the playhead to region 8.",
+  jumpRegion9:  "Jump the playhead to region 9.",
+};
+
 export const DEFAULT_KEYBINDS: Keybinds = {
   openFile:     { key: "o", ctrl: true },
   playPause:    { key: " " },

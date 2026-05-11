@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { formatKeybind, type Keybinds } from "./keybinds";
 
 const SEEN_KEY = "clippy.onboarded.v1";
 
@@ -11,7 +12,7 @@ const SEEN_KEY = "clippy.onboarded.v1";
  * dismissed it never shows again. Resetting requires deleting the
  * localStorage key (or clearing site data).
  */
-export function OnboardingHint() {
+export function OnboardingHint(props: { keybinds: Keybinds }) {
   // Don't render at all if the user has seen it. Stays out of the tree.
   const [visible, setVisible] = useState(() => {
     try {
@@ -57,7 +58,7 @@ export function OnboardingHint() {
           <ul>
             <li>
               <b>Drag a video</b> onto the window to open it — or use{" "}
-              <kbd>Ctrl+O</kbd>.
+              <kbd>{formatKeybind(props.keybinds.openFile)}</kbd>.
             </li>
             <li>
               On region chips, the <b>colored dot is clickable</b> — pick

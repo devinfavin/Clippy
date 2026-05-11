@@ -30,7 +30,6 @@ import {
 } from "./types";
 import { fmtTime } from "./formatters";
 import {
-  ACTION_LABELS,
   captureKeybind,
   DEFAULT_KEYBINDS,
   formatKeybind,
@@ -43,6 +42,13 @@ import {
   type Keybind,
   type Keybinds,
 } from "./keybinds";
+import {
+  AboutTab,
+  KeyboardSettingsTab,
+  SETTINGS_TABS,
+  StorageSettingsTab,
+  type SettingsTabId,
+} from "./Settings";
 import { ExportModal } from "./ExportModal";
 import { CropOverlay } from "./CropOverlay";
 import { CropIndicator } from "./CropIndicator";
@@ -54,6 +60,7 @@ import { ColorPicker } from "./ColorPicker";
 import { TipsModal } from "./TipsModal";
 import { OnboardingHint } from "./OnboardingHint";
 import { ReplayStatusPill } from "./ReplayStatusPill";
+import { useUpdater } from "./useUpdater";
 import {
   ReplaySettings,
   getSaveBehavior,
@@ -73,7 +80,35 @@ function hexWithAlpha(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+import { Showcase } from "./Showcase";
+
+/** Dev-only design-system showcase. Visit the app with `?showcase=1` to see
+ *  every token, button, input, chip, status-strip variant in isolation —
+ *  used for Design Pass 2 validation before tokens get mechanically applied
+ *  across the existing UI. Gated to dev builds; tree-shaken in release. */
+function isShowcaseRequested(): boolean {
+  if (!import.meta.env.DEV) return false;
+  try {
+    return new URLSearchParams(window.location.search).has("showcase");
+  } catch {
+    return false;
+  }
+}
+
 export default function App() {
+  // Hard switch — if ?showcase=1 is in the URL (dev builds only), render the
+  // showcase page instead of the editor. No side effects from main App
+  // mount (no Tauri commands fire, no event listeners install).
+  // The conditional resolves to `false` at build time in release because
+  // import.meta.env.DEV is statically replaced, so Vite's tree-shaker
+  // strips the Showcase module out of the release bundle entirely.
+  if (isShowcaseRequested()) {
+    return <Showcase />;
+  }
+  return <Editor />;
+}
+
+function Editor() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
 
@@ -99,6 +134,11 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTabId>("replay");
   const [listeningAction, setListeningAction] = useState<ActionId | null>(null);
   useEffect(() => { saveKeybinds(keybinds); }, [keybinds]);
+
+  // Auto-updater. Silent check on launch; manual check + install from the
+  // About tab. State is passed down so the tab can render the same banner
+  // the user sees on the topbar.
+  const updater = useUpdater();
 
   // Push the save-replay binding to the OS whenever it changes. Backend
   // re-registers the global shortcut so it works while a game is focused.
@@ -1521,7 +1561,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <OnboardingHint />
+      <OnboardingHint keybinds={keybinds} />
       <header className="topbar">
         <div className="brand" title="Clippy">
           <div className="brand-mark" aria-hidden />
@@ -1537,25 +1577,51 @@ export default function App() {
                 {srcPath.split(/[\\/]/).pop()}
               </span>
               {info && (
-                <span className="dim">
-                  {info.width}×{info.height} · {info.fps.toFixed(2)}fps · {info.video_codec}
-                  {info.audio_codec ? `/${info.audio_codec}` : ""} · {fmtTime(info.duration_secs)}
+                <span className="filemeta-line">
+                  <span>{info.width}×{info.height}</span>
+                  <span className="filemeta-sep">·</span>
+                  <span>{info.fps.toFixed(2)}fps</span>
+                  <span className="filemeta-sep">·</span>
+                  <span>
+                    {info.video_codec}
+                    {info.audio_codec ? `/${info.audio_codec}` : ""}
+                  </span>
+                  <span className="filemeta-sep">·</span>
+                  <span>{fmtTime(info.duration_secs)}</span>
                   {proxyEncoder && (
-                    <span className="encoder-badge" title="Source preparation strategy">
-                      {" "}· {proxyEncoder}
+                    <span
+                      className={`strategy-pill ${
+                        proxyEncoder === "direct" || proxyEncoder === "remux"
+                          ? "is-good"
+                          : "is-warn"
+                      }`}
+                      title="Source preparation strategy"
+                    >
+                      {proxyEncoder}
                     </span>
                   )}
                 </span>
               )}
             </>
           ) : (
-            <span className="dim">No file loaded</span>
+            <span className="filemeta-empty">No file loaded</span>
           )}
         </div>
         {/* Replay buffer status sits in the topbar as the "app state" indicator
             (analogous to Discord's avatar/status cluster, Steam's online dot).
             Only renders when the buffer is running — hidden when Idle. */}
         <ReplayStatusPill onClick={() => setKeybindsOpen(true)} />
+        {updater.state.kind === "available" && (
+          <button
+            type="button"
+            className="update-pill"
+            onClick={() => { setSettingsTab("about"); setKeybindsOpen(true); }}
+            title={`Update to v${updater.state.version} available — click to install`}
+          >
+            <span className="update-pill-dot" aria-hidden />
+            Update to v{updater.state.version}
+          </button>
+        )}
         <button
           className="help-button"
           onClick={() => setTipsOpen(true)}
@@ -1600,26 +1666,28 @@ export default function App() {
             onClick={playPause}
           />
         ) : (
-          <div
-            className="placeholder"
-            onClick={phase.kind === "idle" || phase.kind === "error" ? handleOpen : undefined}
-            role={phase.kind === "idle" || phase.kind === "error" ? "button" : undefined}
-          >
+          <div className="placeholder">
             {phase.kind === "idle" ? (
               <>
-                <div className="placeholder-icon">▷</div>
-                <div className="placeholder-title">Drop a video here</div>
-                <div className="placeholder-hint">
-                  or press <kbd>{formatKeybind(keybinds.openFile)}</kbd> to open a file
-                </div>
-                <div className="placeholder-formats">
-                  mp4 · mkv · mov · webm · m4v · avi
-                </div>
+                {/* Pass-2 empty state: centered primary as the main affordance,
+                    soft secondary hint below. No permanent dashed border — the
+                    `isDraggingFile` overlay handles the drop-target visual only
+                    while the user is actually dragging. */}
+                <button
+                  className="btn primary placeholder-cta"
+                  onClick={handleOpen}
+                  type="button"
+                >
+                  Open video…
+                </button>
+                <div className="placeholder-hint">or drag a video here</div>
               </>
             ) : phase.kind === "error" ? (
               <>
                 <div className="placeholder-title">Couldn't load that file.</div>
-                <div className="placeholder-hint">Click to try another</div>
+                <button className="btn ghost placeholder-cta" onClick={handleOpen} type="button">
+                  Open another…
+                </button>
               </>
             ) : (
               <div className="placeholder-title">Loading…</div>
@@ -1641,13 +1709,13 @@ export default function App() {
         </div>
 
         <div className="transport-buttons">
-          <button onClick={() => seek(0)} title="Home">⏮</button>
-          <button onClick={() => stepFrames(-1)} title=",">◀</button>
-          <button onClick={playPause} title="Space" className="play">
+          <button onClick={() => seek(0)} title={formatKeybind(keybinds.jumpStart)}>⏮</button>
+          <button onClick={() => stepFrames(-1)} title={formatKeybind(keybinds.frameBack)}>◀</button>
+          <button onClick={playPause} title={formatKeybind(keybinds.playPause)} className="play">
             {isPlaying ? "⏸" : "▶"}
           </button>
-          <button onClick={() => stepFrames(1)} title=".">▶</button>
-          <button onClick={() => seek(duration)} title="End">⏭</button>
+          <button onClick={() => stepFrames(1)} title={formatKeybind(keybinds.frameForward)}>▶</button>
+          <button onClick={() => seek(duration)} title={formatKeybind(keybinds.jumpEnd)}>⏭</button>
         </div>
 
         <div className="mark-buttons">
@@ -1931,7 +1999,7 @@ export default function App() {
         />
       )}
 
-      {tipsOpen && <TipsModal onClose={() => setTipsOpen(false)} />}
+      {tipsOpen && <TipsModal keybinds={keybinds} onClose={() => setTipsOpen(false)} />}
 
       {keybindsOpen && (
         <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setKeybindsOpen(false); }}>
@@ -1965,7 +2033,13 @@ export default function App() {
                   />
                 )}
                 {settingsTab === "storage" && <StorageSettingsTab />}
-                {settingsTab === "about" && <AboutTab />}
+                {settingsTab === "about" && (
+                  <AboutTab
+                    updater={updater.state}
+                    onCheckUpdates={() => void updater.checkNow()}
+                    onInstallUpdate={() => void updater.installNow()}
+                  />
+                )}
               </div>
             </div>
 
@@ -2020,383 +2094,8 @@ function HintKbd(props: {
   );
 }
 
-/** Copies the in-memory diagnostic log to the clipboard. The log records
- *  every significant backend operation (probe, proxy strategy, ffmpeg args,
- *  export path decisions) so you can paste it when reporting a bug. Nothing
- *  is written to disk or sent anywhere automatically. */
-function DiagnosticsButton() {
-  const [state, setState] = useState<"idle" | "copied" | "error">("idle");
-  const copy = async () => {
-    try {
-      const text = await invoke<string>("get_diagnostics");
-      await navigator.clipboard.writeText(text);
-      setState("copied");
-      setTimeout(() => setState("idle"), 2500);
-    } catch {
-      setState("error");
-      setTimeout(() => setState("idle"), 2500);
-    }
-  };
-  return (
-    <div className="cache-row">
-      <span className="cache-label">Diagnostics</span>
-      <span className="cache-size mono" style={{ fontSize: "var(--type-xs)", opacity: 0.6 }}>
-        {state === "copied" ? "Copied to clipboard" : state === "error" ? "Copy failed" : "operation log"}
-      </span>
-      <button className="cache-clear" onClick={copy} title="Copy the diagnostic log to clipboard — paste it when reporting a bug">
-        Copy log
-      </button>
-    </div>
-  );
-}
+// Settings tabs (Keyboard, Storage, About) and their tab-id constants live
+// in ./Settings — kept out of App.tsx so the Editor file isn't 600 lines
+// longer than it needs to be.
 
-// ---------- Settings modal tab definitions + per-tab content ----------
-
-type SettingsTabId = "replay" | "keyboard" | "storage" | "about";
-
-const SETTINGS_TABS: readonly { id: SettingsTabId; label: string }[] = [
-  { id: "replay", label: "Replay buffer" },
-  { id: "keyboard", label: "Keyboard" },
-  { id: "storage", label: "Storage" },
-  { id: "about", label: "About" },
-] as const;
-
-/** Keyboard-shortcuts tab — extracted from the old inline modal body. The
- *  rebind interaction is unchanged; layout moved into the tab container. */
-function KeyboardSettingsTab(props: {
-  keybinds: Keybinds;
-  listeningAction: ActionId | null;
-  setListeningAction: (a: ActionId | null) => void;
-}) {
-  const { keybinds, listeningAction, setListeningAction } = props;
-  // Jump-to-region 1-9 used to take 9 vertical rows. They share a label
-  // template and are typically left at defaults, so we collapse them into
-  // a single row of 9 inline buttons. Each remains individually rebindable
-  // by clicking its digit.
-  const jumpRegionActions: ActionId[] = [
-    "jumpRegion1", "jumpRegion2", "jumpRegion3",
-    "jumpRegion4", "jumpRegion5", "jumpRegion6",
-    "jumpRegion7", "jumpRegion8", "jumpRegion9",
-  ];
-  const isJumpRegion = (a: ActionId) =>
-    (jumpRegionActions as string[]).includes(a as string);
-
-  return (
-    <section className="settings-section">
-      <header className="settings-tab-header">
-        <h3 className="settings-tab-title">Keyboard shortcuts</h3>
-        <p className="settings-tab-blurb">
-          Click any binding to record a new key combo. Globals (tagged below) fire
-          even when Clippy is unfocused — they don't conflict with in-app bindings.
-        </p>
-      </header>
-      <div className="kb-list">
-        {(Object.keys(ACTION_LABELS) as ActionId[])
-          .filter((a) => !isJumpRegion(a))
-          .map((action) => {
-            const isListening = listeningAction === action;
-            const isGlobal = GLOBAL_ACTIONS.has(action);
-            // Global hotkeys live in OS-key-space and don't conflict with
-            // in-app bindings even if they share a key combo.
-            const conflicts = isGlobal
-              ? []
-              : (Object.keys(keybinds) as ActionId[]).filter(
-                  (other) =>
-                    other !== action &&
-                    !GLOBAL_ACTIONS.has(other) &&
-                    formatKeybind(keybinds[other]) === formatKeybind(keybinds[action])
-                );
-            return (
-              <div key={action} className={`kb-row${conflicts.length ? " has-conflict" : ""}`}>
-                <span className="kb-label">
-                  {ACTION_LABELS[action]}
-                  {isGlobal && (
-                    <span className="kb-tag-global" title="Fires globally — works while Clippy is not focused">
-                      Global
-                    </span>
-                  )}
-                </span>
-                <button
-                  className={`kb-binding${isListening ? " listening" : ""}`}
-                  onClick={() => setListeningAction(action)}
-                >
-                  {isListening ? "Press a key…  (Esc to cancel)" : formatKeybind(keybinds[action])}
-                </button>
-                {conflicts.length > 0 && (
-                  <span className="kb-conflict" title={`Conflicts with: ${conflicts.map((c) => ACTION_LABELS[c]).join(", ")}`}>
-                    conflict
-                  </span>
-                )}
-              </div>
-            );
-          })}
-
-        {/* Region jumps — compact inline row. Each digit is its own binding;
-            click to rebind that one specifically. */}
-        <div className="kb-row">
-          <span className="kb-label">Jump to region 1–9</span>
-          <span className="kb-jump-region-row">
-            {jumpRegionActions.map((action) => {
-              const isListening = listeningAction === action;
-              return (
-                <button
-                  key={action}
-                  className={`kb-binding kb-jump-region-btn${isListening ? " listening" : ""}`}
-                  onClick={() => setListeningAction(action)}
-                  title={`${ACTION_LABELS[action]} — click to rebind`}
-                >
-                  {isListening ? "…" : formatKeybind(keybinds[action])}
-                </button>
-              );
-            })}
-          </span>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-type StorageSummary = {
-  app_data_dir: string;
-  app_data_total_bytes: number;
-  proxies_dir: string;
-  proxies_bytes: number;
-  diagnostics_log_path: string;
-  diagnostics_log_bytes: number;
-  other_bytes: number;
-};
-
-function fmtBytes(b: number): string {
-  if (b >= 1_073_741_824) return `${(b / 1_073_741_824).toFixed(2)} GB`;
-  if (b >= 1_048_576) return `${(b / 1_048_576).toFixed(1)} MB`;
-  if (b >= 1024) return `${(b / 1024).toFixed(0)} KB`;
-  if (b === 0) return "—";
-  return `${b} B`;
-}
-
-/** Storage tab — per-component breakdown + open-data-folder + clear actions. */
-function StorageSettingsTab() {
-  const [summary, setSummary] = useState<StorageSummary | null>(null);
-  const [busy, setBusy] = useState<"cache" | "log" | null>(null);
-
-  const refresh = useCallback(() => {
-    invoke<StorageSummary>("storage_summary")
-      .then(setSummary)
-      .catch(() => setSummary(null));
-  }, []);
-  useEffect(() => { refresh(); }, [refresh]);
-
-  const clearCache = async () => {
-    setBusy("cache");
-    try {
-      await invoke("clear_cache");
-    } catch {}
-    setBusy(null);
-    refresh();
-  };
-  const clearLog = async () => {
-    setBusy("log");
-    try {
-      await invoke("clear_diagnostics_log");
-    } catch {}
-    setBusy(null);
-    refresh();
-  };
-  const openDataDir = async () => {
-    if (!summary) return;
-    try {
-      await invoke("reveal_in_folder", { path: summary.app_data_dir });
-    } catch {}
-  };
-
-  return (
-    <section className="settings-section">
-      <header className="settings-tab-header">
-        <h3 className="settings-tab-title">Storage</h3>
-        <p className="settings-tab-blurb">
-          Clippy keeps everything local under{" "}
-          <code className="mono">%APPDATA%\Clippy\</code>. Files in the
-          proxy cache untouched for 30 days are auto-pruned; clear manually below
-          if you need the space back sooner.
-        </p>
-      </header>
-
-      <div className="settings-storage-grid">
-        <div className="settings-storage-row">
-          <div className="settings-storage-info">
-            <div className="settings-storage-label">Proxy cache</div>
-            <div className="settings-storage-sub">Decoded MP4 proxies + waveforms used for fast scrubbing</div>
-          </div>
-          <div className="settings-storage-value mono">
-            {summary ? fmtBytes(summary.proxies_bytes) : "—"}
-          </div>
-          <button
-            className="settings-secondary-btn"
-            onClick={clearCache}
-            disabled={busy != null || !summary || summary.proxies_bytes === 0}
-          >
-            {busy === "cache" ? "Clearing…" : "Clear"}
-          </button>
-        </div>
-
-        <div className="settings-storage-row">
-          <div className="settings-storage-info">
-            <div className="settings-storage-label">Diagnostics log</div>
-            <div className="settings-storage-sub">
-              <span className="mono">diagnostics.log</span> — appended on every graceful exit
-            </div>
-          </div>
-          <div className="settings-storage-value mono">
-            {summary ? fmtBytes(summary.diagnostics_log_bytes) : "—"}
-          </div>
-          <button
-            className="settings-secondary-btn"
-            onClick={clearLog}
-            disabled={busy != null || !summary || summary.diagnostics_log_bytes === 0}
-          >
-            {busy === "log" ? "Clearing…" : "Clear"}
-          </button>
-        </div>
-
-        <div className="settings-storage-row">
-          <div className="settings-storage-info">
-            <div className="settings-storage-label">Other</div>
-            <div className="settings-storage-sub">Project state JSON, allowlist, save-folder pref</div>
-          </div>
-          <div className="settings-storage-value mono">
-            {summary ? fmtBytes(summary.other_bytes) : "—"}
-          </div>
-          <span />
-        </div>
-
-        <div className="settings-storage-row settings-storage-row-total">
-          <div className="settings-storage-info">
-            <div className="settings-storage-label">Total app data</div>
-            <div className="settings-storage-sub mono">
-              {summary?.app_data_dir ?? ""}
-            </div>
-          </div>
-          <div className="settings-storage-value mono">
-            {summary ? fmtBytes(summary.app_data_total_bytes) : "—"}
-          </div>
-          <button
-            className="settings-secondary-btn"
-            onClick={openDataDir}
-            disabled={!summary}
-            title="Open this folder in File Explorer"
-          >
-            Open
-          </button>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-type AboutSystemInfo = {
-  gpu_name: string;
-  gpu_vram_mb: number;
-  ram_total_mb: number;
-  hw_encoders: string[];
-};
-
-/** About tab — version, system snapshot, diagnostics, report-a-bug. */
-function AboutTab() {
-  const [sys, setSys] = useState<AboutSystemInfo | null>(null);
-  useEffect(() => {
-    invoke<AboutSystemInfo>("replay_get_system_info")
-      .then(setSys)
-      .catch(() => {});
-  }, []);
-
-  const openIssues = async () => {
-    try {
-      // Tauri's opener plugin — opens the URL in the user's default browser
-      // rather than inside the WebView.
-      const { openUrl } = await import("@tauri-apps/plugin-opener");
-      await openUrl("https://github.com/anthropics/clippy/issues/new");
-    } catch (e) {
-      console.warn("[clippy] failed to open issues URL:", e);
-    }
-  };
-
-  return (
-    <section className="settings-section">
-      <header className="settings-tab-header">
-        <h3 className="settings-tab-title">About Clippy</h3>
-        <p className="settings-tab-blurb">
-          Local-only video clip editor for Windows. No telemetry, no cloud.
-        </p>
-      </header>
-
-      <div className="settings-about-grid">
-        <div className="settings-about-row">
-          <span className="settings-about-key">Version</span>
-          <span className="settings-about-value mono">0.1.0</span>
-        </div>
-        <div className="settings-about-row">
-          <span className="settings-about-key">Build</span>
-          <span className="settings-about-value mono">
-            {import.meta.env.DEV ? "dev" : "release"}
-          </span>
-        </div>
-        <div className="settings-about-row">
-          <span className="settings-about-key">GPU</span>
-          <span className="settings-about-value mono" title={sys?.gpu_name}>
-            {sys
-              ? sys.gpu_vram_mb > 0
-                ? `${sys.gpu_name} · ${(sys.gpu_vram_mb / 1024).toFixed(1)} GB`
-                : sys.gpu_name || "—"
-              : "probing…"}
-          </span>
-        </div>
-        <div className="settings-about-row">
-          <span className="settings-about-key">System RAM</span>
-          <span className="settings-about-value mono">
-            {sys && sys.ram_total_mb > 0
-              ? `${(sys.ram_total_mb / 1024).toFixed(0)} GB`
-              : "—"}
-          </span>
-        </div>
-        <div className="settings-about-row">
-          <span className="settings-about-key">HW encoders</span>
-          <span className="settings-about-value mono">
-            {sys
-              ? sys.hw_encoders.length > 0
-                ? sys.hw_encoders.map(shortenEncoderAbout).join(", ")
-                : "none detected"
-              : "probing…"}
-          </span>
-        </div>
-      </div>
-
-      <div className="settings-about-actions">
-        <DiagnosticsButton />
-        <button
-          className="settings-secondary-btn"
-          onClick={openIssues}
-          title="Open the GitHub issues page in your browser"
-        >
-          Report an issue…
-        </button>
-      </div>
-
-      <p className="settings-tab-help">
-        Diagnostics include detected GPU, hardware encoders, audio devices, monitor
-        list, and the most recent event log. Non-game window titles are redacted
-        unless you turn on Verbose diagnostics under <strong>Replay buffer</strong>.
-      </p>
-    </section>
-  );
-}
-
-/** Same classification as ReplaySettings's shortenEncoder. Duplicated locally
- *  to keep About a self-contained tab without crossing module boundaries. */
-function shortenEncoderAbout(name: string): string {
-  const lower = name.toLowerCase();
-  if (lower.includes("nvidia")) return "NVENC";
-  if (lower.includes("amd") || lower.includes("amf")) return "AMF";
-  if (lower.includes("intel") || lower.includes("quick sync")) return "QSV";
-  return name.length > 32 ? name.slice(0, 29) + "…" : name;
-}
 

@@ -208,6 +208,7 @@ function ReplaySettingsImpl() {
 
   // ----- games allowlist -----
   const [games, setGames] = useState<string[]>([]);
+  const [recentGames, setRecentGames] = useState<string[]>([]);
   const [gameSearch, setGameSearch] = useState("");
   const [addCountdown, setAddCountdown] = useState<number | null>(null);
 
@@ -349,8 +350,12 @@ function ReplaySettingsImpl() {
 
   const refreshGames = useCallback(async () => {
     try {
-      const list = await invoke<string[]>("replay_list_games");
+      const [list, recent] = await Promise.all([
+        invoke<string[]>("replay_list_games"),
+        invoke<string[]>("replay_recent_games"),
+      ]);
       setGames(list);
+      setRecentGames(recent);
     } catch (e) {
       setError(String(e));
     }
@@ -495,11 +500,8 @@ function ReplaySettingsImpl() {
 
   // ----- derived -----
   const minutes = (durationSecs / 60).toFixed(1).replace(/\.0$/, "");
-  const filteredGames = useMemo(() => {
-    const q = gameSearch.toLowerCase().trim();
-    if (!q) return games;
-    return games.filter((g) => g.toLowerCase().includes(q));
-  }, [games, gameSearch]);
+  // (filteredGames + Recently-added / Steam / Manual grouping moved into
+  // GamesTrackedList — it owns its own filtering + auto-expand-on-search.)
 
   return (
     <section className="settings-section">
@@ -698,38 +700,14 @@ function ReplaySettingsImpl() {
         {audioDevices.length === 0 ? (
           <p className="settings-section-blurb">No render devices detected.</p>
         ) : (
-          <div className="settings-checklist">
-            {audioDevices.map((d) => {
-              const checked = selectedAudioIds.has(d.id);
-              return (
-                <div key={d.id} className="settings-audio-row">
-                  <label className="settings-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleAudioDevice(d.id)}
-                      disabled={isRunning}
-                    />
-                    <span className="settings-audio-system">{d.name}</span>
-                  </label>
-                  {checked && (
-                    <span className="settings-audio-rename">
-                      <span className="settings-audio-rename-prefix">Called</span>
-                      <input
-                        type="text"
-                        className="settings-audio-name"
-                        placeholder="e.g. Game"
-                        value={audioNames[d.id] ?? ""}
-                        onChange={(e) => setAudioName(d.id, e.target.value)}
-                        disabled={isRunning}
-                        aria-label={`Track name for ${d.name}`}
-                      />
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+          <AudioDeviceGroups
+            devices={audioDevices}
+            selectedIds={selectedAudioIds}
+            audioNames={audioNames}
+            isRunning={isRunning}
+            onToggle={toggleAudioDevice}
+            onRename={setAudioName}
+          />
         )}
         {selectedAudioIds.size === 0 && (
           <p className="settings-section-blurb settings-help">
@@ -915,7 +893,7 @@ function ReplaySettingsImpl() {
         summary={`${games.length} entr${games.length === 1 ? "y" : "ies"}`}
       >
         <p className="settings-section-blurb" style={{ marginTop: 0 }}>
-          The buffer only captures windows whose process is in this list. Steam games auto-detect; for non-Steam games (Battle.net, Riot, Epic, itch.io builds) add them manually.
+          The buffer only captures windows whose process is in this list. Steam games auto-detect; non-Steam games (Battle.net, Riot, Epic, itch.io builds) add them manually below.
         </p>
 
         <div className="settings-row" style={{ flexWrap: "wrap" }}>
@@ -940,44 +918,24 @@ function ReplaySettingsImpl() {
         <div className="settings-row">
           <input
             className="settings-text"
-            placeholder="Search…"
+            placeholder="Search games…"
             value={gameSearch}
             onChange={(e) => setGameSearch(e.target.value)}
           />
         </div>
 
-        {filteredGames.length === 0 ? (
-          <p className="settings-section-blurb">
-            {games.length === 0
-              ? "No games detected. Click Rescan or add one manually."
-              : "No matches."}
-          </p>
-        ) : (
-          <ul className="settings-game-list">
-            {filteredGames.map((path) => (
-              <li key={path} className="settings-game-row" title={path}>
-                <span className="settings-game-name mono">{baseExe(path)}</span>
-                <span className="settings-game-path">{path}</span>
-                <button
-                  className="settings-row-remove"
-                  onClick={() => removeGame(path)}
-                  title="Remove from allowlist"
-                  aria-label="Remove"
-                >
-                  ×
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
+        <GamesTrackedList
+          games={games}
+          recentGames={recentGames}
+          search={gameSearch}
+          onRemove={removeGame}
+        />
       </Accordion>
     </section>
   );
 }
 
-function baseExe(path: string): string {
-  return path.split(/[\\/]/).pop() ?? path;
-}
+// (baseExe + isSteamPath helpers live with the GamesTrackedList component below.)
 
 // ---------- Resource impact panel ----------
 
@@ -1259,6 +1217,314 @@ function Metric(props: {
       <div className="settings-calc-label">{props.label}</div>
       <div className="settings-calc-value">{props.value}</div>
       {props.aux && <div className="settings-calc-aux">{props.aux}</div>}
+    </div>
+  );
+}
+
+// ---------- Games-tracked grouped list ----------
+
+/** Returns true when `path` looks like a Steam install. Steam games live
+ *  under `…\steamapps\common\<game>\…` regardless of which library drive. */
+function isSteamPath(path: string): boolean {
+  return /[\\/]steamapps[\\/]common[\\/]/i.test(path);
+}
+
+function baseExe(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+function GamesTrackedList(props: {
+  games: string[];
+  recentGames: string[];
+  search: string;
+  onRemove: (path: string) => void;
+}) {
+  const q = props.search.toLowerCase().trim();
+  const matches = (p: string) => !q || p.toLowerCase().includes(q);
+
+  // Recently added: render the recents in order (most-recent-first), but
+  // filter by the live games list so a deleted entry doesn't dangle.
+  const present = useMemo(() => new Set(props.games.map((g) => g.toLowerCase())), [props.games]);
+  const recentVisible = props.recentGames.filter(
+    (p) => present.has(p.toLowerCase()) && matches(p)
+  );
+
+  const steam: string[] = [];
+  const manual: string[] = [];
+  for (const g of props.games) {
+    if (!matches(g)) continue;
+    if (isSteamPath(g)) steam.push(g);
+    else manual.push(g);
+  }
+
+  // Default-expand behavior: while searching, every non-empty group opens
+  // so matches are visible. Outside search, groups stay collapsed until
+  // user clicks.
+  const isSearching = q.length > 0;
+  const [steamOpen, setSteamOpen] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
+  const steamEffectiveOpen = isSearching ? steam.length > 0 : steamOpen;
+  const manualEffectiveOpen = isSearching ? manual.length > 0 : manualOpen;
+
+  const totalShown = recentVisible.length + steam.length + manual.length;
+  if (totalShown === 0) {
+    return (
+      <p className="settings-section-blurb">
+        {props.games.length === 0
+          ? "No games detected. Click Rescan or add one manually."
+          : "No matches."}
+      </p>
+    );
+  }
+
+  return (
+    <div className="settings-games-groups">
+      {/* Recently added — always visible at the top, no collapsing. */}
+      {recentVisible.length > 0 && (
+        <div className="settings-games-group">
+          <div className="settings-games-group-head settings-games-group-head-static">
+            <span className="settings-games-group-label">Recently added</span>
+            <span className="settings-audio-group-count">
+              {recentVisible.length} {recentVisible.length === 1 ? "game" : "games"}
+            </span>
+          </div>
+          <div className="settings-games-group-body">
+            <ul className="settings-game-list">
+              {recentVisible.map((path) => (
+                <GameRow key={`recent-${path}`} path={path} onRemove={props.onRemove} />
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+
+      {/* Steam */}
+      {steam.length > 0 && (
+        <div className={`settings-games-group${steamEffectiveOpen ? " is-open" : ""}`}>
+          <button
+            className="settings-games-group-head"
+            onClick={() => setSteamOpen((v) => !v)}
+            aria-expanded={steamEffectiveOpen}
+            type="button"
+          >
+            <span className="settings-audio-group-arrow" aria-hidden>
+              {steamEffectiveOpen ? "▾" : "▸"}
+            </span>
+            <span className="settings-games-group-label">Steam</span>
+            <span className="settings-audio-group-count">{steam.length}</span>
+          </button>
+          {steamEffectiveOpen && (
+            <div className="settings-games-group-body">
+              <ul className="settings-game-list">
+                {steam.map((path) => (
+                  <GameRow key={path} path={path} onRemove={props.onRemove} />
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Manual */}
+      {manual.length > 0 && (
+        <div className={`settings-games-group${manualEffectiveOpen ? " is-open" : ""}`}>
+          <button
+            className="settings-games-group-head"
+            onClick={() => setManualOpen((v) => !v)}
+            aria-expanded={manualEffectiveOpen}
+            type="button"
+          >
+            <span className="settings-audio-group-arrow" aria-hidden>
+              {manualEffectiveOpen ? "▾" : "▸"}
+            </span>
+            <span className="settings-games-group-label">Manual</span>
+            <span className="settings-audio-group-count">{manual.length}</span>
+          </button>
+          {manualEffectiveOpen && (
+            <div className="settings-games-group-body">
+              <ul className="settings-game-list">
+                {manual.map((path) => (
+                  <GameRow key={path} path={path} onRemove={props.onRemove} />
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GameRow(props: { path: string; onRemove: (p: string) => void }) {
+  return (
+    <li className="settings-game-row" title={props.path}>
+      <span className="settings-game-name mono">{baseExe(props.path)}</span>
+      <span className="settings-game-path">{props.path}</span>
+      <button
+        className="settings-row-remove"
+        onClick={() => props.onRemove(props.path)}
+        title="Remove from allowlist"
+        aria-label="Remove"
+      >
+        ×
+      </button>
+    </li>
+  );
+}
+
+// ---------- Audio device grouping (Physical / Monitor / Virtual) ----------
+
+type DeviceGroup = "physical" | "monitor" | "virtual";
+
+/**
+ * Classify a WASAPI render device by name. Heuristic — substring matching on
+ * known patterns. Anything that doesn't look virtual or monitor falls into
+ * "physical" so the user always sees their device somewhere.
+ *
+ * - Virtual: SteelSeries Sonar, Voicemeeter, VB-Audio, OBS Virtual, any
+ *   "Virtual Audio Device" suffix Windows attaches to vDevs.
+ * - Monitor: leading "N - " prefix Windows assigns to multi-sink GPU drivers,
+ *   or explicit HDMI / DisplayPort audio labels.
+ * - Physical: everything else (Speakers, Microphone, Realtek, Focusrite, …).
+ */
+function classifyDevice(name: string): DeviceGroup {
+  const lower = name.toLowerCase();
+  if (
+    lower.includes("sonar") ||
+    lower.includes("voicemeeter") ||
+    lower.includes("vb-audio") ||
+    lower.includes("vb cable") ||
+    lower.includes("virtual audio") ||
+    lower.includes("obs virtual")
+  ) {
+    return "virtual";
+  }
+  // "1 - ASUS VG32VQ1B" style — leading digit + dash is how Windows
+  // distinguishes multi-monitor audio outputs from one GPU driver.
+  if (/^\d+\s*-\s*/.test(name) || lower.includes("hdmi audio") || lower.includes("displayport")) {
+    return "monitor";
+  }
+  return "physical";
+}
+
+const GROUP_META: Record<DeviceGroup, { label: string; hint: string }> = {
+  physical: { label: "Physical devices", hint: "Speakers, headphones, microphones, USB audio interfaces." },
+  monitor:  { label: "Monitor audio outputs", hint: "HDMI / DisplayPort audio attached to displays." },
+  virtual:  { label: "Virtual devices", hint: "Sonar, Voicemeeter, OBS Virtual Audio, and similar routers." },
+};
+
+function AudioDeviceGroups(props: {
+  devices: AudioDevice[];
+  selectedIds: Set<string>;
+  audioNames: Record<string, string>;
+  isRunning: boolean;
+  onToggle: (id: string) => void;
+  onRename: (id: string, name: string) => void;
+}) {
+  // Bucket by classification, preserving the original device order within
+  // each group (Windows surfaces them in default-first order).
+  const grouped = useMemo(() => {
+    const buckets: Record<DeviceGroup, AudioDevice[]> = {
+      physical: [],
+      monitor: [],
+      virtual: [],
+    };
+    for (const d of props.devices) {
+      buckets[classifyDevice(d.name)].push(d);
+    }
+    return buckets;
+  }, [props.devices]);
+
+  // Default-expand rule: any group containing a currently-selected device
+  // opens; first-run (nothing selected) keeps all groups collapsed so the
+  // user isn't faced with a wall of 12 devices.
+  const initialOpen = useMemo(() => {
+    const open: Record<DeviceGroup, boolean> = {
+      physical: false,
+      monitor: false,
+      virtual: false,
+    };
+    for (const d of props.devices) {
+      if (props.selectedIds.has(d.id)) {
+        open[classifyDevice(d.name)] = true;
+      }
+    }
+    return open;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // computed once on mount; user toggles take over after that
+  const [openGroups, setOpenGroups] = useState(initialOpen);
+
+  const groupOrder: DeviceGroup[] = ["physical", "monitor", "virtual"];
+
+  return (
+    <div className="settings-audio-groups">
+      {groupOrder.map((key) => {
+        const items = grouped[key];
+        if (items.length === 0) return null;
+        const selectedCount = items.filter((d) => props.selectedIds.has(d.id)).length;
+        const isOpen = openGroups[key];
+        return (
+          <div key={key} className={`settings-audio-group${isOpen ? " is-open" : ""}`}>
+            <button
+              className="settings-audio-group-head"
+              onClick={() => setOpenGroups((g) => ({ ...g, [key]: !g[key] }))}
+              aria-expanded={isOpen}
+              type="button"
+            >
+              <span className="settings-audio-group-arrow" aria-hidden>
+                {isOpen ? "▾" : "▸"}
+              </span>
+              <span className="settings-audio-group-label">{GROUP_META[key].label}</span>
+              <span className="settings-audio-group-meta">
+                {selectedCount > 0 ? (
+                  <span className="settings-audio-group-count is-selected">
+                    {selectedCount} selected
+                  </span>
+                ) : (
+                  <span className="settings-audio-group-count">
+                    {items.length} {items.length === 1 ? "device" : "devices"}
+                  </span>
+                )}
+              </span>
+            </button>
+            {isOpen && (
+              <div className="settings-audio-group-body">
+                <p className="settings-audio-group-hint">{GROUP_META[key].hint}</p>
+                {items.map((d) => {
+                  const checked = props.selectedIds.has(d.id);
+                  return (
+                    <div key={d.id} className="settings-audio-row">
+                      <label className="settings-checkbox">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => props.onToggle(d.id)}
+                          disabled={props.isRunning}
+                        />
+                        <span className="settings-audio-system" title={d.name}>{d.name}</span>
+                      </label>
+                      {checked && (
+                        <span className="settings-audio-rename">
+                          <span className="settings-audio-rename-prefix">Called</span>
+                          <input
+                            type="text"
+                            className="settings-audio-name"
+                            placeholder="e.g. Game"
+                            value={props.audioNames[d.id] ?? ""}
+                            onChange={(e) => props.onRename(d.id, e.target.value)}
+                            disabled={props.isRunning}
+                            aria-label={`Track name for ${d.name}`}
+                          />
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

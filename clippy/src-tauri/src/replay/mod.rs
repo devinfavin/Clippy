@@ -289,6 +289,64 @@ fn allowlist_file(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> 
     Ok(dir.join("game_allowlist.json"))
 }
 
+/// Sidecar file holding the last N games added to the allowlist (newest
+/// first). Independent of the main allowlist — exists purely to power the
+/// "Recently added" quick-glance UI in Settings.
+const RECENT_ADDS_LIMIT: usize = 5;
+fn recent_adds_file(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    Ok(dir.join("recent_adds.json"))
+}
+
+fn load_recent_adds(app: &tauri::AppHandle) -> Vec<String> {
+    let Ok(path) = recent_adds_file(app) else { return Vec::new() };
+    let Ok(s) = std::fs::read_to_string(&path) else { return Vec::new() };
+    serde_json::from_str::<Vec<String>>(&s).unwrap_or_default()
+}
+
+fn save_recent_adds(app: &tauri::AppHandle, entries: &[String]) {
+    let Ok(path) = recent_adds_file(app) else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(entries) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+/// Push `path` to the front of the recents list, dedupe, cap at 5.
+fn track_recent_add(app: &tauri::AppHandle, path: &str) {
+    let mut entries = load_recent_adds(app);
+    // Compare case-insensitively; the allowlist already normalizes paths so
+    // two different cases of the same file shouldn't both occupy slots.
+    let lower = path.to_lowercase();
+    entries.retain(|e| e.to_lowercase() != lower);
+    entries.insert(0, path.to_string());
+    entries.truncate(RECENT_ADDS_LIMIT);
+    save_recent_adds(app, &entries);
+}
+
+/// Remove `path` from the recents list (called on game removal so the
+/// quick-glance list doesn't dangle entries you've just deleted).
+fn untrack_recent_add(app: &tauri::AppHandle, path: &str) {
+    let mut entries = load_recent_adds(app);
+    let lower = path.to_lowercase();
+    let before = entries.len();
+    entries.retain(|e| e.to_lowercase() != lower);
+    if entries.len() != before {
+        save_recent_adds(app, &entries);
+    }
+}
+
+#[tauri::command]
+pub fn replay_recent_games(app: tauri::AppHandle) -> Vec<String> {
+    load_recent_adds(&app)
+}
+
 #[tauri::command]
 pub fn replay_list_games(state: tauri::State<'_, ReplayState>) -> Vec<String> {
     match state.allowlist.lock() {
@@ -328,6 +386,7 @@ pub fn replay_add_game(
         list.add(&path);
     }
     persist_manual(&app, &state)?;
+    track_recent_add(&app, &exe_path);
     Ok(())
 }
 
@@ -353,7 +412,9 @@ pub fn replay_add_current_game(
             list.add(&exe);
         }
         persist_manual(&app, &state)?;
-        Ok(exe.to_string_lossy().into_owned())
+        let exe_str = exe.to_string_lossy().into_owned();
+        track_recent_add(&app, &exe_str);
+        Ok(exe_str)
     }
     #[cfg(not(windows))]
     {
@@ -373,6 +434,7 @@ pub fn replay_remove_game(
         list.remove(&std::path::PathBuf::from(&exe_path))
     };
     persist_manual(&app, &state)?;
+    untrack_recent_add(&app, &exe_path);
     Ok(removed)
 }
 

@@ -26,6 +26,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "externalBin": [
       "binaries/ffmpeg",
       "binaries/ffprobe"
@@ -44,5 +45,16 @@
         "role": "Editor"
       }
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM3MkFBQkRCNUM1NTQwNDMKUldSRFFGVmMyNnNxeDJUQmdtS0JrK2FGMEc0NXBocGJKM3paZ3MyV1ZzK1ZmQ0tQSkVUNTE3SFAK",
+      "endpoints": [
+        "https://github.com/devinfavin/Clippy/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

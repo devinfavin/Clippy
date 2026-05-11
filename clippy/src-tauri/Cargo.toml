@@ -41,6 +41,8 @@ urlencoding = "2.1"
 
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [target.'cfg(windows)'.dependencies]
 # `windows-core` re-exported at the crate root so the `#[implement(...)]`
