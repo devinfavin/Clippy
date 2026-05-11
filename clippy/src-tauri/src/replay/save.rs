@@ -25,18 +25,35 @@ async fn write_pcm_raw(track: &AudioTrackSnapshot, path: &Path) -> std::io::Resu
     tokio::fs::write(path, bytes).await
 }
 
-/// Resolve the FFmpeg sidecar binary in both production (next to exe) and
-/// `tauri dev` (target/debug → ../../binaries) layouts.
+/// Resolve the FFmpeg sidecar binary across the layouts we ship from:
+///   - **Production (NSIS install)**: Tauri's bundler strips the target-triple
+///     suffix on install, so the file sits next to the exe as plain
+///     `ffmpeg.exe`. This is the path used by friend installs from a release.
+///   - **Production (raw `cargo tauri build` output)**: same dir as the exe,
+///     also as `ffmpeg.exe`.
+///   - **`tauri dev`**: exe lives in `target/debug/`, sidecars stay in
+///     `src-tauri/binaries/` with the full target-triple suffix preserved.
+///
+/// Resolution order: prod plain → prod suffixed (rare) → dev suffixed.
+/// First miss falls through; only the final option is returned without an
+/// `exists()` check so the spawn error surfaces with the path it tried.
 pub fn ffmpeg_path() -> Result<PathBuf, String> {
     let exe_dir = std::env::current_exe()
         .map_err(|e| e.to_string())?
         .parent()
         .ok_or("no exe parent dir")?
         .to_path_buf();
-    let prod = exe_dir.join("ffmpeg-x86_64-pc-windows-msvc.exe");
-    if prod.exists() {
-        return Ok(prod);
+    // Installed layout (NSIS strips the target-triple suffix).
+    let prod_plain = exe_dir.join("ffmpeg.exe");
+    if prod_plain.exists() {
+        return Ok(prod_plain);
     }
+    // Defensive: some bundlers leave the suffix intact next to the exe.
+    let prod_suffixed = exe_dir.join("ffmpeg-x86_64-pc-windows-msvc.exe");
+    if prod_suffixed.exists() {
+        return Ok(prod_suffixed);
+    }
+    // `tauri dev` — exe is at target/debug/, sidecar at src-tauri/binaries/.
     let dev = exe_dir
         .join("..")
         .join("..")

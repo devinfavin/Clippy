@@ -727,20 +727,7 @@ pub async fn replay_poc_test() -> Result<String, String> {
         .await
         .map_err(|e| format!("write h264: {e}"))?;
 
-    // FFmpeg sidecar lives next to the exe in production, but in `tauri dev`
-    // it stays in src-tauri/binaries (target/debug/clippy.exe → ../../binaries).
-    let exe_dir = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .parent()
-        .ok_or("no exe parent dir")?
-        .to_path_buf();
-    let prod = exe_dir.join("ffmpeg-x86_64-pc-windows-msvc.exe");
-    let dev = exe_dir
-        .join("..")
-        .join("..")
-        .join("binaries")
-        .join("ffmpeg-x86_64-pc-windows-msvc.exe");
-    let ffmpeg = if prod.exists() { prod } else { dev };
+    let ffmpeg = save::ffmpeg_path()?;
 
     let out = tokio::process::Command::new(&ffmpeg)
         .args([
@@ -890,18 +877,7 @@ pub async fn replay_poc_gpu_convert() -> Result<String, String> {
         .await
         .map_err(|e| format!("write h264: {e}"))?;
 
-    let exe_dir = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .parent()
-        .ok_or("no exe parent dir")?
-        .to_path_buf();
-    let prod = exe_dir.join("ffmpeg-x86_64-pc-windows-msvc.exe");
-    let dev = exe_dir
-        .join("..")
-        .join("..")
-        .join("binaries")
-        .join("ffmpeg-x86_64-pc-windows-msvc.exe");
-    let ffmpeg = if prod.exists() { prod } else { dev };
+    let ffmpeg = save::ffmpeg_path()?;
 
     let out = tokio::process::Command::new(&ffmpeg)
         .args([
@@ -1053,18 +1029,7 @@ pub async fn replay_poc_gpu_full() -> Result<String, String> {
         .await
         .map_err(|e| format!("write h264: {e}"))?;
 
-    let exe_dir = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .parent()
-        .ok_or("no exe parent dir")?
-        .to_path_buf();
-    let prod = exe_dir.join("ffmpeg-x86_64-pc-windows-msvc.exe");
-    let dev = exe_dir
-        .join("..")
-        .join("..")
-        .join("binaries")
-        .join("ffmpeg-x86_64-pc-windows-msvc.exe");
-    let ffmpeg = if prod.exists() { prod } else { dev };
+    let ffmpeg = save::ffmpeg_path()?;
 
     let out = tokio::process::Command::new(&ffmpeg)
         .args([
