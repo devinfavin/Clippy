@@ -11,6 +11,7 @@ export type StatusContent =
   | { kind: "error"; message: string; onDismiss?: () => void }
   | { kind: "phase"; label: string; progress?: number; etaSecs?: number | null }
   | { kind: "export-done"; paths: string[]; onDismiss: () => void }
+  | { kind: "replay-saved"; path: string; onOpen: () => void; onDismiss: () => void }
   | { kind: "frame-copied"; onDismiss: () => void }
   | { kind: "looping"; regionIndex: number; regionColor: string; onStop: () => void }
   | { kind: "scrubbing"; time: number };
@@ -127,6 +128,20 @@ function StatusContentView({ content }: { content: StatusContent }) {
       );
     case "export-done":
       return <ExportDoneRow paths={content.paths} onDismiss={content.onDismiss} />;
+    case "replay-saved": {
+      const fname = content.path.split(/[\\/]/).pop() ?? "replay";
+      return (
+        <Row
+          tone="success"
+          icon={SVG.upload}
+          text={`Replay saved · ${fname}`}
+          actions={[
+            { label: "Open in editor", onClick: content.onOpen, title: "Load this clip into the editor" },
+            { label: SVG.close, onClick: content.onDismiss, title: "Dismiss" },
+          ]}
+        />
+      );
+    }
   }
 }
 

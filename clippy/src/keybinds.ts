@@ -20,6 +20,7 @@ export type ActionId =
   | "loopRegion"
   | "cropRegion"
   | "saveFrame"
+  | "saveReplay"
   | "jumpRegion1"
   | "jumpRegion2"
   | "jumpRegion3"
@@ -29,6 +30,9 @@ export type ActionId =
   | "jumpRegion7"
   | "jumpRegion8"
   | "jumpRegion9";
+
+/** Actions whose hotkey fires at the OS level (works while Clippy isn't focused). */
+export const GLOBAL_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>(["saveReplay"]);
 
 export type Keybinds = Record<ActionId, Keybind>;
 
@@ -45,6 +49,7 @@ export const ACTION_LABELS: Record<ActionId, string> = {
   loopRegion: "Loop current region",
   cropRegion: "Crop current region",
   saveFrame: "Save current frame as PNG",
+  saveReplay: "Save replay buffer",
   jumpRegion1: "Jump to region 1",
   jumpRegion2: "Jump to region 2",
   jumpRegion3: "Jump to region 3",
@@ -69,6 +74,7 @@ export const DEFAULT_KEYBINDS: Keybinds = {
   loopRegion:   { key: "l" },
   cropRegion:   { key: "c", shift: true },
   saveFrame:    { key: "s", shift: true },
+  saveReplay:   { key: "F10", alt: true },
   jumpRegion1:  { key: "1" },
   jumpRegion2:  { key: "2" },
   jumpRegion3:  { key: "3" },
@@ -81,6 +87,29 @@ export const DEFAULT_KEYBINDS: Keybinds = {
 };
 
 export const KEYBINDS_STORAGE_KEY = "clippy.keybinds.v1";
+
+/**
+ * Convert a Keybind into the string format Tauri's `Shortcut::from_str` accepts
+ * (e.g. "Alt+F10", "Ctrl+Shift+S"). Used for global hotkeys like the save-replay
+ * binding, which must be re-registered with the OS when the user rebinds.
+ */
+export function keybindToShortcutString(b: Keybind): string | null {
+  const parts: string[] = [];
+  if (b.ctrl) parts.push("Ctrl");
+  if (b.shift) parts.push("Shift");
+  if (b.alt) parts.push("Alt");
+  let k = b.key;
+  if (k === " ") k = "Space";
+  else if (k === "ArrowLeft") k = "Left";
+  else if (k === "ArrowRight") k = "Right";
+  else if (k === "ArrowUp") k = "Up";
+  else if (k === "ArrowDown") k = "Down";
+  else if (k.length === 1) k = k.toUpperCase();
+  // Tauri rejects modifier-only or empty keys
+  if (!k || k === "Control" || k === "Shift" || k === "Alt" || k === "Meta") return null;
+  parts.push(k);
+  return parts.join("+");
+}
 
 export function formatKeybind(b: Keybind): string {
   const parts: string[] = [];

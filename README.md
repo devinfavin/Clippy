@@ -85,6 +85,32 @@ Open the export panel with **Ctrl+E**.
 
 ---
 
+### Replay buffer (Windows-only)
+
+Continuously captures the last few minutes of focused gameplay in the background, ShadowPlay-style. Press your save hotkey at any moment and Clippy flushes the buffer to an MP4 that auto-opens in the editor.
+
+**Default hotkey: `Alt+F10`** (global — works while the game is focused). Rebindable from the keybind editor.
+
+Open **Settings** (gear icon in the keybinds modal) → **Replay buffer**. From there you can:
+
+- **Start / stop the buffer** and toggle "Start the replay buffer when Clippy launches"
+- **Capture mode** — Per-window (only allowlisted games, switches with focus, parallel buffers per game) or Full screen (one specific monitor, captures everything including alt-tabs)
+- **Buffer duration** — 1 to 10 minutes
+- **Quality & performance** — FPS (30/60/120/144/240), resolution (Source / Half / Custom), bitrate presets (Low/Medium/High/Ultra), encoder pick (Auto/NVENC/AMF/QSV/Software), keyframe interval, and a cap on simultaneously-captured games (LRU eviction past the cap)
+- **Audio sources** — checklist of WASAPI render endpoints to capture as separate tracks in the MP4. Tick "Try to capture only the focused game's audio" on Windows 11 22H2+ to use Process Loopback (falls back to system audio elsewhere). Inline rename per device so saved clips have meaningful track names
+- **System integration** — "Start Clippy when Windows starts" and "Close to system tray (keep Clippy running in the background)"
+- **Resource calculator** — live estimate of file size, RAM, and VRAM per active game, plus a green/yellow/red capability hint for the chosen encoder × resolution × FPS combination
+
+**Game allowlist (per-window mode)**
+
+The buffer only captures windows whose process is in your allowlist. Steam games auto-detect on launch. For non-Steam titles (Battle.net, Riot, Epic, itch.io, DRM-free, etc.):
+
+- Click **Rescan launchers** to refresh
+- Use **Add current foreground (3s delay)** — countdown gives you time to alt-tab to your game, then Clippy snapshots the foreground process
+- Use **Add by .exe path…** to pick the executable directly
+
+---
+
 ### Keyboard shortcuts — rebindable
 
 Every action is bound to a key. Click any shortcut label in the footer to open the keybind editor and remap it to whatever you prefer.
@@ -106,6 +132,7 @@ Default bindings:
 | Copy frame / save PNG | Shift+S |
 | Export | Ctrl+E |
 | Open file | Ctrl+O |
+| Save replay buffer (global) | Alt+F10 |
 | Jump to region 1–9 | 1–9 |
 
 ---
@@ -147,10 +174,32 @@ Hit the **?** button in the top bar to pull up a curated list of things that are
 ## Technical notes
 
 - **No cloud. No telemetry.** Everything runs locally. FFmpeg/FFprobe are bundled as sidecars and never touch the network.
-- **Proxy cache** lives at `%APPDATA%\com.devin.clippy\proxies\`. Files older than 30 days are pruned automatically. You can clear it manually via the link in the app footer.
+- **Proxy cache** lives at `%APPDATA%\Clippy\proxies\`. Files older than 30 days are pruned automatically. You can clear it manually via the link in the app footer.
 - **Export is two-stage:** each region is stream-copied (or re-encoded only when a crop or non-unity speed is applied) into a clean intermediate file, then the intermediates are concatenated. This keeps export fast and lossless when possible.
 - **Audio preview uses the WebAudio API.** Waveform rendering and live mix preview run inside the WebView — no extra process.
 - **Hardware encoder waterfall:** the backend tries NVENC, then AMF, then QSV, then falls back to libx264. The first one that initializes wins.
+
+---
+
+## Troubleshooting
+
+**Replay buffer not capturing your game?**
+
+The most useful thing to attach to a bug report is the in-app diagnostics. Open the keybind editor → click **Copy diagnostics**. It contains the GPU adapter name + VRAM, detected hardware encoders, audio devices, monitor list, recent event log, and a 30-second performance rollup per active worker. No file paths, no window titles for non-game windows (toggleable under **Verbose diagnostics** if you're chasing a routing bug).
+
+**Hardware smoke test**
+
+The installer ships a standalone `clippy-self-test.exe` next to `clippy.exe` that exercises every subsystem in isolation and prints structured PASS/FAIL output (JSON by default, `--pretty` for human-readable). Use it to confirm a clean install or before opening a ticket:
+
+```sh
+"%PROGRAMFILES%\Clippy\clippy-self-test.exe" --pretty
+```
+
+It checks: D3D11 device, sysinfo probe, monitor enumeration, WGC monitor + window capture, Media Foundation startup, WASAPI render endpoints, game allowlist scan, hardware encoder enumeration, and Process Loopback (Win11 22H2+). Process Loopback may report FAIL in the standalone harness even when it works in the running app — see the message printed for context.
+
+**Persisted log**
+
+A graceful exit appends the in-memory diag log to `%APPDATA%\Clippy\diagnostics.log` with a session-end header — handy when a crash bypasses the in-app copy button.
 
 ---
 

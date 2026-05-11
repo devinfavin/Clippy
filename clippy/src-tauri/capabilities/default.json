@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Main window capability set. Audited 2026-05-11 (Phase 10): frontend uses invoke (@tauri-apps/api/core) and listen (@tauri-apps/api/event); plugin permissions cover dialog (file picker), opener (reveal-in-folder), autostart (start-with-Windows toggle). core:default is retained because narrowing it risks breaking invoke for built-in Tauri commands; the only built-in surface the frontend actually touches is event-listen, which is covered. All custom commands flow through the invoke_handler in lib.rs and are not gated by this list.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "opener:default",
-    "dialog:default"
+    "dialog:default",
+    "autostart:default"
   ]
 }

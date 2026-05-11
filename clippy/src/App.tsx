@@ -34,6 +34,8 @@ import {
   captureKeybind,
   DEFAULT_KEYBINDS,
   formatKeybind,
+  GLOBAL_ACTIONS,
+  keybindToShortcutString,
   loadKeybinds,
   matchesBinding,
   saveKeybinds,
@@ -51,6 +53,13 @@ import { StatusStrip, type StatusContent } from "./StatusStrip";
 import { ColorPicker } from "./ColorPicker";
 import { TipsModal } from "./TipsModal";
 import { OnboardingHint } from "./OnboardingHint";
+import { ReplayStatusPill } from "./ReplayStatusPill";
+import {
+  ReplaySettings,
+  getSaveBehavior,
+  getAutoStart,
+  getReplayStartArgs,
+} from "./ReplaySettings";
 import "./App.css";
 
 /** "#rrggbb" + alpha → "rgba(r, g, b, a)". Used for waveform fill colors so we
@@ -87,8 +96,19 @@ export default function App() {
   // Keybinds
   const [keybinds, setKeybinds] = useState<Keybinds>(() => loadKeybinds());
   const [keybindsOpen, setKeybindsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTabId>("replay");
   const [listeningAction, setListeningAction] = useState<ActionId | null>(null);
   useEffect(() => { saveKeybinds(keybinds); }, [keybinds]);
+
+  // Push the save-replay binding to the OS whenever it changes. Backend
+  // re-registers the global shortcut so it works while a game is focused.
+  useEffect(() => {
+    const s = keybindToShortcutString(keybinds.saveReplay);
+    if (!s) return;
+    invoke("replay_set_save_hotkey", { shortcut: s }).catch((e) =>
+      console.error("[clippy] replay_set_save_hotkey failed:", e)
+    );
+  }, [keybinds.saveReplay]);
 
   // Tips modal — opened by the "?" button in the topbar.
   const [tipsOpen, setTipsOpen] = useState(false);
@@ -110,6 +130,7 @@ export default function App() {
     useState<GifResolution>(GIF_DEFAULT_RESOLUTION);
   // Post-export toast: list of files just produced.
   const [lastExport, setLastExport] = useState<{ paths: string[] } | null>(null);
+  const [replaySavedToast, setReplaySavedToast] = useState<string | null>(null);
 
   // Waveforms: one Float32Array of peak amplitudes per audio track, keyed by
   // track index. Single-track sources end up with a single entry at key 0.
@@ -336,6 +357,46 @@ export default function App() {
     });
     return () => {
       unlisten?.();
+    };
+  }, [loadFile]);
+
+  // Auto-start the replay buffer at app launch if the user opted in. Runs
+  // once after the component mounts; failures are logged but never block
+  // the rest of startup.
+  useEffect(() => {
+    if (!getAutoStart()) return;
+    const t = setTimeout(() => {
+      invoke("replay_start", getReplayStartArgs()).catch((e) => {
+        console.warn("[clippy] replay auto-start failed:", e);
+      });
+    }, 400);
+    return () => clearTimeout(t);
+  }, []);
+
+  // Replay-buffer saves: backend writes an MP4 and emits its path as a
+  // string payload. The user's chosen save behavior (settings → Replay
+  // buffer) decides whether to open it immediately or just toast a
+  // "click to open" notice.
+  useEffect(() => {
+    let unlistenSaved: UnlistenFn | null = null;
+    let unlistenError: UnlistenFn | null = null;
+    listen<string>("replay://saved", (event) => {
+      const path = event.payload;
+      if (!path || typeof path !== "string") return;
+      if (getSaveBehavior() === "auto-open") {
+        loadFile(path).catch((e) =>
+          console.error("[clippy] replay auto-open failed:", e)
+        );
+      } else {
+        setReplaySavedToast(path);
+      }
+    }).then((u) => (unlistenSaved = u));
+    listen<string>("replay://save-error", (event) => {
+      console.error("[clippy] replay save error:", event.payload);
+    }).then((u) => (unlistenError = u));
+    return () => {
+      unlistenSaved?.();
+      unlistenError?.();
     };
   }, [loadFile]);
 
@@ -1091,6 +1152,8 @@ export default function App() {
       };
 
       for (const action of Object.keys(keybinds) as ActionId[]) {
+        // Global actions are routed by the OS hotkey, not the in-app dispatch.
+        if (GLOBAL_ACTIONS.has(action)) continue;
         if (matchesBinding(e, keybinds[action])) {
           if (action !== "openFile" && phase.kind !== "ready" && phase.kind !== "exporting") return;
           e.preventDefault();
@@ -1414,6 +1477,18 @@ export default function App() {
         onDismiss: () => setLastExport(null),
       };
     }
+    if (replaySavedToast) {
+      return {
+        kind: "replay-saved",
+        path: replaySavedToast,
+        onOpen: () => {
+          const p = replaySavedToast;
+          setReplaySavedToast(null);
+          loadFile(p).catch((e) => console.error("[clippy] replay open failed:", e));
+        },
+        onDismiss: () => setReplaySavedToast(null),
+      };
+    }
     if (frameToast) {
       return { kind: "frame-copied", onDismiss: clearFrameMode };
     }
@@ -1433,6 +1508,8 @@ export default function App() {
     phase,
     srcPath,
     lastExport,
+    replaySavedToast,
+    loadFile,
     frameToast,
     isScrubbing,
     currentTime,
@@ -1475,6 +1552,10 @@ export default function App() {
             <span className="dim">No file loaded</span>
           )}
         </div>
+        {/* Replay buffer status sits in the topbar as the "app state" indicator
+            (analogous to Discord's avatar/status cluster, Steam's online dot).
+            Only renders when the buffer is running — hidden when Idle. */}
+        <ReplayStatusPill onClick={() => setKeybindsOpen(true)} />
         <button
           className="help-button"
           onClick={() => setTipsOpen(true)}
@@ -1570,15 +1651,38 @@ export default function App() {
         </div>
 
         <div className="mark-buttons">
-          <button onClick={setIn} title={formatKeybind(keybinds.setIn)}>Set In</button>
-          <button onClick={setOut} title={formatKeybind(keybinds.setOut)}>Set Out</button>
-          <button onClick={clearAllRegions} title="Remove all regions and the current draft">
+          {/* Primary marks — subtly accented so the eye lands here first.
+              Set In/Out are by far the most-used buttons in this row. */}
+          <button className="mark-primary" onClick={setIn} title={formatKeybind(keybinds.setIn)}>
+            Set In
+          </button>
+          <button className="mark-primary" onClick={setOut} title={formatKeybind(keybinds.setOut)}>
+            Set Out
+          </button>
+
+          {/* Draft chip — only rendered while there's actually a draft in
+              progress. Empty `DRAFT -- → --` was visual noise; once the user
+              marks an in or out, the chip appears with the value visible. */}
+          {(draftIn != null || draftOut != null) && (
+            <span
+              className="draft-chip is-active"
+              title="In-progress region; commits when in < out"
+            >
+              <span className="draft-chip-label">draft</span>
+              <span className="draft-chip-value mono">
+                {draftIn != null ? fmtTime(draftIn) : "--"} → {draftOut != null ? fmtTime(draftOut) : "--"}
+              </span>
+            </span>
+          )}
+
+          {/* Secondary marks — ghost, smaller hit-feel; utility actions. */}
+          <button className="mark-secondary" onClick={clearAllRegions} title="Remove all regions and the current draft">
             Clear all
           </button>
           <button
             onClick={saveCurrentFrame}
             disabled={!srcPath || phase.kind !== "ready"}
-            className={frameAction === "save" ? "btn-armed" : ""}
+            className={`mark-secondary${frameAction === "save" ? " btn-armed" : ""}`}
             title={
               frameAction === "save"
                 ? "Frame copied to clipboard — click again to save as PNG"
@@ -1587,9 +1691,6 @@ export default function App() {
           >
             {frameAction === "save" ? "Save as PNG…" : "Copy frame"}
           </button>
-          <span className="dim mono draft-readout">
-            draft: {draftIn != null ? fmtTime(draftIn) : "--"} → {draftOut != null ? fmtTime(draftOut) : "--"}
-          </span>
         </div>
       </section>
 
@@ -1834,42 +1935,63 @@ export default function App() {
 
       {keybindsOpen && (
         <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setKeybindsOpen(false); }}>
-          <div className="modal">
+          <div className="modal modal-tabbed">
             <header className="modal-header">
-              <h2>Keyboard shortcuts</h2>
-              <button className="modal-close" onClick={() => setKeybindsOpen(false)}>×</button>
+              <h2>Settings</h2>
+              <button className="modal-close" onClick={() => setKeybindsOpen(false)} aria-label="Close">×</button>
             </header>
-            <div className="kb-list">
-              {(Object.keys(ACTION_LABELS) as ActionId[]).map((action) => {
-                const isListening = listeningAction === action;
-                const conflicts = (Object.keys(keybinds) as ActionId[])
-                  .filter(
-                    (other) =>
-                      other !== action &&
-                      formatKeybind(keybinds[other]) === formatKeybind(keybinds[action])
-                  );
-                return (
-                  <div key={action} className={`kb-row${conflicts.length ? " has-conflict" : ""}`}>
-                    <span className="kb-label">{ACTION_LABELS[action]}</span>
-                    <button
-                      className={`kb-binding${isListening ? " listening" : ""}`}
-                      onClick={() => setListeningAction(action)}
-                    >
-                      {isListening ? "Press a key…  (Esc to cancel)" : formatKeybind(keybinds[action])}
-                    </button>
-                    {conflicts.length > 0 && (
-                      <span className="kb-conflict" title={`Conflicts with: ${conflicts.map((c) => ACTION_LABELS[c]).join(", ")}`}>
-                        conflict
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
+
+            <div className="modal-tab-shell">
+              <nav className="modal-tab-rail" aria-label="Settings sections">
+                {SETTINGS_TABS.map((t) => (
+                  <button
+                    key={t.id}
+                    className={`modal-tab-btn${settingsTab === t.id ? " is-active" : ""}`}
+                    onClick={() => setSettingsTab(t.id)}
+                    aria-current={settingsTab === t.id ? "page" : undefined}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </nav>
+
+              <div className="modal-tab-content">
+                {settingsTab === "replay" && <ReplaySettings />}
+                {settingsTab === "keyboard" && (
+                  <KeyboardSettingsTab
+                    keybinds={keybinds}
+                    listeningAction={listeningAction}
+                    setListeningAction={setListeningAction}
+                  />
+                )}
+                {settingsTab === "storage" && <StorageSettingsTab />}
+                {settingsTab === "about" && <AboutTab />}
+              </div>
             </div>
-            <CacheControls />
-            <DiagnosticsButton />
+
             <footer className="modal-footer">
-              <button onClick={() => setKeybinds(DEFAULT_KEYBINDS)}>Reset to defaults</button>
+              {settingsTab === "keyboard" ? (
+                <button
+                  onClick={() => {
+                    setKeybinds(DEFAULT_KEYBINDS);
+                    // The keybinds-driven useEffect re-registers the global
+                    // hotkey on saveReplay reference change, but if the user
+                    // never customized saveReplay the reference doesn't change
+                    // and the OS would keep whatever it has. Push it explicitly
+                    // so a Reset always restores the default Alt+F10 binding.
+                    const s = keybindToShortcutString(DEFAULT_KEYBINDS.saveReplay);
+                    if (s) {
+                      invoke("replay_set_save_hotkey", { shortcut: s }).catch((e) =>
+                        console.error("[clippy] replay_set_save_hotkey failed:", e)
+                      );
+                    }
+                  }}
+                >
+                  Reset to defaults
+                </button>
+              ) : (
+                <span /> /* spacer — keeps Done right-aligned */
+              )}
               <button className="primary" onClick={() => setKeybindsOpen(false)}>Done</button>
             </footer>
           </div>
@@ -1928,46 +2050,353 @@ function DiagnosticsButton() {
   );
 }
 
-/** Tiny cache-cleanup row inside the keybinds modal. Auto-prune for files
- *  >30 days untouched runs at app startup; this exposes the manual button
- *  plus the current size readout. */
-function CacheControls() {
-  const [size, setSize] = useState<number | null>(null);
-  const [busy, setBusy] = useState(false);
+// ---------- Settings modal tab definitions + per-tab content ----------
+
+type SettingsTabId = "replay" | "keyboard" | "storage" | "about";
+
+const SETTINGS_TABS: readonly { id: SettingsTabId; label: string }[] = [
+  { id: "replay", label: "Replay buffer" },
+  { id: "keyboard", label: "Keyboard" },
+  { id: "storage", label: "Storage" },
+  { id: "about", label: "About" },
+] as const;
+
+/** Keyboard-shortcuts tab — extracted from the old inline modal body. The
+ *  rebind interaction is unchanged; layout moved into the tab container. */
+function KeyboardSettingsTab(props: {
+  keybinds: Keybinds;
+  listeningAction: ActionId | null;
+  setListeningAction: (a: ActionId | null) => void;
+}) {
+  const { keybinds, listeningAction, setListeningAction } = props;
+  // Jump-to-region 1-9 used to take 9 vertical rows. They share a label
+  // template and are typically left at defaults, so we collapse them into
+  // a single row of 9 inline buttons. Each remains individually rebindable
+  // by clicking its digit.
+  const jumpRegionActions: ActionId[] = [
+    "jumpRegion1", "jumpRegion2", "jumpRegion3",
+    "jumpRegion4", "jumpRegion5", "jumpRegion6",
+    "jumpRegion7", "jumpRegion8", "jumpRegion9",
+  ];
+  const isJumpRegion = (a: ActionId) =>
+    (jumpRegionActions as string[]).includes(a as string);
+
+  return (
+    <section className="settings-section">
+      <header className="settings-tab-header">
+        <h3 className="settings-tab-title">Keyboard shortcuts</h3>
+        <p className="settings-tab-blurb">
+          Click any binding to record a new key combo. Globals (tagged below) fire
+          even when Clippy is unfocused — they don't conflict with in-app bindings.
+        </p>
+      </header>
+      <div className="kb-list">
+        {(Object.keys(ACTION_LABELS) as ActionId[])
+          .filter((a) => !isJumpRegion(a))
+          .map((action) => {
+            const isListening = listeningAction === action;
+            const isGlobal = GLOBAL_ACTIONS.has(action);
+            // Global hotkeys live in OS-key-space and don't conflict with
+            // in-app bindings even if they share a key combo.
+            const conflicts = isGlobal
+              ? []
+              : (Object.keys(keybinds) as ActionId[]).filter(
+                  (other) =>
+                    other !== action &&
+                    !GLOBAL_ACTIONS.has(other) &&
+                    formatKeybind(keybinds[other]) === formatKeybind(keybinds[action])
+                );
+            return (
+              <div key={action} className={`kb-row${conflicts.length ? " has-conflict" : ""}`}>
+                <span className="kb-label">
+                  {ACTION_LABELS[action]}
+                  {isGlobal && (
+                    <span className="kb-tag-global" title="Fires globally — works while Clippy is not focused">
+                      Global
+                    </span>
+                  )}
+                </span>
+                <button
+                  className={`kb-binding${isListening ? " listening" : ""}`}
+                  onClick={() => setListeningAction(action)}
+                >
+                  {isListening ? "Press a key…  (Esc to cancel)" : formatKeybind(keybinds[action])}
+                </button>
+                {conflicts.length > 0 && (
+                  <span className="kb-conflict" title={`Conflicts with: ${conflicts.map((c) => ACTION_LABELS[c]).join(", ")}`}>
+                    conflict
+                  </span>
+                )}
+              </div>
+            );
+          })}
+
+        {/* Region jumps — compact inline row. Each digit is its own binding;
+            click to rebind that one specifically. */}
+        <div className="kb-row">
+          <span className="kb-label">Jump to region 1–9</span>
+          <span className="kb-jump-region-row">
+            {jumpRegionActions.map((action) => {
+              const isListening = listeningAction === action;
+              return (
+                <button
+                  key={action}
+                  className={`kb-binding kb-jump-region-btn${isListening ? " listening" : ""}`}
+                  onClick={() => setListeningAction(action)}
+                  title={`${ACTION_LABELS[action]} — click to rebind`}
+                >
+                  {isListening ? "…" : formatKeybind(keybinds[action])}
+                </button>
+              );
+            })}
+          </span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+type StorageSummary = {
+  app_data_dir: string;
+  app_data_total_bytes: number;
+  proxies_dir: string;
+  proxies_bytes: number;
+  diagnostics_log_path: string;
+  diagnostics_log_bytes: number;
+  other_bytes: number;
+};
+
+function fmtBytes(b: number): string {
+  if (b >= 1_073_741_824) return `${(b / 1_073_741_824).toFixed(2)} GB`;
+  if (b >= 1_048_576) return `${(b / 1_048_576).toFixed(1)} MB`;
+  if (b >= 1024) return `${(b / 1024).toFixed(0)} KB`;
+  if (b === 0) return "—";
+  return `${b} B`;
+}
+
+/** Storage tab — per-component breakdown + open-data-folder + clear actions. */
+function StorageSettingsTab() {
+  const [summary, setSummary] = useState<StorageSummary | null>(null);
+  const [busy, setBusy] = useState<"cache" | "log" | null>(null);
+
   const refresh = useCallback(() => {
-    invoke<number>("cache_size")
-      .then((s) => setSize(s))
-      .catch(() => setSize(null));
+    invoke<StorageSummary>("storage_summary")
+      .then(setSummary)
+      .catch(() => setSummary(null));
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
-  const fmt = (b: number) =>
-    b >= 1_073_741_824
-      ? `${(b / 1_073_741_824).toFixed(2)} GB`
-      : b >= 1_048_576
-      ? `${(b / 1_048_576).toFixed(1)} MB`
-      : b >= 1024
-      ? `${(b / 1024).toFixed(0)} KB`
-      : `${b} B`;
+
+  const clearCache = async () => {
+    setBusy("cache");
+    try {
+      await invoke("clear_cache");
+    } catch {}
+    setBusy(null);
+    refresh();
+  };
+  const clearLog = async () => {
+    setBusy("log");
+    try {
+      await invoke("clear_diagnostics_log");
+    } catch {}
+    setBusy(null);
+    refresh();
+  };
+  const openDataDir = async () => {
+    if (!summary) return;
+    try {
+      await invoke("reveal_in_folder", { path: summary.app_data_dir });
+    } catch {}
+  };
+
   return (
-    <div className="cache-row">
-      <span className="cache-label">Cache</span>
-      <span className="cache-size mono">{size == null ? "—" : fmt(size)}</span>
-      <button
-        className="cache-clear"
-        disabled={busy || size === 0}
-        onClick={async () => {
-          setBusy(true);
-          try {
-            await invoke("clear_cache");
-          } catch {}
-          setBusy(false);
-          refresh();
-        }}
-        title="Delete all cached proxies, waveforms, and project files. They'll be regenerated on next open."
-      >
-        {busy ? "Clearing…" : "Clear cache"}
-      </button>
-    </div>
+    <section className="settings-section">
+      <header className="settings-tab-header">
+        <h3 className="settings-tab-title">Storage</h3>
+        <p className="settings-tab-blurb">
+          Clippy keeps everything local under{" "}
+          <code className="mono">%APPDATA%\Clippy\</code>. Files in the
+          proxy cache untouched for 30 days are auto-pruned; clear manually below
+          if you need the space back sooner.
+        </p>
+      </header>
+
+      <div className="settings-storage-grid">
+        <div className="settings-storage-row">
+          <div className="settings-storage-info">
+            <div className="settings-storage-label">Proxy cache</div>
+            <div className="settings-storage-sub">Decoded MP4 proxies + waveforms used for fast scrubbing</div>
+          </div>
+          <div className="settings-storage-value mono">
+            {summary ? fmtBytes(summary.proxies_bytes) : "—"}
+          </div>
+          <button
+            className="settings-secondary-btn"
+            onClick={clearCache}
+            disabled={busy != null || !summary || summary.proxies_bytes === 0}
+          >
+            {busy === "cache" ? "Clearing…" : "Clear"}
+          </button>
+        </div>
+
+        <div className="settings-storage-row">
+          <div className="settings-storage-info">
+            <div className="settings-storage-label">Diagnostics log</div>
+            <div className="settings-storage-sub">
+              <span className="mono">diagnostics.log</span> — appended on every graceful exit
+            </div>
+          </div>
+          <div className="settings-storage-value mono">
+            {summary ? fmtBytes(summary.diagnostics_log_bytes) : "—"}
+          </div>
+          <button
+            className="settings-secondary-btn"
+            onClick={clearLog}
+            disabled={busy != null || !summary || summary.diagnostics_log_bytes === 0}
+          >
+            {busy === "log" ? "Clearing…" : "Clear"}
+          </button>
+        </div>
+
+        <div className="settings-storage-row">
+          <div className="settings-storage-info">
+            <div className="settings-storage-label">Other</div>
+            <div className="settings-storage-sub">Project state JSON, allowlist, save-folder pref</div>
+          </div>
+          <div className="settings-storage-value mono">
+            {summary ? fmtBytes(summary.other_bytes) : "—"}
+          </div>
+          <span />
+        </div>
+
+        <div className="settings-storage-row settings-storage-row-total">
+          <div className="settings-storage-info">
+            <div className="settings-storage-label">Total app data</div>
+            <div className="settings-storage-sub mono">
+              {summary?.app_data_dir ?? ""}
+            </div>
+          </div>
+          <div className="settings-storage-value mono">
+            {summary ? fmtBytes(summary.app_data_total_bytes) : "—"}
+          </div>
+          <button
+            className="settings-secondary-btn"
+            onClick={openDataDir}
+            disabled={!summary}
+            title="Open this folder in File Explorer"
+          >
+            Open
+          </button>
+        </div>
+      </div>
+    </section>
   );
+}
+
+type AboutSystemInfo = {
+  gpu_name: string;
+  gpu_vram_mb: number;
+  ram_total_mb: number;
+  hw_encoders: string[];
+};
+
+/** About tab — version, system snapshot, diagnostics, report-a-bug. */
+function AboutTab() {
+  const [sys, setSys] = useState<AboutSystemInfo | null>(null);
+  useEffect(() => {
+    invoke<AboutSystemInfo>("replay_get_system_info")
+      .then(setSys)
+      .catch(() => {});
+  }, []);
+
+  const openIssues = async () => {
+    try {
+      // Tauri's opener plugin — opens the URL in the user's default browser
+      // rather than inside the WebView.
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      await openUrl("https://github.com/anthropics/clippy/issues/new");
+    } catch (e) {
+      console.warn("[clippy] failed to open issues URL:", e);
+    }
+  };
+
+  return (
+    <section className="settings-section">
+      <header className="settings-tab-header">
+        <h3 className="settings-tab-title">About Clippy</h3>
+        <p className="settings-tab-blurb">
+          Local-only video clip editor for Windows. No telemetry, no cloud.
+        </p>
+      </header>
+
+      <div className="settings-about-grid">
+        <div className="settings-about-row">
+          <span className="settings-about-key">Version</span>
+          <span className="settings-about-value mono">0.1.0</span>
+        </div>
+        <div className="settings-about-row">
+          <span className="settings-about-key">Build</span>
+          <span className="settings-about-value mono">
+            {import.meta.env.DEV ? "dev" : "release"}
+          </span>
+        </div>
+        <div className="settings-about-row">
+          <span className="settings-about-key">GPU</span>
+          <span className="settings-about-value mono" title={sys?.gpu_name}>
+            {sys
+              ? sys.gpu_vram_mb > 0
+                ? `${sys.gpu_name} · ${(sys.gpu_vram_mb / 1024).toFixed(1)} GB`
+                : sys.gpu_name || "—"
+              : "probing…"}
+          </span>
+        </div>
+        <div className="settings-about-row">
+          <span className="settings-about-key">System RAM</span>
+          <span className="settings-about-value mono">
+            {sys && sys.ram_total_mb > 0
+              ? `${(sys.ram_total_mb / 1024).toFixed(0)} GB`
+              : "—"}
+          </span>
+        </div>
+        <div className="settings-about-row">
+          <span className="settings-about-key">HW encoders</span>
+          <span className="settings-about-value mono">
+            {sys
+              ? sys.hw_encoders.length > 0
+                ? sys.hw_encoders.map(shortenEncoderAbout).join(", ")
+                : "none detected"
+              : "probing…"}
+          </span>
+        </div>
+      </div>
+
+      <div className="settings-about-actions">
+        <DiagnosticsButton />
+        <button
+          className="settings-secondary-btn"
+          onClick={openIssues}
+          title="Open the GitHub issues page in your browser"
+        >
+          Report an issue…
+        </button>
+      </div>
+
+      <p className="settings-tab-help">
+        Diagnostics include detected GPU, hardware encoders, audio devices, monitor
+        list, and the most recent event log. Non-game window titles are redacted
+        unless you turn on Verbose diagnostics under <strong>Replay buffer</strong>.
+      </p>
+    </section>
+  );
+}
+
+/** Same classification as ReplaySettings's shortenEncoder. Duplicated locally
+ *  to keep About a self-contained tab without crossing module boundaries. */
+function shortenEncoderAbout(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.includes("nvidia")) return "NVENC";
+  if (lower.includes("amd") || lower.includes("amf")) return "AMF";
+  if (lower.includes("intel") || lower.includes("quick sync")) return "QSV";
+  return name.length > 32 ? name.slice(0, 29) + "…" : name;
 }
 

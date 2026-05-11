@@ -4,16 +4,26 @@ version = "0.1.0"
 description = "Video clip editor"
 authors = ["devin"]
 edition = "2021"
+# Explicit default-run so Tauri knows which bin to bundle when the package
+# has more than one (we added clippy-self-test in src/bin/self_test.rs).
+default-run = "clippy"
 
 [lib]
 name = "clippy_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Hardware/system smoke test. Built as a separate binary alongside the
+# Tauri app so users can run it standalone before opening a support ticket
+# (Tier 2 of the testing plan). Source: src/bin/self_test.rs.
+[[bin]]
+name = "clippy-self-test"
+path = "src/bin/self_test.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
@@ -28,6 +38,42 @@ tokio-util = { version = "0.7", features = ["io"] }
 axum = "0.7"
 mime_guess = "2.0"
 urlencoding = "2.1"
+
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+
+[target.'cfg(windows)'.dependencies]
+# `windows-core` re-exported at the crate root so the `#[implement(...)]`
+# macro from windows-rs can resolve `::windows_core::*` paths in its expansion.
+windows-core = "0.58"
+windows = { version = "0.58", features = [
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Devices_Properties",
+    "Win32_System_Registry",
+    "Win32_System_Console",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 opt-level = 3

@@ -113,14 +113,14 @@ export function TipsModal(props: { onClose: () => void }) {
               work is back.
             </Tip>
             <Tip>
-              Cache lives in <code className="mono">%APPDATA%\com.devin.clippy\proxies\</code>
+              Cache lives in <code className="mono">%APPDATA%\Clippy\proxies\</code>
               {" "}and auto-prunes after 30 days. Clear it manually from the
               keybind editor's footer if you want.
             </Tip>
           </Section>
         </div>
         <footer className="modal-footer tips-footer">
-          <span className="dim">Want the full keybind list? Open the keybind editor.</span>
+          <span className="dim">Open the keybind editor for the full list and rebindings.</span>
           <button className="primary" onClick={props.onClose}>
             Got it
           </button>

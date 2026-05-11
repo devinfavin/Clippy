@@ -1,3 +1,5 @@
+pub mod replay;
+
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -54,15 +56,201 @@ impl DiagLog {
     }
 }
 
+/// (Re)register the global save-replay hotkey.
+///
+/// `shortcut_str` is the Tauri `Shortcut::from_str` format ("Alt+F10",
+/// "Ctrl+Shift+S", etc.). Any previously-registered global shortcut is removed
+/// first so this is safe to call repeatedly when the user rebinds.
+fn register_save_hotkey(app: &AppHandle, shortcut_str: &str) -> Result<(), String> {
+    use std::str::FromStr;
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+
+    let parsed = Shortcut::from_str(shortcut_str)
+        .map_err(|e| format!("parse '{shortcut_str}': {e}"))?;
+
+    // We only ever have the one global shortcut for now — clear the slate.
+    let _ = app.global_shortcut().unregister_all();
+
+    let app_handle = app.clone();
+    app.global_shortcut()
+        .on_shortcut(parsed, move |_app, _sc, event| {
+            if event.state() != ShortcutState::Pressed {
+                return;
+            }
+            let handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                match replay::save_active(&handle).await {
+                    Ok(result) => {
+                        diag(
+                            &handle,
+                            format!(
+                                "replay save OK — window=\"{}\" → {}",
+                                result.window_title, result.path
+                            ),
+                        );
+                        let _ = handle.emit("replay://saved", &result.path);
+                    }
+                    Err(e) => {
+                        diag(&handle, format!("replay save FAILED: {e}"));
+                        let _ = handle.emit("replay://save-error", e);
+                    }
+                }
+            });
+        })
+        .map_err(|e| format!("register: {e}"))?;
+    Ok(())
+}
+
+/// Tauri command: rebind the save-replay global hotkey.
+#[tauri::command]
+fn replay_set_save_hotkey(app: AppHandle, shortcut: String) -> Result<(), String> {
+    register_save_hotkey(&app, &shortcut)?;
+    diag(&app, format!("[replay] save hotkey rebound to {shortcut}"));
+    Ok(())
+}
+
+/// Whether closing the main window should hide to the system tray instead
+/// of exiting. Frontend keeps a localStorage mirror; this is the canonical
+/// runtime copy the window-close handler reads.
+struct HideOnClose(std::sync::atomic::AtomicBool);
+
+#[tauri::command]
+fn set_hide_on_close(state: tauri::State<'_, HideOnClose>, enabled: bool) {
+    state.0.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Where saved replays land. The coordinator's `finish_save` reads this on
+/// every save. Default is `Videos/Clippy Replays` (computed at startup);
+/// user can change it via `replay_set_save_dir` and the choice is persisted
+/// to `<appdata>/save_dir.txt`.
+pub struct ReplaySaveDir(pub Mutex<PathBuf>);
+
+/// Re-export of `epoch_to_ymd` for replay::mod.rs to build filesystem-safe
+/// timestamp slugs without duplicating the civil-from-days logic.
+pub(crate) fn epoch_to_ymd_for_filename(secs: u64) -> (i32, u32, u32) {
+    epoch_to_ymd(secs)
+}
+
+/// Opt-in switch for "verbose" diag logging. When OFF (default), the
+/// coordinator redacts non-game window titles so a copy-pasted diag report
+/// never contains a sensitive browser tab / document name. Enable only when
+/// actively reproducing a window-routing bug.
+pub(crate) struct DiagVerbose(pub std::sync::atomic::AtomicBool);
+
+impl DiagVerbose {
+    pub fn enabled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[tauri::command]
+fn set_diag_verbose(state: tauri::State<'_, DiagVerbose>, enabled: bool) {
+    state.0.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Convert a Unix epoch (seconds) to a calendar (year, month, day) tuple in
+/// UTC. Pure-Rust adaptation of Howard Hinnant's `civil_from_days`. Avoids
+/// dragging in `chrono`/`time` for the few timestamps we render.
+fn epoch_to_ymd(secs: u64) -> (i32, u32, u32) {
+    let days = (secs / 86_400) as i64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 {
+        y += 1;
+    }
+    (y as i32, m as u32, d as u32)
+}
+
+/// Format an absolute UTC `YYYY-MM-DD HH:MM:SS` string from a Unix epoch.
+/// Used everywhere diag entries and snapshot headers need a timestamp.
+pub(crate) fn fmt_utc(secs: u64) -> String {
+    let (y, mo, d) = epoch_to_ymd(secs);
+    let h = (secs / 3600) % 24;
+    let mi = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+}
+
+/// Snapshot the current diag ring as a single newline-separated string.
+/// Used by `persist_diag_log` and `get_diagnostics`.
+fn diag_snapshot(app: &AppHandle) -> String {
+    let arc = Arc::clone(&app.state::<DiagLog>().0);
+    let buf = match arc.lock() {
+        Ok(b) => b,
+        Err(e) => e.into_inner(),
+    };
+    let mut out = String::with_capacity(buf.iter().map(|s| s.len() + 1).sum());
+    for entry in buf.iter() {
+        out.push_str(entry);
+        out.push('\n');
+    }
+    out
+}
+
+/// Write the current diag ring to `<appdata>/diagnostics.log`. Called from
+/// the `RunEvent::Exit` hook so a graceful quit always preserves the most
+/// recent ~200 events for post-mortem inspection. Best-effort; logs to
+/// stderr on failure but never panics.
+fn persist_diag_log(app: &AppHandle) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let snapshot = diag_snapshot(app);
+    if snapshot.is_empty() {
+        return;
+    }
+    let dir = match app.path().app_data_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[clippy] persist_diag_log: app_data_dir: {e}");
+            return;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("[clippy] persist_diag_log: create_dir_all: {e}");
+        return;
+    }
+    let path = dir.join("diagnostics.log");
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let header = format!(
+        "===== Clippy v{} session ended {} UTC =====\n",
+        env!("CARGO_PKG_VERSION"),
+        fmt_utc(now_secs)
+    );
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            let _ = f.write_all(header.as_bytes());
+            let _ = f.write_all(snapshot.as_bytes());
+            let _ = f.write_all(b"\n");
+        }
+        Err(e) => {
+            eprintln!("[clippy] persist_diag_log: open {}: {e}", path.display());
+        }
+    }
+}
+
 /// Append a timestamped entry. The lock is held only for a VecDeque push so
 /// this is effectively non-blocking in any context.
-fn diag(app: &AppHandle, msg: impl std::fmt::Display) {
+pub(crate) fn diag(app: &AppHandle, msg: impl std::fmt::Display) {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let entry = format!("[{:02}:{:02}:{:02}] {}", (secs / 3600) % 24, (secs / 60) % 60, secs % 60, msg);
+    let entry = format!("[{}] {}", fmt_utc(secs), msg);
     let arc = Arc::clone(&app.state::<DiagLog>().0);
     let mut buf = match arc.lock() {
         Ok(b) => b,
@@ -273,6 +461,86 @@ fn clear_cache(app: AppHandle) -> Result<u64, String> {
         }
     }
     Ok(freed)
+}
+
+/// Compound readout for the Settings/Storage tab. Bundles every disk-space
+/// signal the UI needs in one round-trip: total app-data footprint, the
+/// proxies cache subdir, the persisted diag log, and the resolved paths so
+/// the user can hit "Open folder" without us re-resolving on the frontend.
+#[derive(Serialize)]
+struct StorageSummary {
+    app_data_dir: String,
+    app_data_total_bytes: u64,
+    proxies_dir: String,
+    proxies_bytes: u64,
+    diagnostics_log_path: String,
+    diagnostics_log_bytes: u64,
+    /// Anything in app-data that isn't proxies or diagnostics.log — project
+    /// JSON files, persisted save-dir pref, etc. Helps the user understand
+    /// the "where's the rest going" delta when total ≠ proxies + log.
+    other_bytes: u64,
+}
+
+#[tauri::command]
+fn storage_summary(app: AppHandle) -> Result<StorageSummary, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let proxies = app_data.join("proxies");
+    let log = app_data.join("diagnostics.log");
+
+    let proxies_bytes = dir_size_recursive(&proxies);
+    let diagnostics_log_bytes = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    let total = dir_size_recursive(&app_data);
+    let other_bytes = total
+        .saturating_sub(proxies_bytes)
+        .saturating_sub(diagnostics_log_bytes);
+
+    Ok(StorageSummary {
+        app_data_dir: app_data.to_string_lossy().into_owned(),
+        app_data_total_bytes: total,
+        proxies_dir: proxies.to_string_lossy().into_owned(),
+        proxies_bytes,
+        diagnostics_log_path: log.to_string_lossy().into_owned(),
+        diagnostics_log_bytes,
+        other_bytes,
+    })
+}
+
+/// Recursive byte sum for a directory tree. Returns 0 on any I/O error so a
+/// missing or inaccessible subtree doesn't fail the parent measurement.
+fn dir_size_recursive(dir: &std::path::Path) -> u64 {
+    let mut total: u64 = 0;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            total = total.saturating_add(dir_size_recursive(&entry.path()));
+        } else if meta.is_file() {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
+}
+
+/// Delete the persisted diagnostics.log. The in-memory ring buffer is
+/// untouched — it'll be re-flushed on the next graceful exit. Useful when
+/// a user wants to reset state before reproducing a bug.
+#[tauri::command]
+fn clear_diagnostics_log(app: AppHandle) -> Result<u64, String> {
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("diagnostics.log");
+    if !path.exists() {
+        return Ok(0);
+    }
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    Ok(size)
 }
 
 /// Auto-prune cache files that haven't been touched in `days` days. Runs on
@@ -718,6 +986,16 @@ fn build_audio_filter_complex(
         let (idx, vol) = active[0];
         if (vol - 1.0).abs() < 1e-6 {
             // Unity gain, single active stream — route directly into post-mix.
+            // When there's ALSO no post-mix work to do, short-circuit to a
+            // direct stream map: no filter graph at all. Previously we
+            // returned `Some("")` + `"[aout]"` here, which ffmpeg correctly
+            // rejected with "No filters specified in the graph description"
+            // (the [aout] label was never defined). Reproduced when a user
+            // muted all but one track or had a single source stream + non-
+            // default mix metadata.
+            if post_mix_filters.is_empty() {
+                return (None, format!("0:a:{}?", idx));
+            }
             format!("[0:a:{}]", idx)
         } else {
             parts.push(format!("[0:a:{}]volume={:.4}{}", idx, vol, mix_output));
@@ -1532,8 +1810,27 @@ async fn run_ffmpeg_with_progress(
     duration_secs: f64,
     event_name: &str,
 ) -> Result<(), String> {
-    let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
-    let (mut rx, _child) = sidecar.args(args).spawn().map_err(|e| e.to_string())?;
+    // Summarize the invocation for the diag log so support reports can see
+    // *what was attempted* even when the only visible symptom is "export
+    // failed". Logs output basename + codec flags + whether a filter graph
+    // was used — never the full file path (privacy).
+    let summary = summarize_ffmpeg_invocation(&args);
+    diag(app, format!("[export] START · {summary} · {duration_secs:.2}s"));
+
+    let sidecar = match app.shell().sidecar("ffmpeg") {
+        Ok(s) => s,
+        Err(e) => {
+            diag(app, format!("[export] FAILED · {summary} · sidecar lookup: {e}"));
+            return Err(e.to_string());
+        }
+    };
+    let (mut rx, _child) = match sidecar.args(args).spawn() {
+        Ok(t) => t,
+        Err(e) => {
+            diag(app, format!("[export] FAILED · {summary} · spawn: {e}"));
+            return Err(e.to_string());
+        }
+    };
     let start = std::time::Instant::now();
     let mut last_emit = std::time::Instant::now();
     let total_us = duration_secs * 1_000_000.0;
@@ -1578,11 +1875,52 @@ async fn run_ffmpeg_with_progress(
                         payload.code, stderr_buf
                     ));
                 }
+                let elapsed = start.elapsed().as_secs_f64();
+                if payload.code != Some(0) {
+                    // Failure path: log every stderr line we got so support
+                    // reports include the exact ffmpeg error chain. Truncate
+                    // each line to 240 chars to stay sane in the ring buffer.
+                    diag(
+                        app,
+                        format!(
+                            "[export] FAILED · {summary} · exit={:?} after {elapsed:.2}s · stderr:\n{}",
+                            payload.code,
+                            stderr_buf
+                                .lines()
+                                .map(|l| format!("    {}", trunc(l, 240)))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        ),
+                    );
+                    return Err(format!(
+                        "ffmpeg exited with code {:?}: {}",
+                        payload.code, stderr_buf
+                    ));
+                }
+                // Success path: log warnings if any (ffmpeg can succeed but
+                // still emit useful notes — codec deprecations, container
+                // hints, etc.).
+                if stderr_buf.trim().is_empty() {
+                    diag(app, format!("[export] OK · {summary} · {elapsed:.2}s"));
+                } else {
+                    diag(
+                        app,
+                        format!(
+                            "[export] OK · {summary} · {elapsed:.2}s · stderr notes:\n{}",
+                            stderr_buf
+                                .lines()
+                                .take(8)
+                                .map(|l| format!("    {}", trunc(l, 240)))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        ),
+                    );
+                }
                 let _ = app.emit(
                     event_name,
                     ExportProgress {
                         progress: 1.0,
-                        elapsed_secs: start.elapsed().as_secs_f64(),
+                        elapsed_secs: elapsed,
                     },
                 );
                 break;
@@ -1591,6 +1929,51 @@ async fn run_ffmpeg_with_progress(
         }
     }
     Ok(())
+}
+
+/// One-liner summary of an ffmpeg sidecar invocation for diag entries.
+/// Picks out the bits a support reader cares about: output filename
+/// (basename only — never the full path, privacy), video + audio codec
+/// flags, target bitrates if set, and whether a `-filter_complex` graph
+/// was used (signals "multi-track audio mix" / "speed filter" path).
+fn summarize_ffmpeg_invocation(args: &[String]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    // Output path is the last arg in every export-style invocation we
+    // build. Show only the basename so the log doesn't leak the user's
+    // home directory.
+    if let Some(last) = args.last() {
+        parts.push(format!("out={}", basename(last)));
+    }
+    // Pick up -c:v / -c:a / -b:v / -b:a / -preset / -crf flags by walking
+    // pairs. Flags without a paired value are skipped (e.g. -vn).
+    let mut i = 0;
+    while i + 1 < args.len() {
+        match args[i].as_str() {
+            "-c:v" | "-c:a" | "-b:v" | "-b:a" | "-preset" | "-crf" | "-f" | "-pix_fmt" => {
+                let key = args[i].trim_start_matches('-');
+                parts.push(format!("{key}={}", args[i + 1]));
+                i += 2;
+            }
+            "-vn" => {
+                parts.push("audio-only".into());
+                i += 1;
+            }
+            "-filter_complex" => {
+                // Don't dump the whole graph (it can be long); record that
+                // a filter graph was used + its byte length so an outlier
+                // graph is at least visible.
+                parts.push(format!("filter_complex({}B)", args[i + 1].len()));
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    if parts.is_empty() {
+        "ffmpeg".into()
+    } else {
+        parts.join(" ")
+    }
 }
 
 /// Re-encode a single region from src_path to fit within target_size_mb.
@@ -1610,7 +1993,25 @@ async fn export_clip_sized(
     total_audio_tracks: Option<u32>,
 ) -> Result<(), String> {
     let duration = (out_secs - in_secs).max(0.0);
+    diag(
+        &app,
+        format!(
+            "[export] export_clip_sized invoked · src={} in={:.3} out={:.3} dur={:.3} \
+             target_mb={} crop={:?} speed={:?} normalize={:?} tracks_total={:?} mix_entries={}",
+            basename(&src_path),
+            in_secs,
+            out_secs,
+            duration,
+            target_size_mb,
+            crop.is_some(),
+            speed,
+            normalize,
+            total_audio_tracks,
+            track_mix.as_ref().map(|v| v.len()).unwrap_or(0),
+        ),
+    );
     if duration < 0.05 {
+        diag(&app, "[export] export_clip_sized REJECTED · selection too short");
         return Err("selection too short".into());
     }
     let normalize = normalize.unwrap_or(false);
@@ -1680,7 +2081,21 @@ async fn export_concat_sized(
     track_mix: Option<Vec<TrackGain>>,
     total_audio_tracks: Option<u32>,
 ) -> Result<(), String> {
+    diag(
+        &app,
+        format!(
+            "[export] export_concat_sized invoked · src={} regions={} target_mb={} \
+             normalize={:?} tracks_total={:?} top_level_mix_entries={}",
+            basename(&src_path),
+            regions.len(),
+            target_size_mb,
+            normalize,
+            total_audio_tracks,
+            track_mix.as_ref().map(|v| v.len()).unwrap_or(0),
+        ),
+    );
     if regions.is_empty() {
+        diag(&app, "[export] export_concat_sized REJECTED · no regions");
         return Err("no regions to concat".into());
     }
     let normalize = normalize.unwrap_or(false);
@@ -1691,6 +2106,13 @@ async fn export_concat_sized(
     let first = regions[0].clone();
     for (i, r) in regions.iter().enumerate().skip(1) {
         if r.crop != first.crop || r.speed != first.speed || r.mix != first.mix {
+            diag(
+                &app,
+                format!(
+                    "[export] export_concat_sized REJECTED · region {} differs in crop/speed/mix from region 1",
+                    i + 1
+                ),
+            );
             return Err(format!(
                 "size-targeted stitched export needs uniform crop, speed, and audio mix across regions (region {} differs)",
                 i + 1
@@ -1961,19 +2383,31 @@ async fn export_concat(
     track_mix: Option<Vec<TrackGain>>,
     total_audio_tracks: Option<u32>,
 ) -> Result<(), String> {
+    diag(
+        &app,
+        format!(
+            "[export] export_concat invoked · src={} regions={} normalize={:?} \
+             tracks_total={:?} top_level_mix_entries={}",
+            basename(&src_path),
+            regions.len(),
+            normalize,
+            total_audio_tracks,
+            track_mix.as_ref().map(|v| v.len()).unwrap_or(0),
+        ),
+    );
     if regions.is_empty() {
+        diag(&app, "[export] export_concat REJECTED · no regions");
         return Err("no regions to concat".into());
     }
     let normalize = normalize.unwrap_or(false);
     let mix = track_mix.unwrap_or_default();
     let total_tracks = total_audio_tracks.unwrap_or(1) as usize;
-    diag(&app, format!("export_concat: {} region(s) → {} (normalize={})",
-        regions.len(), basename(&output_path), normalize));
     let mix_active = !mix.is_empty()
         && !(mix.len() == total_tracks && mix.iter().all(|t| (t.volume - 1.0).abs() < 1e-6));
     // Sum of post-speed durations — what the final output will actually be.
     let total_duration: f64 = regions.iter().map(|r| r.effective_duration()).sum();
     if total_duration < 0.05 {
+        diag(&app, "[export] export_concat REJECTED · total duration too short");
         return Err("total duration is too short to export".into());
     }
     // Stage 1 dominates wall-clock when any region needs re-encode (crop/speed).
@@ -2157,7 +2591,24 @@ async fn export_clip(
     total_audio_tracks: Option<u32>,
 ) -> Result<(), String> {
     let duration = (out_secs - in_secs).max(0.0);
+    diag(
+        &app,
+        format!(
+            "[export] export_clip invoked · src={} in={:.3} out={:.3} dur={:.3} \
+             crop={:?} speed={:?} normalize={:?} tracks_total={:?} mix_entries={}",
+            basename(&src_path),
+            in_secs,
+            out_secs,
+            duration,
+            crop.is_some(),
+            speed,
+            normalize,
+            total_audio_tracks,
+            track_mix.as_ref().map(|v| v.len()).unwrap_or(0),
+        ),
+    );
     if duration < 0.05 {
+        diag(&app, "[export] export_clip REJECTED · selection too short");
         return Err("selection too short".into());
     }
     let normalize = normalize.unwrap_or(false);
@@ -2346,7 +2797,23 @@ async fn export_clip_audio(
     total_audio_tracks: Option<u32>,
 ) -> Result<(), String> {
     let duration = (out_secs - in_secs).max(0.0);
+    diag(
+        &app,
+        format!(
+            "[export] export_clip_audio invoked · src={} in={:.3} out={:.3} dur={:.3} \
+             speed={:?} normalize={:?} tracks_total={:?} mix_entries={}",
+            basename(&src_path),
+            in_secs,
+            out_secs,
+            duration,
+            speed,
+            normalize,
+            total_audio_tracks,
+            track_mix.as_ref().map(|v| v.len()).unwrap_or(0),
+        ),
+    );
     if duration < 0.05 {
+        diag(&app, "[export] export_clip_audio REJECTED · selection too short");
         return Err("selection too short".into());
     }
     let normalize = normalize.unwrap_or(false);
@@ -2392,7 +2859,20 @@ async fn export_concat_audio(
     track_mix: Option<Vec<TrackGain>>,
     total_audio_tracks: Option<u32>,
 ) -> Result<(), String> {
+    diag(
+        &app,
+        format!(
+            "[export] export_concat_audio invoked · src={} regions={} normalize={:?} \
+             tracks_total={:?} top_level_mix_entries={}",
+            basename(&src_path),
+            regions.len(),
+            normalize,
+            total_audio_tracks,
+            track_mix.as_ref().map(|v| v.len()).unwrap_or(0),
+        ),
+    );
     if regions.is_empty() {
+        diag(&app, "[export] export_concat_audio REJECTED · no regions");
         return Err("no regions to concat".into());
     }
     let normalize = normalize.unwrap_or(false);
@@ -2401,6 +2881,13 @@ async fn export_concat_audio(
     let first = regions[0].clone();
     for (i, r) in regions.iter().enumerate().skip(1) {
         if r.speed != first.speed || r.mix != first.mix {
+            diag(
+                &app,
+                format!(
+                    "[export] export_concat_audio REJECTED · region {} differs in speed/mix from region 1",
+                    i + 1
+                ),
+            );
             return Err(format!(
                 "stitched MP3 export needs uniform speed and audio mix across regions (region {} differs)",
                 i + 1
@@ -2409,6 +2896,7 @@ async fn export_concat_audio(
     }
     let total_duration: f64 = regions.iter().map(|r| r.effective_duration()).sum();
     if total_duration < 0.05 {
+        diag(&app, "[export] export_concat_audio REJECTED · total duration too short");
         return Err("total duration too short".into());
     }
     let post_filters = build_audio_post_mix_filters(first.speed, normalize);
@@ -2883,16 +3371,112 @@ async fn export_frame_png(
 /// automatically. Full file paths are never logged; only basenames are used.
 #[tauri::command]
 fn get_diagnostics(app: AppHandle) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Clippy v{} ({}) — diagnostic snapshot\n",
+        env!("CARGO_PKG_VERSION"),
+        if cfg!(debug_assertions) { "dev build" } else { "release" }
+    ));
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    out.push_str(&format!(
+        "Captured: {} UTC (epoch {})\n",
+        fmt_utc(now_secs),
+        now_secs
+    ));
+    out.push_str(&format!(
+        "Target: {} {}\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    out.push_str("\n--- Replay buffer ---\n");
+
+    let replay_state = app.state::<replay::ReplayState>();
+    let coord_running = replay_state
+        .coord
+        .lock()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
+    let allowlist_size = replay_state
+        .allowlist
+        .lock()
+        .map(|g| g.len())
+        .unwrap_or(0);
+    out.push_str(&format!(
+        "Coordinator running: {coord_running}\n\
+         Game allowlist size: {allowlist_size}\n",
+    ));
+    let monitors = replay::capture::list_monitors();
+    out.push_str(&format!("Monitors detected: {}\n", monitors.len()));
+    for m in &monitors {
+        out.push_str(&format!(
+            "  · {} ({}x{}{})\n",
+            m.label,
+            m.width,
+            m.height,
+            if m.primary { ", primary" } else { "" }
+        ));
+    }
+    let audio_devices = replay::audio::enumerate_render_devices();
+    out.push_str(&format!("Audio render devices: {}\n", audio_devices.len()));
+    for d in &audio_devices {
+        out.push_str(&format!(
+            "  · {}{}\n",
+            d.name,
+            if d.is_default { " (default)" } else { "" }
+        ));
+    }
+
+    // ----- Performance (most-recent ~30s rollup per worker) -----
+    out.push_str("\n--- Performance (last rollup) ---\n");
+    let perf_rows: Vec<replay::coordinator::WorkerPerfRow> = {
+        let guard = match replay_state.coord.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        guard.as_ref().map(|c| c.perf_snapshot()).unwrap_or_default()
+    };
+    if perf_rows.is_empty() {
+        out.push_str("(no active workers — no perf data yet)\n");
+    } else {
+        for row in perf_rows {
+            let p = &row.perf;
+            let secs = p.window_secs.max(0.001);
+            let cap_fps = p.captured_frames as f32 / secs;
+            let sub_fps = p.submitted_frames as f32 / secs;
+            let kbps = (p.encoded_bytes as f32 * 8.0 / secs / 1024.0) as u64;
+            let age = if p.published_epoch == 0 {
+                "no rollup yet".to_string()
+            } else {
+                format!("rollup at {} UTC", fmt_utc(p.published_epoch))
+            };
+            out.push_str(&format!(
+                "· {label} — {w}x{h}@{fps} via \"{enc}\"\n  window={secs:.1}s cap={cap}({cap_fps:.1}fps) sub={sub}({sub_fps:.1}fps) dup={dup} pkts={pkts} bitrate≈{kbps}kbps · {age}\n",
+                label = row.label,
+                w = row.enc_width,
+                h = row.enc_height,
+                fps = row.fps,
+                enc = if row.encoder_name.is_empty() { "<unnamed>" } else { &row.encoder_name },
+                cap = p.captured_frames,
+                sub = p.submitted_frames,
+                dup = p.duplicated_frames,
+                pkts = p.encoded_packets,
+            ));
+        }
+    }
+
+    out.push_str("\n--- Event log ---\n");
     let arc = Arc::clone(&app.state::<DiagLog>().0);
     let buf = match arc.lock() {
         Ok(b) => b,
         Err(e) => e.into_inner(),
     };
-    let mut out = format!(
-        "Clippy v{} — diagnostic log ({} entries)\n---\n",
-        env!("CARGO_PKG_VERSION"),
-        buf.len()
-    );
+    out.push_str(&format!("({} entries)\n", buf.len()));
     for entry in buf.iter() {
         out.push_str(entry);
         out.push('\n');
@@ -2907,9 +3491,114 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        // Intercept the X button so we can hide-to-tray instead of exit when
+        // the user opted in (keeps the replay buffer running in background).
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                let hide = app
+                    .state::<HideOnClose>()
+                    .0
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                if hide {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            // No CLI args — Clippy autodetects state from saved settings.
+            None,
+        ))
         .setup(|app| {
             app.manage(DiagLog::new());
             app.manage(InitialPath(Mutex::new(parse_initial_path())));
+            app.manage(replay::ReplayState::new());
+            app.manage(HideOnClose(std::sync::atomic::AtomicBool::new(false)));
+            app.manage(DiagVerbose(std::sync::atomic::AtomicBool::new(false)));
+
+            // Replay save dir — load persisted preference if present, otherwise
+            // compute the default and create it on disk so the user's first
+            // save doesn't fail on a missing folder.
+            {
+                let handle = app.handle();
+                let save_dir = replay::load_save_dir(&handle.clone());
+                if let Err(e) = std::fs::create_dir_all(&save_dir) {
+                    eprintln!(
+                        "[clippy] couldn't create replay save dir {}: {e}",
+                        save_dir.display()
+                    );
+                }
+                app.manage(ReplaySaveDir(Mutex::new(save_dir)));
+            }
+
+            // System tray icon. Left-click shows the window; menu has Show + Quit.
+            // Combined with the close-to-tray setting, lets the user keep the
+            // replay buffer running in the background after closing the window.
+            {
+                use tauri::menu::{Menu, MenuEvent, MenuItem};
+                use tauri::tray::{
+                    MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
+                };
+
+                let show_item = MenuItem::with_id(app, "tray-show", "Show Clippy", true, None::<&str>)?;
+                let quit_item = MenuItem::with_id(app, "tray-quit", "Quit Clippy", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+                let on_menu = |app: &AppHandle, event: MenuEvent| {
+                    match event.id().as_ref() {
+                        "tray-show" => {
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.unminimize();
+                                let _ = w.set_focus();
+                            }
+                        }
+                        "tray-quit" => app.exit(0),
+                        _ => {}
+                    }
+                };
+                let on_icon = |tray: &tauri::tray::TrayIcon, event: TrayIconEvent| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
+                        }
+                    }
+                };
+
+                if let Some(icon) = app.default_window_icon() {
+                    let _ = TrayIconBuilder::new()
+                        .icon(icon.clone())
+                        .tooltip("Clippy")
+                        .menu(&menu)
+                        .show_menu_on_left_click(false)
+                        .on_menu_event(on_menu)
+                        .on_tray_icon_event(on_icon)
+                        .build(app);
+                }
+            }
+
+            #[cfg(debug_assertions)]
+            if let Some(win) = app.get_webview_window("main") {
+                win.open_devtools();
+            }
+
+            // Global hotkey for "save replay buffer" — defaults to Alt+F10.
+            // Re-registered at runtime by `replay_set_save_hotkey` when the
+            // user rebinds via the keybind editor.
+            if let Err(e) = register_save_hotkey(&app.handle().clone(), "Alt+F10") {
+                eprintln!("[clippy] save hotkey init failed: {e}");
+            }
 
             // Auto-prune cache files >30 days untouched. Background thread so a
             // slow disk doesn't block startup. Manual "Clear cache" is exposed
@@ -2975,8 +3664,160 @@ pub fn run() {
             load_project,
             save_project,
             extract_track,
-            get_diagnostics
+            get_diagnostics,
+            replay::get_replay_status,
+            replay::replay_start,
+            replay::replay_stop,
+            replay::replay_save,
+            replay::replay_list_monitors,
+            replay::replay_list_audio_devices,
+            replay::replay_get_system_info,
+            replay::replay_list_games,
+            replay::replay_rescan_games,
+            replay::replay_add_game,
+            replay::replay_add_current_game,
+            replay::replay_remove_game,
+            replay::replay_get_save_dir,
+            replay::replay_set_save_dir,
+            replay::replay_reset_save_dir,
+            storage_summary,
+            clear_diagnostics_log,
+            replay_set_save_hotkey,
+            set_hide_on_close,
+            set_diag_verbose,
+            // PoC pipeline-validation commands are dev-only — gated to
+            // debug builds so the release binary doesn't expose them.
+            #[cfg(debug_assertions)]
+            replay::replay_poc_test,
+            #[cfg(debug_assertions)]
+            replay::replay_poc_gpu_convert,
+            #[cfg(debug_assertions)]
+            replay::replay_poc_gpu_full
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Persist the in-memory diag log on graceful exit so a problem
+            // report after the fact still has the most-recent ~200 events.
+            // Hard crashes that bypass RunEvent::Exit will lose this round.
+            if let tauri::RunEvent::Exit = event {
+                persist_diag_log(app);
+            }
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- build_audio_filter_complex coverage ----------
+    //
+    // Lock in every branch — the bug fixed 2026-05-11 was a missing
+    // short-circuit for "single active track at unity gain with no
+    // post-mix filters" that produced `Some("")` + `[aout]` and ffmpeg
+    // rejected the empty graph with code -22. These tests pin the
+    // contract per-branch so a future refactor can't silently regress.
+
+    fn gain(index: u32, volume: f64) -> TrackGain {
+        TrackGain { index, volume }
+    }
+
+    #[test]
+    fn fc_single_source_default_mix_takes_fast_path() {
+        // Default mix, single source, no post-filters → direct map, no graph.
+        let (fc, map) = build_audio_filter_complex(&[], 1, "");
+        assert!(fc.is_none(), "single-track default mix should not build a graph");
+        assert_eq!(map, "0:a:0?");
+    }
+
+    #[test]
+    fn fc_multi_source_default_mix_builds_amix() {
+        // 3 tracks, no explicit mix entries → still amix all of them at unity.
+        let (fc, map) = build_audio_filter_complex(&[], 3, "");
+        let fc = fc.expect("multi-track default mix needs an amix graph");
+        assert!(!fc.is_empty(), "graph must not be empty");
+        assert!(fc.contains("amix=inputs=3"), "graph: {fc}");
+        assert_eq!(map, "[aout]");
+    }
+
+    #[test]
+    fn fc_single_active_unity_no_post_filters_short_circuits() {
+        // The regression: user has 1 track at unity + 0 post filters → must
+        // return None + direct stream map. Previously returned Some("") +
+        // "[aout]" which crashed ffmpeg with code -22.
+        let mix = vec![gain(0, 1.0)];
+        let (fc, map) = build_audio_filter_complex(&mix, 1, "");
+        assert!(
+            fc.is_none(),
+            "single unity-gain active track + no post-filters must NOT build a graph (got {fc:?})"
+        );
+        assert_eq!(map, "0:a:0?");
+    }
+
+    #[test]
+    fn fc_single_active_unity_with_post_filters_builds_graph() {
+        // Same active set but WITH post-mix filters (e.g. normalize) → we
+        // need a graph that routes the lone stream through them.
+        let mix = vec![gain(0, 1.0)];
+        let (fc, map) = build_audio_filter_complex(&mix, 1, ",loudnorm");
+        let fc = fc.expect("post-filters force a graph");
+        assert!(fc.contains("[0:a:0]"), "graph must reference the active stream: {fc}");
+        assert!(fc.contains("loudnorm"), "graph must include the post-filter: {fc}");
+        assert_eq!(map, "[aout]");
+    }
+
+    #[test]
+    fn fc_all_muted_synthesizes_silence() {
+        // Volumes all 0 → no active tracks → anullsrc fallback so the muxer
+        // still has an audio stream to attach.
+        let mix = vec![gain(0, 0.0), gain(1, 0.0)];
+        let (fc, map) = build_audio_filter_complex(&mix, 2, "");
+        let fc = fc.expect("muted-all path still needs a graph (anullsrc)");
+        assert!(fc.contains("anullsrc"), "graph: {fc}");
+        assert_eq!(map, "[aout]");
+    }
+
+    #[test]
+    fn fc_single_track_non_unity_emits_volume_filter() {
+        let mix = vec![gain(0, 0.5)];
+        let (fc, map) = build_audio_filter_complex(&mix, 1, "");
+        let fc = fc.expect("non-unity volume requires a filter");
+        assert!(fc.contains("volume=0.5000"), "graph: {fc}");
+        assert_eq!(map, "[aout]");
+    }
+
+    #[test]
+    fn fc_multi_track_explicit_mix_amixes_active() {
+        let mix = vec![gain(0, 1.0), gain(1, 0.5), gain(2, 0.0)];
+        let (fc, map) = build_audio_filter_complex(&mix, 3, "");
+        let fc = fc.expect("multi-track mix requires a graph");
+        // track 2 was muted → only tracks 0 + 1 should be in the amix.
+        assert!(fc.contains("amix=inputs=2"), "expected 2-input amix, graph: {fc}");
+        assert_eq!(map, "[aout]");
+    }
+
+    #[test]
+    fn fc_returned_graph_is_never_empty_when_some() {
+        // Property: if the function returns Some(graph), the graph string
+        // must be non-empty. (The bug was Some("") sneaking through.)
+        let cases: Vec<(Vec<TrackGain>, usize, &str)> = vec![
+            (vec![], 1, ""),
+            (vec![], 3, ""),
+            (vec![gain(0, 1.0)], 1, ""),
+            (vec![gain(0, 1.0)], 1, ",loudnorm"),
+            (vec![gain(0, 0.5)], 1, ""),
+            (vec![gain(0, 0.0)], 1, ""),
+            (vec![gain(0, 1.0), gain(1, 1.0)], 2, ""),
+            (vec![gain(0, 1.0), gain(1, 0.5), gain(2, 0.0)], 3, ",atempo=2.0"),
+        ];
+        for (mix, total, post) in cases {
+            let (fc, _map) = build_audio_filter_complex(&mix, total, post);
+            if let Some(g) = fc {
+                assert!(
+                    !g.is_empty(),
+                    "build_audio_filter_complex returned Some(\"\") for mix={mix:?} total={total} post={post:?}"
+                );
+            }
+        }
+    }
 }
