@@ -20,13 +20,15 @@ Drop a video file onto the window, drag it onto the `.exe`, or use **Ctrl+O**. M
 
 ### Region-based editing
 
-Press **F** to mark an in-point at the playhead, **Shift+F** to mark the out-point. Regions appear as color-coded bands on the timeline and as chips above it. Build as many as you need — each is independent.
+Press **F** to mark an in-point at the playhead, **Shift+F** to mark the out-point. Regions appear as color-coded bands on the timeline and as chips above it. Each is independent, in editing and exporting. 
 
 ![Marking in/out points with F and Shift+F, region chips appearing on the timeline](docs/RegionBasedEditing.gif)
 
 - Drag the edges of a region band on the timeline to fine-tune in/out after the fact
 - Jump to any region instantly with number keys (**1–9**)
 - Delete a region by clicking the **×** on its chip
+- Each region has independent speed, audio, and crop controls when exported as individual clips
+- Make each regions edits match for a singular stitched clip
 
 ---
 
@@ -35,15 +37,6 @@ Press **F** to mark an in-point at the playhead, **Shift+F** to mark the out-poi
 Press **Shift+C** (or click **Crop** on a region chip) to open the crop overlay. Draw a rectangle over the video, lock to a preset aspect ratio, and confirm. The crop is baked in at export — the rest of the frame is discarded.
 
 ![Opening the crop overlay, drawing a selection with aspect lock, confirming](docs/PerRegionCrop.gif)
-
-| Aspect lock | Use case |
-|-------------|----------|
-| 16:9 | Standard widescreen |
-| 9:16 | TikTok / Reels / Shorts |
-| 1:1 | Square posts |
-| 4:3 | Retro / webcam |
-| Free | Any shape |
-| Source | Match the source video |
 
 ---
 
@@ -69,7 +62,7 @@ If your source has multiple audio tracks (SteelSeries Sonar, OBS multi-track, or
 
 ### Export to MP4, MP3, or GIF 
 
-Open the export panel with **Ctrl+E**.
+Open the export panel with **Ctrl+E** or the **Export** button in the top right.
 
 ![Export dialog showing format tabs, size-limit picker, and normalize option](docs/ExportDialog.png)
 
@@ -116,24 +109,6 @@ The buffer only captures windows whose process is in your allowlist. Steam games
 Every action is bound to a key. Click any shortcut label in the footer to open the keybind editor and remap it to whatever you prefer.
 
 ![Keybind editor showing all actions and their current bindings](docs/KeyboardShortcuts.png)
-
-Default bindings:
-
-| Action | Default key |
-|--------|-------------|
-| Play / pause | Space |
-| Frame back | ← |
-| Frame forward | → |
-| Jump to start | Home |
-| Jump to end | End |
-| Set in-point | F |
-| Set out-point | Shift+F |
-| Open crop overlay | Shift+C |
-| Copy frame / save PNG | Shift+S |
-| Export | Ctrl+E |
-| Open file | Ctrl+O |
-| Save replay buffer (global) | Alt+F10 |
-| Jump to region 1–9 | 1–9 |
 
 ---
 
