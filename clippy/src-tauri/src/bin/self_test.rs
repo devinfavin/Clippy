@@ -382,7 +382,9 @@ fn check_process_loopback() -> Result<String, String> {
     }
     let pid = std::process::id();
     let epoch = Instant::now();
-    let res = clippy_lib::replay::audio::AudioCaptureHandle::start_for_process(pid, epoch, 10);
+    // No Tauri runtime here — None skips diag-entry plumbing inside the
+    // audio thread (we surface failures via this binary's own JSON output).
+    let res = clippy_lib::replay::audio::AudioCaptureHandle::start_for_process(pid, epoch, 10, None);
     unsafe { CoUninitialize() };
     match res {
         Ok(_handle) => Ok(format!("activated process loopback for pid {pid}")),

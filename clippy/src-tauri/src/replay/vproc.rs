@@ -150,7 +150,7 @@ pub mod windows_impl {
                 )?
             };
 
-            let stream = D3D11_VIDEO_PROCESSOR_STREAM {
+            let mut stream = D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: BOOL(1),
                 OutputIndex: 0,
                 InputFrameOrField: 0,
@@ -169,8 +169,18 @@ pub mod windows_impl {
                     &self.processor,
                     &self.output_view,
                     0,
-                    &[stream],
+                    std::slice::from_ref(&stream),
                 )?;
+                // Reclaim the COM references that we transferred into the
+                // ManuallyDrop fields. Without this, dropping `stream` here
+                // wouldn't release the IUnknown refs inside ManuallyDrop, so
+                // every convert() call would leak one ID3D11VideoProcessorInputView.
+                // Same bug class fixed in encoder.rs::process_output_async
+                // (MFT_OUTPUT_DATA_BUFFER::pSample). pInputSurfaceRight holds
+                // None today but we take from it too so the pattern matches
+                // and a future stereo path won't reintroduce the leak.
+                let _ = ManuallyDrop::take(&mut stream.pInputSurface);
+                let _ = ManuallyDrop::take(&mut stream.pInputSurfaceRight);
             }
 
             Ok(&self.nv12)

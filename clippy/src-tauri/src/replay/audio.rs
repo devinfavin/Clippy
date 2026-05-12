@@ -197,12 +197,17 @@ mod windows_impl {
     }
 
     impl AudioCaptureHandle {
+        /// `app` is the Tauri handle the capture thread uses for diag entries
+        /// (Start / GetBuffer / GetNextPacketSize failures, which used to be
+        /// silent). `None` skips diagnostics — the `clippy-self-test` binary
+        /// passes `None` because it has no Tauri runtime.
         pub fn start(
             device_id: Option<String>,
             epoch: Instant,
             duration_secs: u32,
+            app: Option<tauri::AppHandle>,
         ) -> Result<Self, String> {
-            Self::start_with_source(CaptureSource::Device(device_id), epoch, duration_secs)
+            Self::start_with_source(CaptureSource::Device(device_id), epoch, duration_secs, app)
         }
 
         /// Phase 3.3 — capture only the given process's audio.
@@ -213,14 +218,16 @@ mod windows_impl {
             pid: u32,
             epoch: Instant,
             duration_secs: u32,
+            app: Option<tauri::AppHandle>,
         ) -> Result<Self, String> {
-            Self::start_with_source(CaptureSource::Process(pid), epoch, duration_secs)
+            Self::start_with_source(CaptureSource::Process(pid), epoch, duration_secs, app)
         }
 
         fn start_with_source(
             source: CaptureSource,
             epoch: Instant,
             duration_secs: u32,
+            app: Option<tauri::AppHandle>,
         ) -> Result<Self, String> {
             let (cmd_tx, cmd_rx) = mpsc::sync_channel::<AudioCmd>(8);
             let (init_tx, init_rx) = mpsc::sync_channel::<Result<AudioFormat, String>>(1);
@@ -228,7 +235,7 @@ mod windows_impl {
             let join_handle = thread::Builder::new()
                 .name("clippy-audio-capture".into())
                 .spawn(move || {
-                    run_capture(source, epoch, duration_secs, cmd_rx, init_tx);
+                    run_capture(source, epoch, duration_secs, cmd_rx, init_tx, app);
                 })
                 .map_err(|e| format!("spawn audio thread: {e}"))?;
 
@@ -279,7 +286,20 @@ mod windows_impl {
         duration_secs: u32,
         cmd_rx: mpsc::Receiver<AudioCmd>,
         init_tx: SyncSender<Result<AudioFormat, String>>,
+        app: Option<tauri::AppHandle>,
     ) {
+        // Stable label for diag entries from this thread. Built before
+        // `source` is consumed by the init match below so we can reference
+        // it from any of the error paths inside the capture loop. Process
+        // loopback uses the pid; device captures use the WASAPI endpoint
+        // id (verbose by design — it's what the Settings UI also persists,
+        // so a copy-pasted diag can be matched back to a specific row).
+        let label: String = match &source {
+            CaptureSource::Device(Some(id)) => format!("device {id}"),
+            CaptureSource::Device(None) => "default device".to_string(),
+            CaptureSource::Process(pid) => format!("process loopback pid {pid}"),
+        };
+
         // COM init for this thread.
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -298,6 +318,21 @@ mod windows_impl {
             }
         };
 
+        // Start the WASAPI capture stream BEFORE signalling init success.
+        // If Start() fails (rare — typically a device-state issue after a
+        // clean Initialize) the worker's existing per-device init-error log
+        // captures the cause via the init_tx error path. Previously the
+        // failure was `.is_err()`-discarded and the thread silently exited,
+        // leaving the worker convinced the track was healthy and the saved
+        // clip missing that audio with no breadcrumb in the diag log.
+        if let Err(e) = unsafe { audio_client.Start() } {
+            let _ = init_tx.send(Err(format!("Start: {e}")));
+            unsafe { CoUninitialize() };
+            return;
+        }
+
+        // We own a started stream from here on; the worker commits to
+        // expecting packets from us once it sees this Ok.
         let _ = init_tx.send(Ok(format.clone()));
 
         let bytes_per_frame = (format.channels as u32) * (format.bits_per_sample as u32) / 8;
@@ -308,12 +343,12 @@ mod windows_impl {
 
         let mut buffer: VecDeque<AudioPacket> = VecDeque::with_capacity(2048);
         let mut current_bytes: usize = 0;
-
-        unsafe {
-            if audio_client.Start().is_err() {
-                return;
-            }
-        }
+        // One-shot diag gates: a persistently-failing WASAPI call would
+        // otherwise spam the 200-entry diag ring at ~200/sec and evict every
+        // other entry within a second. Log the first hit so the user has a
+        // breadcrumb; further occurrences fall through silently.
+        let mut logged_get_size_err = false;
+        let mut logged_get_buffer_err = false;
 
         'main: loop {
             // Process commands.
@@ -333,7 +368,20 @@ mod windows_impl {
             loop {
                 let next_size = match unsafe { capture_client.GetNextPacketSize() } {
                     Ok(n) => n,
-                    Err(_) => 0,
+                    Err(e) => {
+                        if !logged_get_size_err {
+                            logged_get_size_err = true;
+                            if let Some(a) = &app {
+                                crate::diag(
+                                    a,
+                                    format!(
+                                        "[replay] audio: {label}: GetNextPacketSize error (first hit; thread continues polling): {e}"
+                                    ),
+                                );
+                            }
+                        }
+                        0
+                    }
                 };
                 if next_size == 0 {
                     break;
@@ -351,7 +399,18 @@ mod windows_impl {
                         None,
                     )
                 };
-                if r.is_err() {
+                if let Err(e) = r {
+                    if !logged_get_buffer_err {
+                        logged_get_buffer_err = true;
+                        if let Some(a) = &app {
+                            crate::diag(
+                                a,
+                                format!(
+                                    "[replay] audio: {label}: GetBuffer error (first hit; capture will skip packets until WASAPI recovers): {e}"
+                                ),
+                            );
+                        }
+                    }
                     break;
                 }
 

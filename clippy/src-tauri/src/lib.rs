@@ -3255,7 +3255,27 @@ fn save_project(
 ) -> Result<(), String> {
     let path = project_path(&app, &src_path)?;
     let bytes = serde_json::to_vec_pretty(&state).map_err(|e| e.to_string())?;
-    std::fs::write(&path, bytes).map_err(|e| e.to_string())
+    // Atomic write: serialize to a sibling tempfile, then rename over the
+    // target. std::fs::rename on Windows resolves to MoveFileExW with
+    // REPLACE_EXISTING + WRITE_THROUGH, and on POSIX rename is atomic — either
+    // way, a crash mid-write leaves the previous sidecar intact rather than
+    // truncating it. Without this, a power loss between truncating `path`
+    // and finishing the write loses every region, color, mix override, and
+    // track name for that source on next load.
+    let tmp_path: PathBuf = {
+        let mut s = path.clone().into_os_string();
+        s.push(".tmp");
+        s.into()
+    };
+    std::fs::write(&tmp_path, &bytes)
+        .map_err(|e| format!("write {}: {e}", tmp_path.display()))?;
+    if let Err(e) = std::fs::rename(&tmp_path, &path) {
+        // Best-effort: drop the tempfile so the next save isn't blocked by
+        // a stale `<...>.json.tmp` lying around. The next save will retry.
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("rename to {}: {e}", path.display()));
+    }
+    Ok(())
 }
 
 /// Copy a single frame at `time_secs` to the OS clipboard as a raster image.

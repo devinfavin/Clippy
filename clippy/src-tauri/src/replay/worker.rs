@@ -435,6 +435,7 @@ fn run_worker(
                     pid,
                     epoch,
                     settings.duration_secs,
+                    Some(app.clone()),
                 ) {
                     Ok(h) => {
                         let label = if title.trim().is_empty() {
@@ -460,6 +461,7 @@ fn run_worker(
             Some(device_id.clone()),
             epoch,
             settings.duration_secs,
+            Some(app.clone()),
         ) {
             Ok(h) => {
                 // User-provided friendly name (empty string means "default").
@@ -493,7 +495,12 @@ fn run_worker(
     }
 
     if audio_handles.is_empty() {
-        match super::audio::AudioCaptureHandle::start(None, epoch, settings.duration_secs) {
+        match super::audio::AudioCaptureHandle::start(
+            None,
+            epoch,
+            settings.duration_secs,
+            Some(app.clone()),
+        ) {
             Ok(h) => {
                 // Same — fallback default-output stream has no specific id.
                 audio_handles.push((h, "Default output".to_string(), String::new()));
@@ -513,6 +520,34 @@ fn run_worker(
             settings.use_process_loopback
         ),
     );
+    // Per-track negotiated format. Surfaces sample-rate / channel-count /
+    // bit-depth from WASAPI's mix format so a "saved clip sounds wrong" diag
+    // includes the actual capture format without needing a repro. Logged here
+    // (rather than inside the audio thread) so the message keeps the worker's
+    // hwnd/title context that diag entries from this thread normally have.
+    for (i, (h, name, device_id)) in audio_handles.iter().enumerate() {
+        let f = h.format();
+        let id_label = if device_id.is_empty() {
+            "process-loopback/default".to_string()
+        } else {
+            device_id.clone()
+        };
+        let safe_name = if name.is_empty() {
+            "(no name)".to_string()
+        } else {
+            super::save::truncate_for_metadata(name, 64)
+        };
+        crate::diag(
+            &app,
+            format!(
+                "[replay] audio[{i}]: \"{safe_name}\" ({id_label}) · {sr}Hz · {ch}ch · {bps}-bit{kind}",
+                sr = f.sample_rate,
+                ch = f.channels,
+                bps = f.bits_per_sample,
+                kind = if f.is_float { " float" } else { " int" },
+            ),
+        );
+    }
 
     // Wrap in Arc so snapshot threads can read the handles while the worker
     // continues encoding. AudioCaptureHandle::snapshot takes &self so shared
