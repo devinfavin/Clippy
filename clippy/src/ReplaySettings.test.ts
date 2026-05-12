@@ -16,9 +16,9 @@ describe("getReplayStartArgs — defaults when localStorage is empty", () => {
     expect(args.captureMode).toEqual({ kind: "perWindow" });
   });
 
-  it("hands back default bitrate=50_000, encoder=auto, 2s keyframe, 3 workers", () => {
+  it("hands back default bitrate=25_000, encoder=auto, 2s keyframe, 3 workers", () => {
     const args = getReplayStartArgs() as Record<string, unknown>;
-    expect(args.bitrateKbps).toBe(50_000);
+    expect(args.bitrateKbps).toBe(25_000);
     expect(args.encoderPreference).toBe("auto");
     expect(args.keyframeIntervalSecs).toBe(2);
     expect(args.maxConcurrentWorkers).toBe(3);

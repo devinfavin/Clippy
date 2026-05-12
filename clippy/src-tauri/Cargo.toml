@@ -1,6 +1,6 @@
 [package]
 name = "clippy"
-version = "0.2.1"
+version = "0.2.2"
 description = "Video clip editor"
 authors = ["devin"]
 edition = "2021"

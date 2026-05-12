@@ -86,7 +86,7 @@ impl Default for ReplaySettings {
             duration_secs: 300,
             audio_device_ids: Vec::new(),
             audio_device_names: Vec::new(),
-            video_bitrate_kbps: 50_000,
+            video_bitrate_kbps: 25_000,
             use_process_loopback: true,
             fps: 60,
             resolution_mode: ResolutionMode::Source,
@@ -242,7 +242,7 @@ pub fn replay_start(
         duration_secs: duration_secs.unwrap_or(300).clamp(10, 600),
         audio_device_ids: audio_device_ids.unwrap_or_default(),
         audio_device_names: audio_device_names.unwrap_or_default(),
-        video_bitrate_kbps: bitrate_kbps.unwrap_or(50_000).clamp(1_000, 200_000),
+        video_bitrate_kbps: bitrate_kbps.unwrap_or(25_000).clamp(1_000, 200_000),
         use_process_loopback: use_process_loopback.unwrap_or(true),
         fps: fps.unwrap_or(60).clamp(15, 240),
         resolution_mode: resolution_mode.unwrap_or(ResolutionMode::Source),
@@ -543,6 +543,38 @@ async fn finish_save(
         format!("Clippy_Replay_{title_slug}_{stamp}.mp4")
     };
     let out = dir.join(filename);
+
+    // Surface dropped audio tracks in the diag log. write_and_mux silently
+    // skips tracks that captured zero packets (e.g. an idle Sonar Mic / Aux
+    // output that wasn't producing audio during the buffer window) — without
+    // a log entry the user just sees "I picked 4 devices but only got 2
+    // tracks in my clip" with no explanation. Listing the skipped ones by
+    // name + index gives them a hint to either remove them from the
+    // selection or actually route audio through them.
+    let total = snap.audio_tracks.len();
+    let dropped: Vec<String> = snap
+        .audio_tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.packets.is_empty())
+        .map(|(i, t)| {
+            if t.name.is_empty() {
+                format!("track {i}")
+            } else {
+                format!("\"{}\" (track {i})", t.name)
+            }
+        })
+        .collect();
+    if !dropped.is_empty() {
+        crate::diag(
+            app,
+            format!(
+                "[replay] save · {} of {total} audio track(s) dropped (no captured packets): {}",
+                dropped.len(),
+                dropped.join(", ")
+            ),
+        );
+    }
 
     save::write_and_mux(&snap.packets, &snap.audio_tracks, snap.fps, &out).await?;
     Ok(ReplaySaveResult {

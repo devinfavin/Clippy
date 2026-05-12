@@ -6,23 +6,32 @@ use std::path::{Path, PathBuf};
 use super::buffer::VideoPacket;
 use super::worker::AudioTrackSnapshot;
 
-/// Concatenate the H.264 packets in PTS order and write to disk.
+/// Stream H.264 packets to disk in PTS order. Uses a buffered writer rather
+/// than concatenating into one giant `Vec<u8>` first — for a 5-min @100 Mbps
+/// buffer that single allocation alone was ~3.75 GB held alongside the
+/// already-resident Arc-shared packet buffers.
 pub async fn write_h264_raw(packets: &[VideoPacket], path: &Path) -> std::io::Result<()> {
-    let mut bytes: Vec<u8> = Vec::with_capacity(packets.iter().map(|p| p.data.len()).sum());
+    use tokio::io::AsyncWriteExt;
+    let file = tokio::fs::File::create(path).await?;
+    // 256 KB buffer — large enough to amortize syscall cost across many
+    // small NALU packets, small enough to stay out of the way of other RAM.
+    let mut writer = tokio::io::BufWriter::with_capacity(256 * 1024, file);
     for p in packets {
-        bytes.extend_from_slice(&p.data);
+        writer.write_all(&p.data).await?;
     }
-    tokio::fs::write(path, bytes).await
+    writer.flush().await
 }
 
-/// Write the raw PCM bytes of an audio track in PTS order.
+/// Stream PCM bytes for one audio track to disk. Same rationale as
+/// `write_h264_raw` — avoid the whole-track Vec allocation.
 async fn write_pcm_raw(track: &AudioTrackSnapshot, path: &Path) -> std::io::Result<()> {
-    let mut bytes: Vec<u8> =
-        Vec::with_capacity(track.packets.iter().map(|p| p.data.len()).sum());
+    use tokio::io::AsyncWriteExt;
+    let file = tokio::fs::File::create(path).await?;
+    let mut writer = tokio::io::BufWriter::with_capacity(256 * 1024, file);
     for p in &track.packets {
-        bytes.extend_from_slice(&p.data);
+        writer.write_all(&p.data).await?;
     }
-    tokio::fs::write(path, bytes).await
+    writer.flush().await
 }
 
 /// Resolve the FFmpeg sidecar binary across the layouts we ship from:
@@ -140,6 +149,16 @@ pub async fn write_and_mux(
 
     args.push("-c:v".into());
     args.push("copy".into());
+    // Force the output stream's frame rate explicitly. The input `-framerate
+    // FPS` flag above tells the raw-H.264 demuxer the source rate, but with
+    // `-c:v copy` the output container's reported frame rate ends up derived
+    // from the encoded stream's SPS VUI timing — and the AMD encoder MFT
+    // writes that as half-rate (60fps source → 30fps file), doubling the
+    // apparent clip duration when the player divides frames-by-rate.
+    // Forcing `-r FPS` on the output side makes the muxer's tbr deterministic
+    // regardless of what the SPS contains.
+    args.push("-r".into());
+    args.push(fps.to_string());
     args.push("-map".into());
     args.push("0:v".into());
 
@@ -163,10 +182,14 @@ pub async fn write_and_mux(
     args.push(out_mp4.to_string_lossy().into_owned());
 
     let ffmpeg = ffmpeg_path()?;
-    let result = tokio::process::Command::new(&ffmpeg)
-        .args(&args)
-        .output()
-        .await;
+    let mut cmd = tokio::process::Command::new(&ffmpeg);
+    cmd.args(&args);
+    // Suppress the flash-of-console-window when ffmpeg launches mid-game.
+    // CREATE_NO_WINDOW (0x08000000) keeps the child process attached to no
+    // console, which is what we want for a background mux during gameplay.
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
+    let result = cmd.output().await;
 
     // Best-effort cleanup regardless of mux outcome.
     let _ = tokio::fs::remove_file(&h264_path).await;

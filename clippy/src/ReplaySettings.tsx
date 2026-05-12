@@ -138,7 +138,7 @@ export function getReplayStartArgs(): Record<string, unknown> {
   // "no custom name" so the worker uses a sensible default.
   const audioDeviceNames = audioDeviceIds.map((id) => audioNamesMap[id] ?? "");
   const useProcessLoopback = lsBool(LS.processLoopback, true);
-  const bitrateKbps = lsNum(LS.bitrate, 50_000);
+  const bitrateKbps = lsNum(LS.bitrate, 25_000);
   const encoderPreference = (localStorage.getItem(LS.encoderPref) as EncoderPref) ?? "auto";
   const keyframeSecs = lsNum(LS.keyframeSecs, 2);
   const maxConcurrentWorkers = lsNum(LS.maxWorkers, 3);
@@ -218,7 +218,7 @@ function ReplaySettingsImpl() {
   const [qualityOpen, setQualityOpen] = useState<boolean>(() => lsBool(LS.qualityOpen, false));
 
   // ----- Phase 7 quality controls (fps removed — hardcoded 60 backend-side) -----
-  const [bitrateKbps, setBitrateKbps] = useState<number>(() => lsNum(LS.bitrate, 50_000));
+  const [bitrateKbps, setBitrateKbps] = useState<number>(() => lsNum(LS.bitrate, 25_000));
   const [resKind, setResKind] = useState<ResolutionKind>(
     () => (localStorage.getItem(LS.resolutionKind) as ResolutionKind) ?? "source"
   );
