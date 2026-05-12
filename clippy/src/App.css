@@ -1976,17 +1976,34 @@ button.btn-armed {
   border-radius: 50%;
   background: #3ddb6b; /* green = active */
   box-shadow: 0 0 6px rgba(61, 219, 107, 0.55);
+  /* Pulsing animation = liveness signal. Replaces the buffered-time
+     readout the pill used to show — for typical multi-hour sessions the
+     time would just sit at the cap, looking frozen. The pulse is small
+     enough not to be distracting in the corner of the eye. */
+  animation: replay-pill-dot-pulse 1.8s ease-in-out infinite;
 }
 .replay-pill-saving .replay-pill-dot { background: #f5a623; box-shadow: 0 0 6px rgba(245, 166, 35, 0.55); }
-.replay-pill-watching .replay-pill-dot { background: #888; box-shadow: 0 0 6px rgba(136, 136, 136, 0.45); }
-.replay-pill-time { font-variant-numeric: tabular-nums; color: var(--text); font-weight: var(--w-semi); }
-.replay-pill-sep { color: var(--dim); }
+.replay-pill-watching .replay-pill-dot {
+  background: #888;
+  box-shadow: 0 0 6px rgba(136, 136, 136, 0.45);
+  /* Watching = idle but alive — slower pulse to differentiate from
+     active recording. */
+  animation-duration: 2.4s;
+}
 .replay-pill-where {
   color: var(--text-2);
-  max-width: 18ch;
+  max-width: 26ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+@keyframes replay-pill-dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.55; transform: scale(0.85); }
+}
+/* Honor users who've asked the OS for reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  .replay-pill-dot { animation: none; }
 }
 
 /* Settings section (used inside the existing keybinds modal). Each section
@@ -2383,18 +2400,22 @@ button.btn-armed {
   color: var(--text-2);
 }
 
-/* Compact row of 9 mini-bindings for Jump-to-region. Used to be 9 stacked
-   kb-rows; collapsing them shrinks the Keyboard tab by ~150px. */
-.kb-jump-region-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-.kb-jump-region-btn {
-  min-width: 32px;
+/* Read-only display for the permanent Region 1-9 jump bindings. Used to
+   be a 9-button rebind grid; that was visually awkward (3x3 wrapped grid
+   that fought the label column for width) AND nobody actually remapped
+   the digits — they're the natural choice. Mono digits + spacing match
+   the hint-row keycap vocabulary. */
+.kb-jump-region-display {
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  color: var(--text-secondary);
+  letter-spacing: 1px;
+  white-space: nowrap;
+  flex-shrink: 0;
   padding: 4px 8px;
-  font-variant-numeric: tabular-nums;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
 }
 
 /* Storage tab grid — rows of (label/sub + value + action), with a divider
@@ -2807,7 +2828,10 @@ button.btn-armed {
 }
 .kb-row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  /* Floor the label column at 220px so a wide right column (e.g. the
+     9-digit jump-to-region row) can't squeeze the description into a
+     character-by-character vertical wrap. */
+  grid-template-columns: minmax(220px, 1fr) auto;
   align-items: center;
   gap: var(--s-3);
   padding: var(--s-2) var(--s-4);

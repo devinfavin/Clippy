@@ -72,12 +72,20 @@ fn register_save_hotkey(app: &AppHandle, shortcut_str: &str) -> Result<(), Strin
     let _ = app.global_shortcut().unregister_all();
 
     let app_handle = app.clone();
+    let shortcut_label = shortcut_str.to_string();
     app.global_shortcut()
         .on_shortcut(parsed, move |_app, _sc, event| {
             if event.state() != ShortcutState::Pressed {
                 return;
             }
             let handle = app_handle.clone();
+            // Surface that the OS actually delivered the keypress so we
+            // can tell "hotkey didn't register" apart from "hotkey fired
+            // but save flow choked" when triaging silent-failure reports.
+            diag(
+                &handle,
+                format!("[replay] save hotkey FIRED ({shortcut_label}) — invoking save"),
+            );
             tauri::async_runtime::spawn(async move {
                 match replay::save_active(&handle).await {
                     Ok(result) => {
@@ -3677,6 +3685,7 @@ pub fn run() {
             replay::replay_save,
             replay::replay_list_monitors,
             replay::replay_list_audio_devices,
+            replay::replay_set_audio_names,
             replay::replay_get_system_info,
             replay::replay_list_games,
             replay::replay_rescan_games,

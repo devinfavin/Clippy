@@ -123,6 +123,12 @@ pub enum ReplayStatus {
 pub struct ReplayState {
     pub coord: Arc<Mutex<Option<coordinator::Coordinator>>>,
     pub allowlist: Arc<Mutex<games::GameAllowlist>>,
+    /// Device-id → friendly-name map kept fresh by the frontend via
+    /// `replay_set_audio_names`. Consulted at save time to populate MP4
+    /// stream metadata, so renaming a device in Settings during a buffer
+    /// session takes effect on the *next* save without needing to restart
+    /// the running workers.
+    pub audio_names: Arc<Mutex<std::collections::HashMap<String, String>>>,
 }
 
 impl ReplayState {
@@ -130,6 +136,7 @@ impl ReplayState {
         ReplayState {
             coord: Arc::new(Mutex::new(None)),
             allowlist: Arc::new(Mutex::new(games::GameAllowlist::new())),
+            audio_names: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -515,9 +522,32 @@ fn take_snapshot(state: &ReplayState) -> Result<coordinator::SaveSnapshot, Strin
 
 async fn finish_save(
     app: &tauri::AppHandle,
-    snap: coordinator::SaveSnapshot,
+    mut snap: coordinator::SaveSnapshot,
 ) -> Result<ReplaySaveResult, String> {
     use tauri::Manager;
+
+    // Refresh each captured-track's friendly name from the live audio_names
+    // map before muxing. This is what makes "rename a device after Start"
+    // work — the worker's spawn-time names may be stale, but the map gets
+    // updated on every frontend rename, so the saved MP4's stream metadata
+    // always reflects the user's latest choice. Tracks with no device_id
+    // (process-loopback "Game audio", fallback "Default output") keep
+    // their spawn-time labels untouched.
+    if let Some(rs) = app.try_state::<ReplayState>() {
+        if let Ok(map) = rs.audio_names.lock() {
+            for track in snap.audio_tracks.iter_mut() {
+                if track.device_id.is_empty() {
+                    continue;
+                }
+                if let Some(current) = map.get(&track.device_id) {
+                    if !current.is_empty() {
+                        track.name = current.clone();
+                    }
+                }
+            }
+        }
+    }
+
     let dir = match app.try_state::<crate::ReplaySaveDir>() {
         Some(s) => s.0.lock().map_err(|e| e.to_string())?.clone(),
         None => default_save_dir(app),
@@ -576,7 +606,49 @@ async fn finish_save(
         );
     }
 
-    save::write_and_mux(&snap.packets, &snap.audio_tracks, snap.fps, &out).await?;
+    // Save context line: what we're about to mux. Pinpoints "saved file
+    // says X" vs "buffer contained Y" mismatches without needing to
+    // reproduce the bug.
+    let video_pkt_count = snap.packets.len();
+    let audio_pkt_summary: String = snap
+        .audio_tracks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let label = if t.name.is_empty() {
+                format!("a{i}")
+            } else {
+                format!("a{i}=\"{}\"", t.name)
+            };
+            format!("{label}:{}pkts", t.packets.len())
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    crate::diag(
+        app,
+        format!(
+            "[replay] save · target=\"{}\" video={video_pkt_count}pkts @ {}fps · audio: {audio_pkt_summary}",
+            snap.window_title, snap.fps
+        ),
+    );
+
+    let timings = save::write_and_mux(&snap.packets, &snap.audio_tracks, snap.fps, &out).await?;
+
+    // Save timing breakdown: lets us see *where* a slow save is slow
+    // (snapshot copy / disk write / ffmpeg mux) without guessing.
+    crate::diag(
+        app,
+        format!(
+            "[replay] save · h264 {}ms ({:.1}MB) · pcm {}ms ({:.1}MB) · ffmpeg {}ms · total {}ms",
+            timings.h264_write_ms,
+            timings.h264_bytes as f64 / (1024.0 * 1024.0),
+            timings.pcm_write_ms,
+            timings.pcm_bytes as f64 / (1024.0 * 1024.0),
+            timings.ffmpeg_mux_ms,
+            timings.total_ms,
+        ),
+    );
+
     Ok(ReplaySaveResult {
         path: out.to_string_lossy().into_owned(),
         window_title: snap.window_title,
@@ -714,6 +786,19 @@ pub fn replay_reset_save_dir(
         format!("[replay] save dir reset to default {}", def.display()),
     );
     Ok(def.to_string_lossy().into_owned())
+}
+
+/// Push the current device-id → friendly-name map down to the backend so a
+/// rename in Settings reaches the next save without restarting the buffer.
+/// The frontend calls this on first mount and after any device-name edit.
+#[tauri::command]
+pub fn replay_set_audio_names(
+    state: tauri::State<'_, ReplayState>,
+    names: std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    let mut g = state.audio_names.lock().map_err(|e| e.to_string())?;
+    *g = names;
+    Ok(())
 }
 
 /// Enumerate WASAPI render endpoints. Used by the settings UI to pick which

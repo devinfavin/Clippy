@@ -2,11 +2,19 @@ import { memo } from "react";
 import { useReplayStatus } from "./useReplayState";
 
 /**
- * Compact pill for the footer that surfaces replay-buffer state at a glance.
+ * Compact pill for the topbar that surfaces replay-buffer state at a glance.
  *
- *   [ ● 3:42 · Valorant ]    — buffer active, capturing this game
- *   [ ● 0:00 · watching ]    — buffer running, no game window focused
- *   (nothing)                — buffer is off
+ *   [ ● Valorant ]            — buffer active, capturing this game
+ *   [ ● watching for games ]  — buffer running, no game window focused
+ *   [ ● saving… ]             — flush in progress
+ *   (nothing)                 — buffer is off
+ *
+ * The pill used to show buffered seconds (e.g. `[● 3:42 · Valorant]`), but
+ * for typical multi-hour gaming sessions the buffer is full ~99% of the time
+ * — the timer just looked frozen, leading users to wonder if the buffer was
+ * stuck. The pulsing dot signals liveness instead. The expanded
+ * "saving…/saved" mid-save state lands with the v0.2.4 multi-worker chip
+ * redesign.
  *
  * Clicking the pill fires `onClick`, which the parent wires to the settings
  * modal so the user can configure the buffer without hunting for the gear.
@@ -46,28 +54,18 @@ function ReplayStatusPillImpl(props: { onClick?: () => void }) {
 
   // Active
   const title = status.window_title ?? "";
-  const buffered = formatMmss(status.buffered_secs);
-  const where = title.trim().length > 0 ? truncate(title, 28) : "no game focused";
+  const where = title.trim().length > 0 ? truncate(title, 32) : "no game focused";
 
   return (
     <button
       className="replay-pill replay-pill-active"
       onClick={props.onClick}
-      title={`Replay buffer — ${buffered} buffered · ${title || "no game focused"}\nClick to configure`}
+      title={`Replay buffer recording · ${title || "no game focused"}\nClick to configure`}
     >
       <span className="replay-pill-dot" />
-      <span className="replay-pill-time">{buffered}</span>
-      <span className="replay-pill-sep">·</span>
       <span className="replay-pill-where">{where}</span>
     </button>
   );
-}
-
-function formatMmss(totalSecs: number): string {
-  if (!isFinite(totalSecs) || totalSecs < 0) totalSecs = 0;
-  const m = Math.floor(totalSecs / 60);
-  const s = Math.floor(totalSecs % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
 function truncate(s: string, max: number): string {

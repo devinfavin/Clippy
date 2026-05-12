@@ -86,6 +86,19 @@ fn pcm_demuxer_flag(format: &super::audio::AudioFormat) -> &'static str {
     }
 }
 
+/// Per-step timings for one `write_and_mux` invocation. Returned to the
+/// caller so it can emit a diag breakdown like
+/// `save · h264 130ms · pcm 22ms · ffmpeg 410ms · total 562ms` — pinpointing
+/// where a slow save spent its time.
+pub struct SaveTimings {
+    pub h264_write_ms: u64,
+    pub pcm_write_ms: u64,
+    pub ffmpeg_mux_ms: u64,
+    pub total_ms: u64,
+    pub h264_bytes: u64,
+    pub pcm_bytes: u64,
+}
+
 /// Write the snapshot to disk and mux into a single MP4 with video + N audio
 /// tracks. Video is stream-copied; audio is encoded to AAC at 192kbps each.
 pub async fn write_and_mux(
@@ -93,18 +106,25 @@ pub async fn write_and_mux(
     audio_tracks: &[AudioTrackSnapshot],
     fps: u32,
     out_mp4: &Path,
-) -> Result<(), String> {
+) -> Result<SaveTimings, String> {
+    use std::time::Instant;
+    let total_start = Instant::now();
     if packets.is_empty() {
         return Err("buffer is empty".into());
     }
 
     // Stage video.
     let h264_path = out_mp4.with_extension("h264");
+    let h264_bytes: u64 = packets.iter().map(|p| p.data.len() as u64).sum();
+    let h264_start = Instant::now();
     write_h264_raw(packets, &h264_path)
         .await
         .map_err(|e| format!("write h264: {e}"))?;
+    let h264_write_ms = h264_start.elapsed().as_millis() as u64;
 
     // Stage each audio track as a separate raw PCM file.
+    let pcm_start = Instant::now();
+    let mut pcm_bytes: u64 = 0;
     let mut audio_paths: Vec<(PathBuf, &AudioTrackSnapshot)> = Vec::new();
     for (i, track) in audio_tracks.iter().enumerate() {
         if track.packets.is_empty() {
@@ -117,8 +137,10 @@ pub async fn write_and_mux(
             eprintln!("audio track {i} write failed: {e}");
             continue;
         }
+        pcm_bytes += track.packets.iter().map(|p| p.data.len() as u64).sum::<u64>();
         audio_paths.push((path, track));
     }
+    let pcm_write_ms = pcm_start.elapsed().as_millis() as u64;
 
     // Build FFmpeg command:
     //   ffmpeg -y
@@ -149,14 +171,22 @@ pub async fn write_and_mux(
 
     args.push("-c:v".into());
     args.push("copy".into());
-    // Force the output stream's frame rate explicitly. The input `-framerate
-    // FPS` flag above tells the raw-H.264 demuxer the source rate, but with
-    // `-c:v copy` the output container's reported frame rate ends up derived
-    // from the encoded stream's SPS VUI timing — and the AMD encoder MFT
-    // writes that as half-rate (60fps source → 30fps file), doubling the
-    // apparent clip duration when the player divides frames-by-rate.
-    // Forcing `-r FPS` on the output side makes the muxer's tbr deterministic
-    // regardless of what the SPS contains.
+    // Rewrite the H.264 SPS VUI timing during the mux so the output container
+    // reports the correct frame rate. The AMD encoder MFT was writing VUI
+    // timing that ffmpeg's h264 demuxer interpreted as half-rate (60fps source
+    // → 30fps file, doubling apparent duration). The h264_metadata bitstream
+    // filter overwrites the SPS in-place — no re-encode, ~no extra cost — so
+    // the muxer's derived frame rate is deterministic regardless of what the
+    // encoder MFT chose to emit.
+    //   frame_rate per H.264 spec = time_scale / (2 * num_units_in_tick)
+    //                             = 120 / (2 * 1) = 60
+    args.push("-bsf:v".into());
+    args.push(format!(
+        "h264_metadata=time_scale={}:num_units_in_tick=1:fixed_frame_rate_flag=1",
+        fps * 2
+    ));
+    // Belt-and-suspenders: also force the output stream's frame rate flag so
+    // the MP4 muxer's tbr is set explicitly.
     args.push("-r".into());
     args.push(fps.to_string());
     args.push("-map".into());
@@ -189,7 +219,9 @@ pub async fn write_and_mux(
     // console, which is what we want for a background mux during gameplay.
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
+    let ffmpeg_start = Instant::now();
     let result = cmd.output().await;
+    let ffmpeg_mux_ms = ffmpeg_start.elapsed().as_millis() as u64;
 
     // Best-effort cleanup regardless of mux outcome.
     let _ = tokio::fs::remove_file(&h264_path).await;
@@ -204,5 +236,12 @@ pub async fn write_and_mux(
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    Ok(())
+    Ok(SaveTimings {
+        h264_write_ms,
+        pcm_write_ms,
+        ffmpeg_mux_ms,
+        total_ms: total_start.elapsed().as_millis() as u64,
+        h264_bytes,
+        pcm_bytes,
+    })
 }

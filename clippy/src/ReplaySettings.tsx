@@ -498,6 +498,19 @@ function ReplaySettingsImpl() {
     });
   }, []);
 
+  // Push the current device-id → friendly-name map down to the backend so
+  // renames mid-buffer-session reach the next save. Debounced 300 ms so
+  // typing doesn't spam the invoke channel; fires once on mount with the
+  // localStorage-loaded map so the worker also sees pre-existing names.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      invoke("replay_set_audio_names", { names: audioNames }).catch((e) =>
+        console.warn("[clippy] replay_set_audio_names failed:", e)
+      );
+    }, 300);
+    return () => window.clearTimeout(t);
+  }, [audioNames]);
+
   // ----- derived -----
   const minutes = (durationSecs / 60).toFixed(1).replace(/\.0$/, "");
   // (filteredGames + Recently-added / Steam / Manual grouping moved into

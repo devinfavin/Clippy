@@ -258,6 +258,14 @@ fn run_per_window(
     // this. Stays set when focus drifts to a non-game (Discord, browser, etc.)
     // so the save hotkey still fires against the last game played.
     let mut last_game_hwnd: Option<isize> = None;
+    // Dedup state for non-game focus diag entries. Without this the log fills
+    // with `focus → non-game <hwnd X>` lines as the user alt-tabs through
+    // Discord/Steam/browser overlays — observed ~80% of all entries in a
+    // typical session were this. We suppress logging when the same hwnd
+    // re-fires within a short window.
+    let mut last_nongame_logged_hwnd: Option<isize> = None;
+    let mut last_nongame_logged_at = std::time::Instant::now();
+    const NONGAME_DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
     loop {
         let event_result = cmd_rx.recv_timeout(Duration::from_millis(250));
@@ -284,13 +292,24 @@ fn run_per_window(
                 // saved buffer reflects real-time game state (including AFK
                 // periods while the user was tabbed away).
                 if !is_game {
-                    crate::diag(
-                        &app,
-                        format!(
-                            "[replay] focus → non-game {} (hwnd {hwnd:#x}) — buffer continues for previous game",
-                            diag_focus_title(&app, false, &title)
-                        ),
-                    );
+                    // Dedup: suppress if same hwnd as last logged within the
+                    // window. Most rapid alt-tabs flutter through 2-4
+                    // overlay windows in <500ms; logging each adds noise
+                    // without changing what the user actually did.
+                    let now = std::time::Instant::now();
+                    let suppress = last_nongame_logged_hwnd == Some(hwnd)
+                        && now.duration_since(last_nongame_logged_at) < NONGAME_DEDUP_WINDOW;
+                    if !suppress {
+                        crate::diag(
+                            &app,
+                            format!(
+                                "[replay] focus → non-game {} (hwnd {hwnd:#x}) — buffer continues for previous game",
+                                diag_focus_title(&app, false, &title)
+                            ),
+                        );
+                        last_nongame_logged_hwnd = Some(hwnd);
+                        last_nongame_logged_at = now;
+                    }
                     continue;
                 }
 

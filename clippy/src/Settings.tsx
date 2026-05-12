@@ -13,7 +13,7 @@ import {
 } from "./keybinds";
 import type { UpdateState } from "./useUpdater";
 
-const APP_VERSION = "0.2.2";
+const APP_VERSION = "0.2.3";
 
 // ---------- Tab definitions ----------
 
@@ -29,23 +29,17 @@ export const SETTINGS_TABS: readonly { id: SettingsTabId; label: string }[] = [
 // ---------- Keyboard tab ----------
 
 /** Keyboard-shortcuts tab — two-column grid (action + description on the
- *  left, key combo button on the right), grouped by category. Each binding
- *  is still individually rebindable by clicking its combo; the Region 1-9
- *  jumps are collapsed into a single inline row of 9 mini-bindings under
- *  the "Regions" group to avoid 9 visually identical rows. */
+ *  left, key combo button on the right), grouped by category. Region 1-9
+ *  jumps are permanently bound to the digit keys and shown as a read-only
+ *  display under the "Regions" group; everything else is rebindable by
+ *  clicking its combo. */
 export function KeyboardSettingsTab(props: {
   keybinds: Keybinds;
   listeningAction: ActionId | null;
   setListeningAction: (a: ActionId | null) => void;
 }) {
   const { keybinds, listeningAction, setListeningAction } = props;
-  const jumpRegionActions: ActionId[] = [
-    "jumpRegion1", "jumpRegion2", "jumpRegion3",
-    "jumpRegion4", "jumpRegion5", "jumpRegion6",
-    "jumpRegion7", "jumpRegion8", "jumpRegion9",
-  ];
-  const isJumpRegion = (a: ActionId) =>
-    (jumpRegionActions as string[]).includes(a as string);
+  const isJumpRegion = (a: ActionId) => a.startsWith("jumpRegion");
 
   const groupOrder: ActionGroup[] = ["playback", "selection", "regions", "capture", "exports"];
   const grouped: Record<ActionGroup, ActionId[]> = {
@@ -118,23 +112,16 @@ export function KeyboardSettingsTab(props: {
                   <span className="kb-row-action">
                     <span className="kb-row-action-name">Jump to region 1–9</span>
                     <span className="kb-row-action-desc">
-                      Jump the playhead to a specific region by its index. Click any digit to rebind that one.
+                      Jump the playhead to a specific region by its index.
                     </span>
                   </span>
-                  <span className="kb-jump-region-row">
-                    {jumpRegionActions.map((action) => {
-                      const isListening = listeningAction === action;
-                      return (
-                        <button
-                          key={action}
-                          className={`kb-binding kb-jump-region-btn${isListening ? " listening" : ""}`}
-                          onClick={() => setListeningAction(action)}
-                          title={`${ACTION_LABELS[action]} — click to rebind`}
-                        >
-                          {isListening ? "…" : formatKeybind(keybinds[action])}
-                        </button>
-                      );
-                    })}
+                  {/* Region 1-9 jumps are permanently bound to the digit
+                      keys. Used to be individually rebindable, but the 9-
+                      button grid was visually awkward AND nobody actually
+                      remaps them — the digits are the natural choice. The
+                      digit-row display is read-only on purpose. */}
+                  <span className="kb-jump-region-display" aria-label="Region jump key bindings">
+                    1&nbsp;2&nbsp;3&nbsp;4&nbsp;5&nbsp;6&nbsp;7&nbsp;8&nbsp;9
                   </span>
                 </div>
               )}

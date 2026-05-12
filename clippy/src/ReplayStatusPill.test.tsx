@@ -36,33 +36,25 @@ describe("ReplayStatusPill", () => {
     expect(btn).toHaveTextContent(/watching for games/i);
   });
 
-  it("shows buffered time + game title when Active", () => {
+  it("shows game title when Active (no longer surfaces buffered time)", () => {
     withStatus({
       state: "Active",
       window_title: "Valorant",
-      buffered_secs: 222, // 3:42
+      buffered_secs: 222,
       vram_mb: 0,
     });
     render(<ReplayStatusPill />);
     const btn = screen.getByRole("button");
     expect(btn).toHaveClass("replay-pill-active");
-    expect(btn).toHaveTextContent("3:42");
     expect(btn).toHaveTextContent("Valorant");
-  });
-
-  it("formats buffered_secs as m:ss with zero-padded seconds", () => {
-    withStatus({
-      state: "Active",
-      window_title: "game",
-      buffered_secs: 65, // 1:05
-      vram_mb: 0,
-    });
-    render(<ReplayStatusPill />);
-    expect(screen.getByRole("button")).toHaveTextContent("1:05");
+    // Buffered time was dropped in v0.2.3 — sessions are typically multi-hour
+    // and the buffer is full ~99% of the time, so the timer sat at its cap
+    // looking frozen. Pulsing dot animation signals liveness instead.
+    expect(btn).not.toHaveTextContent(/\d:\d\d/);
   });
 
   it("truncates long window titles", () => {
-    const long = "ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789-extra-trailing";
+    const long = "ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789-extra-trailing-extra";
     withStatus({
       state: "Active",
       window_title: long,
@@ -71,7 +63,7 @@ describe("ReplayStatusPill", () => {
     });
     render(<ReplayStatusPill />);
     const btn = screen.getByRole("button");
-    // 28-char limit with an ellipsis sentinel — don't pin exact text since
+    // 32-char limit with an ellipsis sentinel — don't pin exact text since
     // the truncate helper is private, but the original title must NOT be
     // rendered verbatim.
     expect(btn).not.toHaveTextContent(long);

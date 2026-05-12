@@ -26,3 +26,7 @@ PROJECT.md
 
 # Local Claude state
 .claude/
+.claude-handoff.md
+
+# Local testing notes (not for distribution)
+TESTING.md

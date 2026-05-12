@@ -5,7 +5,12 @@ import type {
   TrackMix,
   TrackNameOverrides,
 } from "./types";
-import { resolveTrackColor, resolveTrackName, TRACK_COLORS } from "./types";
+import {
+  defaultTrackColorIndex,
+  resolveTrackColor,
+  resolveTrackName,
+  TRACK_COLORS,
+} from "./types";
 import { ColorPicker } from "./ColorPicker";
 
 /**
@@ -97,7 +102,9 @@ function TrackMixerImpl(props: {
           const vol = entry.volume;
           const pct = Math.round(vol * 100);
           const color = resolveTrackColor(t.index, props.trackColors);
-          const slot = props.trackColors[t.index] ?? (t.index % TRACK_COLORS.length);
+          // Use the same default-slot helper resolveTrackColor uses, so the
+          // ColorPicker's selected slot lines up with the dot's actual colour.
+          const slot = props.trackColors[t.index] ?? defaultTrackColorIndex(t.index);
           return (
             <div
               className={`track-row${muted ? " muted" : ""}`}

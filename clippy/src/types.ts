@@ -86,11 +86,26 @@ export function resolveRegionColor(region: Region, naturalIndex: number): string
  *  means the track uses its natural index for color. */
 export type TrackColorOverrides = Record<number, number>;
 
+/** Stride used to spread default track colors across the 9-slot palette so
+ *  the common 2- or 3-track case doesn't get spectrum-adjacent neighbours.
+ *  Must be coprime to TRACK_COLORS.length so every slot is reachable; with
+ *  palette length 9, stride 4 gives 0→0, 1→4, 2→8, 3→3, 4→7, 5→2 etc. —
+ *  3 clearly-distinct colours for the typical multi-track recording. */
+const TRACK_COLOR_STRIDE = 4;
+
+/** Default palette slot for a track when the user hasn't explicitly picked
+ *  one. Exported so the ColorPicker's `selectedSlot` and the swatch dot
+ *  agree on what's "currently selected" — otherwise the picker highlights
+ *  one slot but the dot displays the colour of a different slot. */
+export function defaultTrackColorIndex(trackIndex: number): number {
+  return (trackIndex * TRACK_COLOR_STRIDE) % TRACK_COLORS.length;
+}
+
 export function resolveTrackColor(
   trackIndex: number,
   overrides: TrackColorOverrides | undefined
 ): string {
-  const slot = overrides?.[trackIndex] ?? trackIndex;
+  const slot = overrides?.[trackIndex] ?? defaultTrackColorIndex(trackIndex);
   return trackColor(slot);
 }
 

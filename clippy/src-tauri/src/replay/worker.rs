@@ -27,9 +27,16 @@ pub struct WorkerSnapshot {
 pub struct AudioTrackSnapshot {
     pub format: AudioFormat,
     pub packets: Vec<AudioPacket>,
-    /// Friendly name for the saved MP4's track title metadata. Empty string
-    /// means "no custom name; the muxer can fall back to a default".
+    /// Friendly name for the saved MP4's track title metadata, captured at
+    /// worker spawn time. May be stale if the user renamed the device since
+    /// spawn — the save flow consults `ReplayState::audio_names` by
+    /// `device_id` first, falling back to this only when no entry exists.
     pub name: String,
+    /// WASAPI render-endpoint id (e.g. `{0.0.0.00000000}.{...}`). Used at
+    /// save time to look up the current friendly name. Empty for the
+    /// process-loopback "Game audio" stream and the fallback "Default
+    /// output" stream — those keep their spawn-time labels.
+    pub device_id: String,
 }
 
 /// What this worker is capturing. Same encode pipeline downstream regardless.
@@ -378,8 +385,12 @@ fn run_worker(
     //   2. (Phase 3.2) Add one capture handle per user-selected output device.
     //   3. If we ended up with zero handles, fall back to the default render
     //      endpoint so the save still has audio.
-    // (handle, friendly track name) — used for the saved MP4's title metadata.
-    let mut audio_handles: Vec<(super::audio::AudioCaptureHandle, String)> = Vec::new();
+    // (handle, spawn-time name, device_id) — name is the snapshot of the
+    // user's friendly label at worker spawn, device_id is the WASAPI
+    // endpoint id (empty for synthetic streams like process loopback).
+    // Save-time name resolution prefers ReplayState::audio_names by
+    // device_id, falling back to the spawn-time name when no map entry.
+    let mut audio_handles: Vec<(super::audio::AudioCaptureHandle, String, String)> = Vec::new();
 
     if settings.use_process_loopback {
         if let CaptureTarget::Window(hwnd_val) = target {
@@ -390,43 +401,77 @@ fn run_worker(
                 p
             };
             if pid != 0 {
-                if let Ok(h) = super::audio::AudioCaptureHandle::start_for_process(
+                match super::audio::AudioCaptureHandle::start_for_process(
                     pid,
                     epoch,
                     settings.duration_secs,
                 ) {
-                    let label = if title.trim().is_empty() {
-                        "Game audio".to_string()
-                    } else {
-                        format!("{title} (game audio)")
-                    };
-                    audio_handles.push((h, label));
+                    Ok(h) => {
+                        let label = if title.trim().is_empty() {
+                            "Game audio".to_string()
+                        } else {
+                            format!("{title} (game audio)")
+                        };
+                        // No device id for the process-loopback stream — it's
+                        // synthesised from the game PID, not a WASAPI endpoint.
+                        audio_handles.push((h, label, String::new()));
+                    }
+                    Err(e) => crate::diag(
+                        &app,
+                        format!("[replay] audio: process-loopback init FAILED for pid {pid}: {e}"),
+                    ),
                 }
             }
         }
     }
 
     for (i, device_id) in settings.audio_device_ids.iter().enumerate() {
-        if let Ok(h) = super::audio::AudioCaptureHandle::start(
+        match super::audio::AudioCaptureHandle::start(
             Some(device_id.clone()),
             epoch,
             settings.duration_secs,
         ) {
-            // User-provided friendly name (empty string means "default").
-            let name = settings
-                .audio_device_names
-                .get(i)
-                .cloned()
-                .unwrap_or_default();
-            audio_handles.push((h, name));
+            Ok(h) => {
+                // User-provided friendly name (empty string means "default").
+                let name = settings
+                    .audio_device_names
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_default();
+                audio_handles.push((h, name, device_id.clone()));
+            }
+            // Surface per-device init failures so "I selected 5, only got 4"
+            // isn't silent. Includes friendly name (when available) so the
+            // user can match the error back to the row in Settings.
+            Err(e) => {
+                let name = settings
+                    .audio_device_names
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_default();
+                let label = if name.is_empty() {
+                    format!("device {device_id}")
+                } else {
+                    format!("\"{name}\" ({device_id})")
+                };
+                crate::diag(
+                    &app,
+                    format!("[replay] audio: init FAILED for {label}: {e}"),
+                );
+            }
         }
     }
 
     if audio_handles.is_empty() {
-        if let Ok(h) =
-            super::audio::AudioCaptureHandle::start(None, epoch, settings.duration_secs)
-        {
-            audio_handles.push((h, "Default output".to_string()));
+        match super::audio::AudioCaptureHandle::start(None, epoch, settings.duration_secs) {
+            Ok(h) => {
+                // Same — fallback default-output stream has no specific id.
+                audio_handles.push((h, "Default output".to_string(), String::new()));
+            }
+            Err(e) => crate::diag(
+                &app,
+                format!("[replay] audio: fallback default-output init FAILED: {e} (saved clips will have no audio)"),
+            ),
         }
     }
 
@@ -474,6 +519,18 @@ fn run_worker(
     let mut c_duplicated: u32 = 0;
     let mut c_packets: u32 = 0;
     let mut c_bytes: u64 = 0;
+    // Liveness watchdogs. WGC silently fails for some games when they switch
+    // to fullscreen-exclusive or get minimized in ways the `Closed` event
+    // doesn't fire for; the encoder happily keeps spinning at 60fps with
+    // duplicated NV12 frames, producing unbounded duplicate-frame output and
+    // (worse) skewing the video PTS clock vs the wall-clock audio capture,
+    // causing audio desync on save. Track consecutive 30s rollup windows
+    // where (a) WGC produced zero new frames or (b) the encoder produced
+    // zero packets despite frames being submitted; bail after the second
+    // consecutive bad window (~60s) so the coordinator can reap the worker.
+    let mut consecutive_zero_cap_windows: u32 = 0;
+    let mut consecutive_zero_pkts_windows: u32 = 0;
+    const DEAD_CAPTURE_BAIL_AFTER_WINDOWS: u32 = 2;
 
     'main: loop {
         // 0. If the captured item went away (window closed, monitor unplugged),
@@ -507,13 +564,55 @@ fn run_worker(
             if let Ok(mut p) = perf.lock() {
                 *p = snap;
             }
+            // Buffer size in MB so RAM growth is visible live. The video
+            // buffer is the dominant resident cost (audio buffers are
+            // ~2 orders of magnitude smaller); summing here is cheap (just
+            // walks the VecDeque counting Arc<[u8]> sizes).
+            let buf_bytes: u64 = buffer.iter().map(|p| p.data.len() as u64).sum();
             crate::diag(
                 &app,
                 format!(
-                    "[replay] perf {target:?} {elapsed:.1}s — cap={c_captured} ({cap_fps:.1}fps) sub={c_submitted} ({sub_fps:.1}fps) dup={c_duplicated} pkts={c_packets} {}KB/s",
-                    bytes_per_sec / 1024
+                    "[replay] perf {target:?} {elapsed:.1}s — cap={c_captured} ({cap_fps:.1}fps) sub={c_submitted} ({sub_fps:.1}fps) dup={c_duplicated} pkts={c_packets} {}KB/s · buf={:.1}MB",
+                    bytes_per_sec / 1024,
+                    buf_bytes as f64 / (1024.0 * 1024.0),
                 ),
             );
+
+            // Dead-capture watchdog. If WGC produced zero new frames this
+            // window, increment the strike counter; otherwise reset it. Same
+            // for encoder output. Bail after 2 strikes so we can recover from
+            // exotic states without false-positive on a 30s alt-tab away.
+            if c_captured == 0 {
+                consecutive_zero_cap_windows = consecutive_zero_cap_windows.saturating_add(1);
+            } else {
+                consecutive_zero_cap_windows = 0;
+            }
+            if c_submitted > 0 && c_packets == 0 {
+                consecutive_zero_pkts_windows = consecutive_zero_pkts_windows.saturating_add(1);
+            } else {
+                consecutive_zero_pkts_windows = 0;
+            }
+            if consecutive_zero_cap_windows >= DEAD_CAPTURE_BAIL_AFTER_WINDOWS {
+                crate::diag(
+                    &app,
+                    format!(
+                        "[replay] worker {target:?} bailing — WGC capture produced zero new frames for {}s (likely fullscreen-exclusive switch or window state change WGC.Closed didn't fire for). Coordinator will respawn on next focus event.",
+                        DEAD_CAPTURE_BAIL_AFTER_WINDOWS * (ROLLUP_INTERVAL.as_secs() as u32)
+                    ),
+                );
+                break 'main;
+            }
+            if consecutive_zero_pkts_windows >= DEAD_CAPTURE_BAIL_AFTER_WINDOWS {
+                crate::diag(
+                    &app,
+                    format!(
+                        "[replay] worker {target:?} bailing — encoder accepted frames but produced zero output packets for {}s (MFT likely hung). Coordinator will respawn on next focus event.",
+                        DEAD_CAPTURE_BAIL_AFTER_WINDOWS * (ROLLUP_INTERVAL.as_secs() as u32)
+                    ),
+                );
+                break 'main;
+            }
+
             roll_start = now_inst;
             c_captured = 0;
             c_submitted = 0;
@@ -539,12 +638,13 @@ fn run_worker(
                         .name("clippy-replay-snapshot".into())
                         .spawn(move || {
                             let mut audio_tracks: Vec<AudioTrackSnapshot> = Vec::new();
-                            for (handle, name) in handles_for_thread.iter() {
+                            for (handle, name, device_id) in handles_for_thread.iter() {
                                 if let Ok(packets) = handle.snapshot() {
                                     audio_tracks.push(AudioTrackSnapshot {
                                         format: handle.format().clone(),
                                         packets,
                                         name: name.clone(),
+                                        device_id: device_id.clone(),
                                     });
                                 }
                             }
