@@ -88,11 +88,12 @@ fn pcm_demuxer_flag(format: &super::audio::AudioFormat) -> &'static str {
 
 /// Per-step timings for one `write_and_mux` invocation. Returned to the
 /// caller so it can emit a diag breakdown like
-/// `save · h264 130ms · pcm 22ms · ffmpeg 410ms · total 562ms` — pinpointing
-/// where a slow save spent its time.
+/// `save · h264 130ms · pcm 22ms · bsf 800ms · ffmpeg 410ms · total 1342ms` —
+/// pinpointing where a slow save spent its time.
 pub struct SaveTimings {
     pub h264_write_ms: u64,
     pub pcm_write_ms: u64,
+    pub bsf_pass_ms: u64,
     pub ffmpeg_mux_ms: u64,
     pub total_ms: u64,
     pub h264_bytes: u64,
@@ -142,9 +143,64 @@ pub async fn write_and_mux(
     }
     let pcm_write_ms = pcm_start.elapsed().as_millis() as u64;
 
+    // Pass 1: rewrite the H.264 SPS VUI timing in the raw stream BEFORE the
+    // main mux reads it. The AMD encoder MFT writes SPS that ffmpeg's H.264
+    // parser interprets as half-rate (e.g. 30fps for a 60fps capture); that
+    // locks the parser's packet PTS spacing to 1/30s during demux, doubling
+    // the saved-clip duration. An output bsf can't fix this — output bsfs
+    // run AFTER the muxer has already received packets with their (wrong)
+    // PTS. So we do a tiny pre-pass that rewrites the SPS in-place; the
+    // main mux below then sees a stream the parser interprets at full rate.
+    let h264_fixed_path = out_mp4.with_extension("fixed.h264");
+    let ffmpeg = ffmpeg_path()?;
+    let bsf_start = Instant::now();
+    let bsf_result = {
+        let mut cmd = tokio::process::Command::new(&ffmpeg);
+        cmd.args([
+            "-y",
+            "-i",
+            h264_path.to_string_lossy().as_ref(),
+            "-c",
+            "copy",
+            "-bsf:v",
+            &format!(
+                "h264_metadata=tick_rate={}:fixed_frame_rate_flag=1",
+                fps * 2
+            ),
+            "-f",
+            "h264",
+            h264_fixed_path.to_string_lossy().as_ref(),
+        ]);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        cmd.output().await
+    };
+    let bsf_pass_ms = bsf_start.elapsed().as_millis() as u64;
+    match &bsf_result {
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&h264_path).await;
+            for (path, _) in &audio_paths {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+            return Err(format!("ffmpeg sps-rewrite spawn ({ffmpeg:?}): {e}"));
+        }
+        Ok(out) if !out.status.success() => {
+            let _ = tokio::fs::remove_file(&h264_path).await;
+            let _ = tokio::fs::remove_file(&h264_fixed_path).await;
+            for (path, _) in &audio_paths {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+            return Err(format!(
+                "ffmpeg sps-rewrite failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        _ => {}
+    }
+
     // Build FFmpeg command:
     //   ffmpeg -y
-    //          -framerate FPS -f h264 -i video.h264
+    //          -framerate FPS -f h264 -i video.fixed.h264
     //          [-f f32le -ar SR -ac CH -i a0.pcm  ...for each track]
     //          -c:v copy -c:a aac -b:a 192k
     //          -map 0:v [-map 1:a -map 2:a ...]
@@ -156,7 +212,7 @@ pub async fn write_and_mux(
     args.push("-f".into());
     args.push("h264".into());
     args.push("-i".into());
-    args.push(h264_path.to_string_lossy().into_owned());
+    args.push(h264_fixed_path.to_string_lossy().into_owned());
 
     for (path, track) in &audio_paths {
         args.push("-f".into());
@@ -171,24 +227,6 @@ pub async fn write_and_mux(
 
     args.push("-c:v".into());
     args.push("copy".into());
-    // Rewrite the H.264 SPS VUI timing during the mux so the output container
-    // reports the correct frame rate. The AMD encoder MFT was writing VUI
-    // timing that ffmpeg's h264 demuxer interpreted as half-rate (60fps source
-    // → 30fps file, doubling apparent duration). The h264_metadata bitstream
-    // filter overwrites the SPS in-place — no re-encode, ~no extra cost — so
-    // the muxer's derived frame rate is deterministic regardless of what the
-    // encoder MFT chose to emit.
-    //   frame_rate per H.264 spec = time_scale / (2 * num_units_in_tick)
-    //                             = 120 / (2 * 1) = 60
-    args.push("-bsf:v".into());
-    args.push(format!(
-        "h264_metadata=time_scale={}:num_units_in_tick=1:fixed_frame_rate_flag=1",
-        fps * 2
-    ));
-    // Belt-and-suspenders: also force the output stream's frame rate flag so
-    // the MP4 muxer's tbr is set explicitly.
-    args.push("-r".into());
-    args.push(fps.to_string());
     args.push("-map".into());
     args.push("0:v".into());
 
@@ -211,7 +249,6 @@ pub async fn write_and_mux(
 
     args.push(out_mp4.to_string_lossy().into_owned());
 
-    let ffmpeg = ffmpeg_path()?;
     let mut cmd = tokio::process::Command::new(&ffmpeg);
     cmd.args(&args);
     // Suppress the flash-of-console-window when ffmpeg launches mid-game.
@@ -225,6 +262,7 @@ pub async fn write_and_mux(
 
     // Best-effort cleanup regardless of mux outcome.
     let _ = tokio::fs::remove_file(&h264_path).await;
+    let _ = tokio::fs::remove_file(&h264_fixed_path).await;
     for (path, _) in &audio_paths {
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -239,6 +277,7 @@ pub async fn write_and_mux(
     Ok(SaveTimings {
         h264_write_ms,
         pcm_write_ms,
+        bsf_pass_ms,
         ffmpeg_mux_ms,
         total_ms: total_start.elapsed().as_millis() as u64,
         h264_bytes,

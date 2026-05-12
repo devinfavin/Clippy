@@ -639,11 +639,12 @@ async fn finish_save(
     crate::diag(
         app,
         format!(
-            "[replay] save · h264 {}ms ({:.1}MB) · pcm {}ms ({:.1}MB) · ffmpeg {}ms · total {}ms",
+            "[replay] save · h264 {}ms ({:.1}MB) · pcm {}ms ({:.1}MB) · bsf {}ms · ffmpeg {}ms · total {}ms",
             timings.h264_write_ms,
             timings.h264_bytes as f64 / (1024.0 * 1024.0),
             timings.pcm_write_ms,
             timings.pcm_bytes as f64 / (1024.0 * 1024.0),
+            timings.bsf_pass_ms,
             timings.ffmpeg_mux_ms,
             timings.total_ms,
         ),
