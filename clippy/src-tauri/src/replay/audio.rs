@@ -351,7 +351,36 @@ mod windows_impl {
         let mut logged_get_buffer_err = false;
 
         'main: loop {
-            // Process commands.
+            // Wall-clock-driven trim. Runs every iteration so an idle WASAPI
+            // endpoint can't strand pre-idle packets in the buffer past their
+            // retention window. Previously the trim only ran inside the drain
+            // loop below — for endpoints whose render path goes dormant (e.g.
+            // Sonar virtual outputs when nothing's routing through them,
+            // observed delivering a single burst then no packets for hours),
+            // the trim never fired and a save would surface audio from the
+            // last burst regardless of how long ago it played.
+            //
+            // Cutoff is `now - duration_pts` of wall-clock time. After a
+            // prolonged silence the buffer correctly empties; the save then
+            // reports the track as "dropped (no captured packets)" rather
+            // than splicing in hours-old audio at the start of the clip.
+            {
+                let now_pts = epoch.elapsed().as_nanos() as i64 / 100;
+                let cutoff_pts = now_pts - duration_pts;
+                while let Some(front) = buffer.front() {
+                    if front.pts < cutoff_pts || current_bytes > buffer_byte_cap {
+                        let removed = buffer.pop_front().unwrap();
+                        current_bytes = current_bytes.saturating_sub(removed.data.len());
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            // Process commands. The Snapshot reply uses the buffer state
+            // produced by the trim above — so a snapshot taken after a long
+            // idle window correctly reports zero packets instead of leaking
+            // stale audio into the saved clip.
             loop {
                 match cmd_rx.try_recv() {
                     Ok(AudioCmd::Stop) => break 'main,
@@ -435,17 +464,12 @@ mod windows_impl {
                     data: payload,
                     pts: pts_now,
                 });
-
-                // Trim by duration AND by byte cap (defensive).
-                let cutoff_pts = pts_now - duration_pts;
-                while let Some(front) = buffer.front() {
-                    if front.pts < cutoff_pts || current_bytes > buffer_byte_cap {
-                        let removed = buffer.pop_front().unwrap();
-                        current_bytes = current_bytes.saturating_sub(removed.data.len());
-                    } else {
-                        break;
-                    }
-                }
+                // Trim moved to the wall-clock-driven block at the top of
+                // 'main so it runs even when WASAPI delivers no packets for
+                // long stretches. The byte-cap defense is part of that same
+                // outer trim — at a 5 ms outer-loop cadence it reacts to a
+                // burst within one tick, plenty fast for the cap to bound
+                // RAM during a flood.
             }
 
             thread::sleep(Duration::from_millis(5));
