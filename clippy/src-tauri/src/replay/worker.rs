@@ -75,6 +75,11 @@ pub struct WorkerPerf {
     pub encoded_bytes: u64,
     /// Wall-clock UTC epoch (seconds) when this rollup was published.
     pub published_epoch: u64,
+    /// Process working-set RAM in MB at the moment this rollup was published.
+    /// Process-wide (not per-worker), so every worker's snapshot reports the
+    /// same number — denormalized so the get_diagnostics row can show it
+    /// without coordinating across the workers map.
+    pub rss_mb: u64,
 }
 
 pub struct WorkerHandle {
@@ -206,6 +211,31 @@ impl Drop for WorkerHandle {
             let _ = h.join();
         }
     }
+}
+
+/// Current process working-set in MB via Win32 `GetProcessMemoryInfo`. Used
+/// in the perf rollup so the diag log shows process-wide RSS alongside the
+/// per-worker ringbuffer size — lets us tell "leak inside the buffer" apart
+/// from "leak outside the buffer" without external tools. Returns 0 on any
+/// failure (the rollup line just shows `rss=0MB` then; non-fatal).
+#[cfg(windows)]
+fn current_rss_mb() -> u64 {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    unsafe {
+        let mut counters: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        let cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        if GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, cb).is_ok() {
+            (counters.WorkingSetSize as u64) / (1024 * 1024)
+        } else {
+            0
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn current_rss_mb() -> u64 {
+    0
 }
 
 /// Best-effort string extraction from a panic payload (works for both
@@ -549,6 +579,7 @@ fn run_worker(
             let bytes_per_sec = (c_bytes as f32 / elapsed) as u64;
             let cap_fps = c_captured as f32 / elapsed;
             let sub_fps = c_submitted as f32 / elapsed;
+            let rss_mb = current_rss_mb();
             let snap = WorkerPerf {
                 window_secs: elapsed,
                 captured_frames: c_captured,
@@ -560,6 +591,7 @@ fn run_worker(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
+                rss_mb,
             };
             if let Ok(mut p) = perf.lock() {
                 *p = snap;
@@ -567,12 +599,15 @@ fn run_worker(
             // Buffer size in MB so RAM growth is visible live. The video
             // buffer is the dominant resident cost (audio buffers are
             // ~2 orders of magnitude smaller); summing here is cheap (just
-            // walks the VecDeque counting Arc<[u8]> sizes).
+            // walks the VecDeque counting Arc<[u8]> sizes). Process RSS is
+            // included alongside so a leak outside either ringbuffer (most
+            // likely WGC frame-pool retention or audio-thread allocator
+            // churn) shows up directly in the log slope.
             let buf_bytes: u64 = buffer.iter().map(|p| p.data.len() as u64).sum();
             crate::diag(
                 &app,
                 format!(
-                    "[replay] perf {target:?} {elapsed:.1}s — cap={c_captured} ({cap_fps:.1}fps) sub={c_submitted} ({sub_fps:.1}fps) dup={c_duplicated} pkts={c_packets} {}KB/s · buf={:.1}MB",
+                    "[replay] perf {target:?} {elapsed:.1}s — cap={c_captured} ({cap_fps:.1}fps) sub={c_submitted} ({sub_fps:.1}fps) dup={c_duplicated} pkts={c_packets} {}KB/s · buf={:.1}MB · rss={rss_mb}MB",
                     bytes_per_sec / 1024,
                     buf_bytes as f64 / (1024.0 * 1024.0),
                 ),

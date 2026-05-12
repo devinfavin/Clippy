@@ -3,6 +3,7 @@ pub mod buffer;
 #[cfg(windows)]
 pub mod process_loopback;
 pub mod capture;
+#[cfg(feature = "poc")]
 pub mod convert;
 pub mod coordinator;
 pub mod encoder;
@@ -588,10 +589,11 @@ async fn finish_save(
         .enumerate()
         .filter(|(_, t)| t.packets.is_empty())
         .map(|(i, t)| {
-            if t.name.is_empty() {
+            let safe = save::truncate_for_metadata(&t.name, 64);
+            if safe.is_empty() {
                 format!("track {i}")
             } else {
-                format!("\"{}\" (track {i})", t.name)
+                format!("\"{safe}\" (track {i})")
             }
         })
         .collect();
@@ -615,10 +617,11 @@ async fn finish_save(
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let label = if t.name.is_empty() {
+            let safe = save::truncate_for_metadata(&t.name, 64);
+            let label = if safe.is_empty() {
                 format!("a{i}")
             } else {
-                format!("a{i}=\"{}\"", t.name)
+                format!("a{i}=\"{safe}\"")
             };
             format!("{label}:{}pkts", t.packets.len())
         })
@@ -632,23 +635,60 @@ async fn finish_save(
         ),
     );
 
-    let timings = save::write_and_mux(&snap.packets, &snap.audio_tracks, snap.fps, &out).await?;
+    let timings = save::write_and_mux(
+        &snap.packets,
+        &snap.audio_tracks,
+        snap.fps,
+        &snap.encoder_name,
+        &out,
+    )
+    .await?;
 
     // Save timing breakdown: lets us see *where* a slow save is slow
-    // (snapshot copy / disk write / ffmpeg mux) without guessing.
+    // (snapshot copy / disk write / ffmpeg mux / post-probe) without guessing.
     crate::diag(
         app,
         format!(
-            "[replay] save · h264 {}ms ({:.1}MB) · pcm {}ms ({:.1}MB) · bsf {}ms · ffmpeg {}ms · total {}ms",
+            "[replay] save · h264 {}ms ({:.1}MB) · pcm {}ms ({:.1}MB) · bsf {}ms · ffmpeg {}ms · probe {}ms · total {}ms",
             timings.h264_write_ms,
             timings.h264_bytes as f64 / (1024.0 * 1024.0),
             timings.pcm_write_ms,
             timings.pcm_bytes as f64 / (1024.0 * 1024.0),
             timings.bsf_pass_ms,
             timings.ffmpeg_mux_ms,
+            timings.probe_ms,
             timings.total_ms,
         ),
     );
+
+    // Post-save sanity check: if the muxed output's video frame rate doesn't
+    // match what the worker produced, something between the encoder MFT and
+    // the mux mangled timing. The bsf gate (needs_bsf_pass) is the most
+    // likely culprit if it ever fires — a new vendor with the AMD-style SPS
+    // bug we didn't know about would show up here as a fps mismatch.
+    if let Some((probed_fps, probed_dur)) = timings.probed {
+        let expected_fps = snap.fps as f64;
+        let fps_delta = (probed_fps - expected_fps).abs();
+        if fps_delta > 0.5 {
+            crate::diag(
+                app,
+                format!(
+                    "[replay] save · ⚠ fps mismatch — expected {}fps, probed {:.2}fps (Δ={:.2}) · dur={:.2}s · encoder=\"{}\" · please report",
+                    snap.fps, probed_fps, fps_delta, probed_dur, snap.encoder_name,
+                ),
+            );
+        } else {
+            crate::diag(
+                app,
+                format!(
+                    "[replay] save · verified {:.2}fps · dur={:.2}s",
+                    probed_fps, probed_dur,
+                ),
+            );
+        }
+    } else {
+        crate::diag(app, "[replay] save · probe skipped or failed (clip should still be playable)");
+    }
 
     Ok(ReplaySaveResult {
         path: out.to_string_lossy().into_owned(),
@@ -825,7 +865,7 @@ pub fn replay_get_system_info() -> sysinfo::SystemInfo {
 ///   await window.__TAURI__.core.invoke('replay_poc_test')
 ///
 /// Open the returned path in Clippy to verify the video plays.
-#[cfg(debug_assertions)]
+#[cfg(feature = "poc")]
 #[tauri::command]
 pub async fn replay_poc_test() -> Result<String, String> {
     // All COM / D3D11 / MF objects must live and die on a single thread.
@@ -881,7 +921,7 @@ pub async fn replay_poc_test() -> Result<String, String> {
 
 /// Synchronous capture + encode. Runs inside `spawn_blocking` so COM objects
 /// stay on one thread for their entire lifetime.
-#[cfg(all(debug_assertions, windows))]
+#[cfg(all(feature = "poc", windows))]
 fn poc_capture_and_encode() -> Result<(Vec<u8>, usize, u32, u32), String> {
     use capture::windows_impl::*;
     use convert::windows_impl::*;
@@ -968,7 +1008,7 @@ fn poc_capture_and_encode() -> Result<(Vec<u8>, usize, u32, u32), String> {
     Ok((all_h264, frame_count, enc_width, enc_height))
 }
 
-#[cfg(all(debug_assertions, not(windows)))]
+#[cfg(all(feature = "poc", not(windows)))]
 fn poc_capture_and_encode() -> Result<(Vec<u8>, usize, u32, u32), String> {
     Err("replay buffer is Windows-only".into())
 }
@@ -979,7 +1019,7 @@ fn poc_capture_and_encode() -> Result<(Vec<u8>, usize, u32, u32), String> {
 /// while still using the software encoder for the encode step. NV12 is read
 /// back from GPU just for the encoder hand-off — once Stage B lands, the
 /// readback goes away entirely. Output should look identical to the CPU PoC.
-#[cfg(debug_assertions)]
+#[cfg(feature = "poc")]
 #[tauri::command]
 pub async fn replay_poc_gpu_convert() -> Result<String, String> {
     let (h264_bytes, frame_count, width, height) =
@@ -1027,7 +1067,7 @@ pub async fn replay_poc_gpu_convert() -> Result<String, String> {
     ))
 }
 
-#[cfg(all(debug_assertions, windows))]
+#[cfg(all(feature = "poc", windows))]
 fn poc_gpu_convert_and_encode() -> Result<(Vec<u8>, usize, u32, u32), String> {
     use capture::windows_impl::*;
     use encoder::windows_impl::*;
@@ -1122,7 +1162,7 @@ fn poc_gpu_convert_and_encode() -> Result<(Vec<u8>, usize, u32, u32), String> {
     Ok((all_h264, frame_count, enc_width, enc_height))
 }
 
-#[cfg(all(debug_assertions, not(windows)))]
+#[cfg(all(feature = "poc", not(windows)))]
 fn poc_gpu_convert_and_encode() -> Result<(Vec<u8>, usize, u32, u32), String> {
     Err("Windows only".into())
 }
@@ -1131,7 +1171,7 @@ fn poc_gpu_convert_and_encode() -> Result<(Vec<u8>, usize, u32, u32), String> {
 
 /// Stage B PoC: production path. WGC → D3D11 BGRA → video processor NV12 →
 /// async hardware H.264 encoder via DXGI surface buffer. Zero CPU readback.
-#[cfg(debug_assertions)]
+#[cfg(feature = "poc")]
 #[tauri::command]
 pub async fn replay_poc_gpu_full() -> Result<String, String> {
     let (h264_bytes, frame_count, width, height, encoder_name) =
@@ -1179,7 +1219,7 @@ pub async fn replay_poc_gpu_full() -> Result<String, String> {
     ))
 }
 
-#[cfg(all(debug_assertions, windows))]
+#[cfg(all(feature = "poc", windows))]
 fn poc_gpu_full() -> Result<(Vec<u8>, usize, u32, u32, String), String> {
     use capture::windows_impl::*;
     use encoder::windows_impl::*;
@@ -1329,7 +1369,7 @@ fn poc_gpu_full() -> Result<(Vec<u8>, usize, u32, u32, String), String> {
     Ok((all_h264, frame_count, enc_width, enc_height, encoder_name))
 }
 
-#[cfg(all(debug_assertions, not(windows)))]
+#[cfg(all(feature = "poc", not(windows)))]
 fn poc_gpu_full() -> Result<(Vec<u8>, usize, u32, u32, String), String> {
     Err("Windows only".into())
 }

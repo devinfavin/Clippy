@@ -159,6 +159,14 @@ fn main() {
     let r = run("process_loopback_activation", false, pretty, check_process_loopback);
     tally(false, r, (&mut required_total, &mut required_passed, &mut optional_total, &mut optional_passed));
 
+    // 11. Save-path integration: synthesize a 5s H.264 fixture via the
+    //     bundled ffmpeg, feed it through save::write_and_mux, then probe
+    //     the result. Catches the v0.2.3-style class of bug where an
+    //     ffmpeg-arg rename slips past unit tests because nothing actually
+    //     drives the production save pipeline end-to-end.
+    let r = run("save_path", true, pretty, check_save_path);
+    tally(true, r, (&mut required_total, &mut required_passed, &mut optional_total, &mut optional_passed));
+
     // Tray icon construction requires a live Tauri AppHandle, which a
     // standalone binary can't synthesize. Marked skip so the JSON output
     // still records that we considered it.
@@ -390,4 +398,111 @@ fn check_process_loopback() -> Result<String, String> {
              in Replay settings and saving a clip."
         )),
     }
+}
+
+#[cfg(windows)]
+fn check_save_path() -> Result<String, String> {
+    use clippy_lib::replay::buffer::VideoPacket;
+    use clippy_lib::replay::save;
+    use std::sync::Arc;
+
+    // Resolve the bundled ffmpeg sidecar — same path resolver the production
+    // save uses, so this also exercises the prod/dev layout lookup.
+    let ffmpeg = save::ffmpeg_path().map_err(|e| format!("resolve ffmpeg: {e}"))?;
+    if !ffmpeg.exists() {
+        return Err(format!(
+            "ffmpeg sidecar not found at {} — did you run the binaries download step?",
+            ffmpeg.display()
+        ));
+    }
+
+    // Stage 1: generate a 5-second H.264 fixture stream. libx264 with a
+    // synthesized solid-color source — no capture hardware, no environment
+    // dependencies. ultrafast preset keeps the fixture build under a second.
+    let temp = std::env::temp_dir().join("clippy-self-test");
+    std::fs::create_dir_all(&temp).map_err(|e| format!("create temp dir: {e}"))?;
+    let fixture_h264 = temp.join("save-path-fixture.h264");
+    let _ = std::fs::remove_file(&fixture_h264);
+    let out = std::process::Command::new(&ffmpeg)
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:duration=5:rate=60:size=320x240",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-f",
+            "h264",
+            fixture_h264.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .map_err(|e| format!("ffmpeg fixture spawn: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "fixture generation failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let h264_bytes = std::fs::read(&fixture_h264).map_err(|e| format!("read fixture: {e}"))?;
+    let h264_size = h264_bytes.len();
+    if h264_size == 0 {
+        return Err("fixture was generated but is empty".into());
+    }
+
+    // Wrap as a single VideoPacket. write_h264_raw writes the raw bytes
+    // contiguously — it doesn't parse NAL boundaries, so one big packet is
+    // fine. PTS / is_keyframe are unused downstream of write_h264_raw.
+    let packets = vec![VideoPacket {
+        data: Arc::from(h264_bytes.into_boxed_slice()),
+        pts: 0,
+        is_keyframe: true,
+    }];
+
+    // Stage 2: mux to MP4 via the production save pipeline. encoder_name
+    // "libx264" means the bsf gate should correctly skip the AMD-specific
+    // SPS rewrite. That's part of what this test verifies — without the
+    // skip, the assertion at the end catches a mis-fired gate.
+    let out_mp4 = temp.join("save-path-output.mp4");
+    let _ = std::fs::remove_file(&out_mp4);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("build tokio runtime: {e}"))?;
+    let timings = rt
+        .block_on(save::write_and_mux(&packets, &[], 60, "libx264", &out_mp4))
+        .map_err(|e| format!("write_and_mux: {e}"))?;
+
+    // Stage 3: assertions.
+    let (fps, dur) = timings
+        .probed
+        .ok_or("post-save ffprobe did not return a result (probe sidecar missing?)")?;
+    if (fps - 60.0).abs() > 0.5 {
+        return Err(format!(
+            "muxed fps {fps:.2} differs from expected 60.0 by > 0.5"
+        ));
+    }
+    if !(4.5..=5.5).contains(&dur) {
+        return Err(format!(
+            "muxed duration {dur:.2}s outside [4.5, 5.5]"
+        ));
+    }
+    // bsf gate correctness: libx264 must NOT trigger the pre-pass.
+    if timings.bsf_pass_ms != 0 {
+        return Err(format!(
+            "bsf gate misfire — expected skip on libx264, got {}ms",
+            timings.bsf_pass_ms
+        ));
+    }
+
+    // Cleanup (best-effort; temp dir survives for inspection on failure).
+    let _ = std::fs::remove_file(&fixture_h264);
+    let _ = std::fs::remove_file(&out_mp4);
+
+    Ok(format!(
+        "fixture {}B → MP4 ({:.2}fps, {:.2}s, bsf=0ms, mux={}ms, probe={}ms)",
+        h264_size, fps, dur, timings.ffmpeg_mux_ms, timings.probe_ms
+    ))
 }

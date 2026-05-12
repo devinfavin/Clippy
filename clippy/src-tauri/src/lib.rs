@@ -3464,7 +3464,7 @@ fn get_diagnostics(app: AppHandle) -> String {
                 format!("rollup at {} UTC", fmt_utc(p.published_epoch))
             };
             out.push_str(&format!(
-                "· {label} — {w}x{h}@{fps} via \"{enc}\"\n  window={secs:.1}s cap={cap}({cap_fps:.1}fps) sub={sub}({sub_fps:.1}fps) dup={dup} pkts={pkts} bitrate≈{kbps}kbps · {age}\n",
+                "· {label} — {w}x{h}@{fps} via \"{enc}\"\n  window={secs:.1}s cap={cap}({cap_fps:.1}fps) sub={sub}({sub_fps:.1}fps) dup={dup} pkts={pkts} bitrate≈{kbps}kbps · rss={rss}MB · {age}\n",
                 label = row.label,
                 w = row.enc_width,
                 h = row.enc_height,
@@ -3474,6 +3474,7 @@ fn get_diagnostics(app: AppHandle) -> String {
                 sub = p.submitted_frames,
                 dup = p.duplicated_frames,
                 pkts = p.encoded_packets,
+                rss = p.rss_mb,
             ));
         }
     }
@@ -3701,13 +3702,15 @@ pub fn run() {
             replay_set_save_hotkey,
             set_hide_on_close,
             set_diag_verbose,
-            // PoC pipeline-validation commands are dev-only — gated to
-            // debug builds so the release binary doesn't expose them.
-            #[cfg(debug_assertions)]
+            // PoC pipeline-validation commands are dev-only — gated behind
+            // the `poc` cargo feature so a default release build doesn't
+            // expose them. Build `cargo build --features poc` (or invoke
+            // the matching `pnpm tauri dev` recipe) to enable them.
+            #[cfg(feature = "poc")]
             replay::replay_poc_test,
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "poc")]
             replay::replay_poc_gpu_convert,
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "poc")]
             replay::replay_poc_gpu_full
         ])
         .build(tauri::generate_context!())

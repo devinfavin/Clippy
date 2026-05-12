@@ -50,6 +50,12 @@ pub struct SaveSnapshot {
     pub audio_tracks: Vec<AudioTrackSnapshot>,
     pub fps: u32,
     pub window_title: String,
+    /// Friendly name of the encoder MFT the worker is using (e.g.
+    /// "NVIDIA H.264 Encoder MFT", "AMDh264Encoder"). Consumed by the save
+    /// pipeline to decide whether the AMD-specific SPS-rewrite pre-pass is
+    /// needed. Empty when MF didn't expose a friendly name — the save then
+    /// runs the pre-pass defensively.
+    pub encoder_name: String,
 }
 
 /// Per-worker perf snapshot exported via `Coordinator::perf_snapshot`.
@@ -400,6 +406,7 @@ fn run_per_window(
                         audio_tracks: s.audio_tracks,
                         fps: entry.handle.fps,
                         window_title: entry.title.clone(),
+                        encoder_name: entry.handle.encoder_name.clone(),
                     }),
                     None => Err("no game has been captured this session — focus a game in the allowlist first".into()),
                 };
@@ -564,6 +571,7 @@ fn run_monitor(
                     audio_tracks: s.audio_tracks,
                     fps: worker.fps,
                     window_title: label.clone(),
+                    encoder_name: worker.encoder_name.clone(),
                 });
                 let _ = reply.send(result);
             }

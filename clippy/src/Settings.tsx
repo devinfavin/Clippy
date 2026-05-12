@@ -13,7 +13,7 @@ import {
 } from "./keybinds";
 import type { UpdateState } from "./useUpdater";
 
-const APP_VERSION = "0.2.3";
+const APP_VERSION = "0.3.0";
 
 // ---------- Tab definitions ----------
 

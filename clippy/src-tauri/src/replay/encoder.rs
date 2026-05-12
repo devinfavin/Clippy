@@ -15,11 +15,10 @@ pub mod windows_impl {
                 IMFTransform, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer,
                 MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video,
                 MFShutdown, MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
-                MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN,
-                MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-                MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+                MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
+                MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
                 MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_REGISTER_TYPE_INFO,
-                MFTEnumEx, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
+                MFTEnumEx, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
                 MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
                 MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_VERSION,
                 MFSTARTUP_FULL, MFVideoFormat_H264, MFVideoFormat_NV12,
@@ -42,6 +41,7 @@ pub mod windows_impl {
     /// Pack numerator+denominator into the u64 format MF_MT_FRAME_RATE expects.
     fn pack_ratio(num: u32, den: u32) -> u64 { ((num as u64) << 32) | den as u64 }
 
+    #[cfg(feature = "poc")]
     pub fn create_h264_encoder(
         d3d_device: &ID3D11Device,
         width: u32,
@@ -50,6 +50,7 @@ pub mod windows_impl {
         fps_num: u32,
         fps_den: u32,
     ) -> Result<IMFTransform> {
+        use windows::Win32::Media::MediaFoundation::MFT_MESSAGE_COMMAND_FLUSH;
         let (encoder, _name) = find_hardware_encoder().or_else(|_| find_software_encoder())?;
 
         let input_type: IMFMediaType = unsafe { MFCreateMediaType()? };
@@ -162,6 +163,7 @@ pub mod windows_impl {
     }
 
     /// Submit one D3D11 texture to the encoder as an input sample.
+    #[cfg(feature = "poc")]
     pub fn submit_texture_frame(
         encoder: &IMFTransform,
         texture: &ID3D11Texture2D,
@@ -183,10 +185,12 @@ pub mod windows_impl {
 
     /// Drain all available encoded packets from the encoder.
     /// Returns `(data, pts, is_keyframe)` per packet.
+    #[cfg(feature = "poc")]
     pub fn drain_encoder(encoder: &IMFTransform) -> Result<Vec<(Vec<u8>, i64, bool)>> {
         use std::mem::ManuallyDrop;
         use windows::Win32::Media::MediaFoundation::{
             MFT_OUTPUT_STREAM_INFO, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+            MF_E_TRANSFORM_NEED_MORE_INPUT,
         };
 
         // Check whether the encoder allocates its own output samples.
@@ -222,7 +226,16 @@ pub mod windows_impl {
                 Ok(()) => {}
             }
 
-            if let Some(sample) = &*output_data[0].pSample {
+            // Same ManuallyDrop ownership transfer as in process_output_async
+            // — without this, every drained packet leaks its IMFSample +
+            // associated buffer. drain_encoder is only used by the PoC paths
+            // today, but the bug class is identical.
+            let sample_owned: Option<IMFSample> =
+                unsafe { ManuallyDrop::take(&mut output_data[0].pSample) };
+            let _events_owned: Option<windows::Win32::Media::MediaFoundation::IMFCollection> =
+                unsafe { ManuallyDrop::take(&mut output_data[0].pEvents) };
+
+            if let Some(sample) = sample_owned.as_ref() {
                 let pts = unsafe { sample.GetSampleTime()? };
                 let is_keyframe = unsafe {
                     sample
@@ -246,6 +259,7 @@ pub mod windows_impl {
 
     /// CPU-path encoder: no D3D11 device manager, accepts NV12 memory buffers.
     /// Used for Phase 1 validation only; Phase 2+ uses the GPU path.
+    #[cfg(feature = "poc")]
     pub fn create_h264_encoder_simple(
         width: u32,
         height: u32,
@@ -291,6 +305,7 @@ pub mod windows_impl {
     }
 
     /// Submit one NV12 frame as a CPU memory buffer.
+    #[cfg(feature = "poc")]
     pub fn submit_nv12_frame(
         encoder: &IMFTransform,
         nv12: &[u8],
@@ -316,7 +331,11 @@ pub mod windows_impl {
     }
 
     /// Signal end-of-stream and drain all remaining encoded packets.
+    #[cfg(feature = "poc")]
     pub fn flush_encoder(encoder: &IMFTransform) -> Result<Vec<(Vec<u8>, i64, bool)>> {
+        use windows::Win32::Media::MediaFoundation::{
+            MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+        };
         unsafe {
             let _ = encoder.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
             let _ = encoder.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
@@ -536,7 +555,20 @@ pub mod windows_impl {
 
         unsafe { encoder.ProcessOutput(0, &mut output_data, &mut status)? };
 
-        if let Some(sample) = &*output_data[0].pSample {
+        // MFT_OUTPUT_DATA_BUFFER uses ManuallyDrop on its IUnknown-typed
+        // fields because the Microsoft API contract hands ownership of the
+        // sample + events to the caller and windows-rs can't safely auto-
+        // drop them. We have to take ownership ourselves so their COM
+        // Release runs at end of scope. Without this, every encoded packet
+        // leaks its IMFSample, which holds the encoder-allocated output
+        // buffer (~115 KB at 1440x848@60 30Mbps = ~6.9 MB/s of RSS growth;
+        // measured 2026-05-12).
+        let sample_owned: Option<IMFSample> =
+            unsafe { ManuallyDrop::take(&mut output_data[0].pSample) };
+        let _events_owned: Option<windows::Win32::Media::MediaFoundation::IMFCollection> =
+            unsafe { ManuallyDrop::take(&mut output_data[0].pEvents) };
+
+        if let Some(sample) = sample_owned.as_ref() {
             let pts = unsafe { sample.GetSampleTime()? };
             let is_keyframe = unsafe {
                 sample
