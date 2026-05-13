@@ -230,7 +230,7 @@ pub async fn probe_keyframes(app: AppHandle, path: String) -> Result<Vec<f32>, S
             "-v", "error",
             "-select_streams", "v:0",
             "-skip_frame", "nokey",
-            "-show_entries", "frame=pkt_pts_time",
+            "-show_entries", "frame=pts_time",
             "-of", "csv=print_section=0",
             &path,
         ])
