@@ -3732,11 +3732,11 @@ pub fn run() {
             // expose them. Build `cargo build --features poc` (or invoke
             // the matching `pnpm tauri dev` recipe) to enable them.
             #[cfg(feature = "poc")]
-            replay::replay_poc_test,
+            replay::poc::replay_poc_test,
             #[cfg(feature = "poc")]
-            replay::replay_poc_gpu_convert,
+            replay::poc::replay_poc_gpu_convert,
             #[cfg(feature = "poc")]
-            replay::replay_poc_gpu_full
+            replay::poc::replay_poc_gpu_full
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
