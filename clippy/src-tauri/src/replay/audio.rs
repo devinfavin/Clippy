@@ -84,7 +84,7 @@ mod windows_impl {
                 .GetDefaultAudioEndpoint(eRender, eConsole)
                 .ok()
                 .and_then(|d| d.GetId().ok())
-                .map(|p| unsafe { pcwstr_to_string(p) })
+                .map(|p| pcwstr_to_string(p))
                 .unwrap_or_default();
 
             let collection = match enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
