@@ -24,9 +24,8 @@ clippy/src-tauri/binaries/
 # Internal planning docs
 PROJECT.md
 
-# Local Claude state
+# Local Claude state (session planning docs, scheduled-task locks, etc.)
 .claude/
-.claude-handoff.md
 
 # Local testing notes (not for distribution)
 TESTING.md
