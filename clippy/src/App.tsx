@@ -48,7 +48,7 @@ import {
   SETTINGS_TABS,
   StorageSettingsTab,
   type SettingsTabId,
-} from "./Settings";
+} from "./settings";
 import { ExportModal } from "./ExportModal";
 import { CropOverlay } from "./CropOverlay";
 import { CropIndicator } from "./CropIndicator";
