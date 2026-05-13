@@ -378,13 +378,28 @@ pub async fn write_and_mux(
 
     // Build FFmpeg command:
     //   ffmpeg -y
-    //          -framerate EFFECTIVE_FPS -f h264 -i video.fixed.h264
+    //          -r EFFECTIVE_FPS -framerate EFFECTIVE_FPS -f h264 -i video.fixed.h264
     //          [-f f32le -ar SR -ac CH -i a0.pcm  ...for each track]
     //          -c:v copy -c:a aac -b:a 192k
     //          -map 0:v [-map 1:a -map 2:a ...]
     //          out.mp4
+    //
+    // Both `-r` and `-framerate` here are INPUT options (placed before -i)
+    // for the H.264 raw demuxer. Belt and suspenders:
+    //   - `-framerate` is the H.264 raw demuxer's preferred rate setting,
+    //     used when the bitstream has no SPS-VUI timing info.
+    //   - `-r` as an input option additionally instructs ffmpeg to IGNORE
+    //     timestamps stored in the file and generate at constant rate.
+    //     The bsf pass for AMD rewrites SPS to declare tick_rate=fps*2,
+    //     which the raw demuxer would otherwise treat as authoritative —
+    //     winning over `-framerate` and pinning the output to the bsf-
+    //     declared rate (observed: code requested 55.88fps but ffprobe
+    //     reported 60.00fps, duration 55.82s instead of 60s). `-r` is
+    //     documented to override that.
     let mut args: Vec<String> = Vec::new();
     args.push("-y".into());
+    args.push("-r".into());
+    args.push(format!("{:.4}", effective_fps));
     args.push("-framerate".into());
     args.push(format!("{:.4}", effective_fps));
     args.push("-f".into());
