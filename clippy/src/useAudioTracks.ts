@@ -101,31 +101,43 @@ export function useAudioTracks(opts: {
     videoElement.muted = true;
     const cleanups: Array<() => void> = [];
 
-    for (const t of tracks) {
-      invoke<string>("extract_track", { srcPath, trackIndex: t.index })
-        .then((url) => {
-          if (cancelled) return;
+    // Single batched extract = one ffmpeg read pass over the source instead of
+    // N parallel stream-copy processes seek-thrashing the same HDD. Cached
+    // tracks short-circuit inside the command. Per-track failures come back
+    // as result entries with `url: null`, so the others still play.
+    const trackIndices = tracks.map((t) => t.index);
+    invoke<Array<{ track_index: number; url: string | null; error: string | null }>>(
+      "extract_tracks_batch",
+      { srcPath, trackIndices },
+    )
+      .then((results) => {
+        if (cancelled) return;
+        for (const r of results) {
+          if (!r.url) {
+            console.warn(`[clippy] extract_tracks_batch track ${r.track_index} failed:`, r.error);
+            continue;
+          }
           const audio = new Audio();
           audio.crossOrigin = "anonymous";
           audio.preload = "auto";
-          audio.src = url;
-          audios.set(t.index, audio);
+          audio.src = r.url;
+          audios.set(r.track_index, audio);
 
           const src = ctx!.createMediaElementSource(audio);
           const gain = ctx!.createGain();
-          const m = mixRef.current[t.index];
+          const m = mixRef.current[r.track_index];
           gain.gain.value = m ? (m.muted ? 0 : m.volume) : 1;
           src.connect(gain).connect(ctx!.destination);
-          sources.set(t.index, src);
-          gains.set(t.index, gain);
+          sources.set(r.track_index, src);
+          gains.set(r.track_index, gain);
 
           audio.currentTime = videoElement.currentTime;
           if (!videoElement.paused) audio.play().catch(() => {});
-        })
-        .catch((err) => {
-          console.warn(`[clippy] extract_track ${t.index} failed:`, err);
-        });
-    }
+        }
+      })
+      .catch((err) => {
+        console.warn(`[clippy] extract_tracks_batch failed:`, err);
+      });
 
     const syncTime = () => {
       const vt = videoElement.currentTime;

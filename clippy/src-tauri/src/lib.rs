@@ -273,6 +273,7 @@ pub fn run() {
             project::load_project,
             project::save_project,
             extract::extract_track,
+            extract::extract_tracks_batch,
             diag::get_diagnostics,
             replay::commands::get_replay_status,
             replay::commands::replay_start,
