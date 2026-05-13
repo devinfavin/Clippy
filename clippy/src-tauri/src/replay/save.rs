@@ -426,11 +426,25 @@ pub async fn write_and_mux(
     if !audio_paths.is_empty() {
         args.push("-c:a".into());
         args.push("aac".into());
-        args.push("-b:a".into());
-        args.push("192k".into());
+        // No global -b:a — bitrate is set per-stream below, scaled to the
+        // source's channel count. A flat 192k worked OK when every WASAPI
+        // endpoint was 2-channel, but Sonar (and other software mixers)
+        // expose 8-channel 7.1 virtual outputs by default. At 8 channels,
+        // 192k = 24 kbps/channel — well below AAC's transparency threshold
+        // and audibly "compressed / nulled" vs the same source captured by
+        // Sonar's own recorder.
         for (i, (_, track)) in audio_paths.iter().enumerate() {
             args.push("-map".into());
             args.push(format!("{}:a", i + 1));
+            // Per-stream bitrate: max(192k, 96k * channels). Floors at 192k
+            // for stereo (unchanged from prior default); scales up cleanly
+            // for surround (576k for 5.1, 768k for 7.1). 96k/ch is enough
+            // headroom for the native ffmpeg AAC encoder to stay clean
+            // without burning bitrate the video could use instead.
+            let bitrate_kbps =
+                std::cmp::max(192_u32, 96_u32 * track.format.channels as u32);
+            args.push(format!("-b:a:{i}"));
+            args.push(format!("{}k", bitrate_kbps));
             // Embed the track's friendly name as MP4 stream metadata so the
             // editor's mixer surfaces it instead of "Track 1 / Track 2".
             // Sanitize defensively — name flows from the frontend rename UI
