@@ -414,6 +414,23 @@ pub async fn write_and_mux(
         args.push(track.format.sample_rate.to_string());
         args.push("-ac".into());
         args.push(track.format.channels.to_string());
+        // Tell ffmpeg the channel layout for surround inputs. Without this,
+        // the AAC encoder writes a bitstream that ffmpeg's own decoder
+        // later flags as "incorrectly encoded 7.1 channel layout" (the
+        // encoder defaulted to 7.1(wide) but the source was standard
+        // 7.1 = FL FR FC LFE BL BR SL SR). Players that don't auto-recover
+        // would route the surround channels incorrectly.
+        let layout: Option<&str> = match track.format.channels {
+            1 => Some("mono"),
+            2 => Some("stereo"),
+            6 => Some("5.1"),
+            8 => Some("7.1"),
+            _ => None,
+        };
+        if let Some(l) = layout {
+            args.push("-channel_layout".into());
+            args.push(l.into());
+        }
         args.push("-i".into());
         args.push(path.to_string_lossy().into_owned());
     }

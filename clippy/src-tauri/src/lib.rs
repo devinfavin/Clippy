@@ -1154,8 +1154,13 @@ async fn probe_video_inner(app: &AppHandle, path: &str) -> Result<VideoInfo, Str
         let channels = s.get("channels").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let layout = s.get("channel_layout").and_then(|v| v.as_str()).map(String::from);
         let tags = s.get("tags");
+        // Read `title` first (MKV, NUT, other containers — standard key),
+        // fall back to `name` (ffmpeg's MP4 mov muxer routes per-stream
+        // -metadata title=X into the track's `udta` atom under the key
+        // `name`, which is what ffprobe surfaces for MP4 saves coming
+        // out of Clippy's replay pipeline).
         let title = tags
-            .and_then(|t| t.get("title"))
+            .and_then(|t| t.get("title").or_else(|| t.get("name")))
             .and_then(|v| v.as_str())
             .map(String::from);
         let language = tags
