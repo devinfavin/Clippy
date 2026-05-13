@@ -2,6 +2,8 @@ use tauri::{AppHandle, State};
 use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::ShellExt;
 
+use crate::diag::diag;
+use crate::helpers::basename;
 use crate::media_server::ServerInfo;
 use crate::proxy::{proxy_cache_key, proxy_dir};
 
@@ -20,13 +22,24 @@ pub async fn extract_track(
     src_path: String,
     track_index: u32,
 ) -> Result<String, String> {
+    let t0 = std::time::Instant::now();
     let key = proxy_cache_key(&src_path)?;
     let cache_path = proxy_dir(&app)?.join(format!(
         "{}.track-{}.m4a",
         &key[..32],
         track_index
     ));
-    if !cache_path.exists() {
+    if cache_path.exists() {
+        diag(
+            &app,
+            format!(
+                "[extract_track] HIT · {} track={} ({}ms)",
+                basename(&src_path),
+                track_index,
+                t0.elapsed().as_millis()
+            ),
+        );
+    } else {
         let cache_str = cache_path.to_string_lossy().to_string();
         let temp_str = format!("{}.tmp.m4a", cache_str);
         // Stream-copy the requested audio track into an MP4-in-M4A container.
@@ -60,6 +73,7 @@ pub async fn extract_track(
                 _ => {}
             }
         }
+        let copy_ms = t0.elapsed().as_millis();
         if !ok {
             // Fallback: re-encode to AAC. Source might be a codec we can't
             // copy into M4A (e.g. opus). Slow but always works.
@@ -94,8 +108,37 @@ pub async fn extract_track(
             }
             if !ok2 {
                 let _ = std::fs::remove_file(&temp_str);
+                diag(
+                    &app,
+                    format!(
+                        "[extract_track] FAILED · {} track={} ({}ms)",
+                        basename(&src_path),
+                        track_index,
+                        t0.elapsed().as_millis()
+                    ),
+                );
                 return Err(format!("track extract failed: {}", stderr_buf));
             }
+            diag(
+                &app,
+                format!(
+                    "[extract_track] MISS · {} track={} re-encode ({}ms total, copy attempt {}ms)",
+                    basename(&src_path),
+                    track_index,
+                    t0.elapsed().as_millis(),
+                    copy_ms
+                ),
+            );
+        } else {
+            diag(
+                &app,
+                format!(
+                    "[extract_track] MISS · {} track={} stream-copy ({}ms)",
+                    basename(&src_path),
+                    track_index,
+                    copy_ms
+                ),
+            );
         }
         std::fs::rename(&temp_str, &cache_path).map_err(|e| e.to_string())?;
     }

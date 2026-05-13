@@ -193,6 +193,7 @@ const WAVEFORM_BINS: usize = 4000;
 /// can see where stream-copy cuts will actually snap.
 #[tauri::command]
 pub async fn probe_keyframes(app: AppHandle, path: String) -> Result<Vec<f32>, String> {
+    let t0 = std::time::Instant::now();
     let key = proxy_cache_key(&path)?;
     let cache_path = proxy_dir(&app)?.join(format!("{}.kf.f32", &key[..32]));
     if cache_path.exists() {
@@ -205,6 +206,15 @@ pub async fn probe_keyframes(app: AppHandle, path: String) -> Result<Vec<f32>, S
                         .map_err(|_| "bad cache slice".to_string())?;
                     out.push(f32::from_le_bytes(arr));
                 }
+                diag(
+                    &app,
+                    format!(
+                        "[keyframes] HIT · {} ({} kf, {}ms)",
+                        basename(&path),
+                        out.len(),
+                        t0.elapsed().as_millis()
+                    ),
+                );
                 return Ok(out);
             }
         }
@@ -251,6 +261,15 @@ pub async fn probe_keyframes(app: AppHandle, path: String) -> Result<Vec<f32>, S
     }
     let _ = std::fs::write(&cache_path, &buf);
 
+    diag(
+        &app,
+        format!(
+            "[keyframes] MISS · {} ({} kf, {}ms)",
+            basename(&path),
+            keyframes.len(),
+            t0.elapsed().as_millis()
+        ),
+    );
     Ok(keyframes)
 }
 
@@ -265,6 +284,7 @@ pub async fn extract_waveform(
     info: VideoInfo,
     track_index: Option<u32>,
 ) -> Result<Vec<f32>, String> {
+    let t0 = std::time::Instant::now();
     let track_idx = track_index.unwrap_or(0);
     let key = proxy_cache_key(&path)?;
     // Track-indexed cache name. Single-track sources end up with .wave-0.f32
@@ -280,6 +300,15 @@ pub async fn extract_waveform(
                         .map_err(|_| "bad cache slice".to_string())?;
                     bins.push(f32::from_le_bytes(arr));
                 }
+                diag(
+                    &app,
+                    format!(
+                        "[waveform] HIT · {} track={} ({}ms)",
+                        basename(&path),
+                        track_idx,
+                        t0.elapsed().as_millis()
+                    ),
+                );
                 return Ok(bins);
             }
         }
