@@ -162,11 +162,20 @@ pub struct SaveTimings {
     /// Post-save ffprobe verification. `Some((probed_fps, duration_secs))`
     /// when the probe succeeded; `None` when ffprobe failed or didn't parse
     /// (probe is observability-only and never fails the save). Caller
-    /// compares probed_fps against the expected fps and warn-logs on a
-    /// >0.5fps mismatch — that's the safety net that catches a new encoder
-    /// vendor with the AMD-style SPS bug that our `needs_bsf_pass` gate
-    /// didn't know about yet.
+    /// compares probed_fps against `effective_fps` (NOT the configured `fps`)
+    /// and warn-logs on a >0.5fps mismatch.
     pub probed: Option<(f64, f64)>,
+    /// Framerate the video was muxed at — computed from the actual encoded
+    /// PTS span, not the worker's configured `fps`. When the encoder
+    /// back-pressures below the configured rate (AMD's H.264 MFT under
+    /// concurrent load is the observed case), the buffer ends up with N
+    /// packets over a wall-clock span > N/fps, so muxing at the configured
+    /// rate produces a video shorter than the wall-clock window it covers.
+    /// Audio (captured at native sample rate) ends up longer than the
+    /// video — visible to the user as waveform/video drift across the clip.
+    /// Muxing at `effective_fps` instead keeps video duration == audio
+    /// duration == wall-clock duration.
+    pub effective_fps: f64,
 }
 
 /// Probe the muxed output and parse its first video stream's frame rate +
@@ -337,9 +346,39 @@ pub async fn write_and_mux(
     };
     let bsf_pass_ms = bsf_start.elapsed().as_millis() as u64;
 
+    // Compute the actual framerate of the captured bitstream. The worker's
+    // pacing targets `fps` (e.g. 60), but the encoder can back-pressure below
+    // that — observed on AMD's H.264 MFT producing ~56.5 fps under 2K capture
+    // load even when WGC was supplying fresh frames. The buffer then holds
+    // (say) 3376 packets spanning 60 s of wall-clock, but muxing at the
+    // configured 60 fps stretches that into a 56.27 s video alongside the
+    // 60 s audio — visible to the user as waveform/visual drift accumulating
+    // from 0 s at the clip start to ~3.7 s at the end.
+    //
+    // Fix: derive framerate from packet count / encoded PTS span and pass
+    // that to ffmpeg's H.264 raw demuxer. Video duration then matches audio
+    // duration matches wall-clock duration.
+    //
+    // PTS span is in 100-ns units (Media Foundation's REFERENCE_TIME). For a
+    // partially-filled buffer (worker just started, <0.5 s of capture) we
+    // fall back to the configured fps since the span is too short to
+    // estimate reliably.
+    let effective_fps: f64 = if packets.len() >= 2 {
+        let first_pts = packets.first().map(|p| p.pts).unwrap_or(0);
+        let last_pts = packets.last().map(|p| p.pts).unwrap_or(0);
+        let span_secs = ((last_pts - first_pts) as f64 / 10_000_000.0).max(0.0);
+        if span_secs >= 0.5 {
+            (packets.len() as f64 / span_secs).max(1.0)
+        } else {
+            fps as f64
+        }
+    } else {
+        fps as f64
+    };
+
     // Build FFmpeg command:
     //   ffmpeg -y
-    //          -framerate FPS -f h264 -i video.fixed.h264
+    //          -framerate EFFECTIVE_FPS -f h264 -i video.fixed.h264
     //          [-f f32le -ar SR -ac CH -i a0.pcm  ...for each track]
     //          -c:v copy -c:a aac -b:a 192k
     //          -map 0:v [-map 1:a -map 2:a ...]
@@ -347,7 +386,7 @@ pub async fn write_and_mux(
     let mut args: Vec<String> = Vec::new();
     args.push("-y".into());
     args.push("-framerate".into());
-    args.push(fps.to_string());
+    args.push(format!("{:.4}", effective_fps));
     args.push("-f".into());
     args.push("h264".into());
     args.push("-i".into());
@@ -431,6 +470,7 @@ pub async fn write_and_mux(
         h264_bytes,
         pcm_bytes,
         probed,
+        effective_fps,
     })
 }
 

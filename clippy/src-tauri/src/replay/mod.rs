@@ -646,10 +646,15 @@ async fn finish_save(
 
     // Save timing breakdown: lets us see *where* a slow save is slow
     // (snapshot copy / disk write / ffmpeg mux / post-probe) without guessing.
+    // `eff_fps` is the framerate the mux ran at — equals the configured fps
+    // when the encoder kept up, lower when it back-pressured. Surfacing it
+    // here makes encoder shortfall visible at a glance: a long capture
+    // session showing eff_fps consistently below target (e.g. 56.5 vs 60)
+    // means the encoder is the bottleneck, not WGC or pacing.
     crate::diag(
         app,
         format!(
-            "[replay] save · h264 {}ms ({:.1}MB) · pcm {}ms ({:.1}MB) · bsf {}ms · ffmpeg {}ms · probe {}ms · total {}ms",
+            "[replay] save · h264 {}ms ({:.1}MB) · pcm {}ms ({:.1}MB) · bsf {}ms · ffmpeg {}ms · probe {}ms · total {}ms · eff_fps={:.2}/cfg={}",
             timings.h264_write_ms,
             timings.h264_bytes as f64 / (1024.0 * 1024.0),
             timings.pcm_write_ms,
@@ -658,23 +663,28 @@ async fn finish_save(
             timings.ffmpeg_mux_ms,
             timings.probe_ms,
             timings.total_ms,
+            timings.effective_fps,
+            snap.fps,
         ),
     );
 
-    // Post-save sanity check: if the muxed output's video frame rate doesn't
-    // match what the worker produced, something between the encoder MFT and
-    // the mux mangled timing. The bsf gate (needs_bsf_pass) is the most
-    // likely culprit if it ever fires — a new vendor with the AMD-style SPS
-    // bug we didn't know about would show up here as a fps mismatch.
+    // Post-save sanity check: probe the muxed output and compare against
+    // `effective_fps` (the rate we asked ffmpeg to mux at), NOT the
+    // configured `snap.fps`. With the framerate-stretch fix, video is muxed
+    // at the actual encoder rate so audio/video align — the configured fps
+    // is the worker's target, which the encoder may not have hit. A real
+    // mismatch (bsf gate misfire on a new AMD-like vendor, or ffmpeg
+    // ignoring our -framerate for some reason) still surfaces because the
+    // probe sees a rate fundamentally different from what we requested.
     if let Some((probed_fps, probed_dur)) = timings.probed {
-        let expected_fps = snap.fps as f64;
-        let fps_delta = (probed_fps - expected_fps).abs();
+        let fps_delta = (probed_fps - timings.effective_fps).abs();
         if fps_delta > 0.5 {
             crate::diag(
                 app,
                 format!(
-                    "[replay] save · ⚠ fps mismatch — expected {}fps, probed {:.2}fps (Δ={:.2}) · dur={:.2}s · encoder=\"{}\" · please report",
-                    snap.fps, probed_fps, fps_delta, probed_dur, snap.encoder_name,
+                    "[replay] save · ⚠ fps mismatch — muxed at {:.2}fps, probed {:.2}fps (Δ={:.2}) · dur={:.2}s · cfg={}fps · encoder=\"{}\" · please report",
+                    timings.effective_fps, probed_fps, fps_delta, probed_dur,
+                    snap.fps, snap.encoder_name,
                 ),
             );
         } else {
