@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   cropsEqual,
@@ -8,18 +7,15 @@ import {
   newRegionId,
   SIZE_PRESETS,
   resolveRegionColor,
-  resolveTrackColor,
   REGION_COLORS,
   trackMixIsDefault,
   trackMixToBackend,
   type Crop,
   type ExportFormat,
   type ExportMode,
-  type ExportProgress,
   type GifResolution,
   type Phase,
   type ProjectState,
-  type ProxyProgress,
   type ProxyResult,
   type Region,
   type SizeLimit,
@@ -30,16 +26,12 @@ import {
 } from "./types";
 import { fmtTime } from "./formatters";
 import {
-  captureKeybind,
   DEFAULT_KEYBINDS,
   formatKeybind,
-  GLOBAL_ACTIONS,
   keybindToShortcutString,
   loadKeybinds,
-  matchesBinding,
   saveKeybinds,
   type ActionId,
-  type Keybind,
   type Keybinds,
 } from "./keybinds";
 import {
@@ -61,24 +53,21 @@ import { TipsModal } from "./TipsModal";
 import { OnboardingHint } from "./OnboardingHint";
 import { ReplayStatusPill } from "./ReplayStatusPill";
 import { useUpdater } from "./useUpdater";
-import {
-  ReplaySettings,
-  getSaveBehavior,
-  getAutoStart,
-  getReplayStartArgs,
-} from "./ReplaySettings";
+import { ReplaySettings } from "./ReplaySettings";
+import { useDragDropFile } from "./hooks/use-drag-drop-file";
+import { useExportProgress } from "./hooks/use-export-progress";
+import { useGlobalKeybinds } from "./hooks/use-global-keybinds";
+import { useKeybindCapture } from "./hooks/use-keybind-capture";
+import { useKeyframeDraw } from "./hooks/use-keyframe-draw";
+import { useModalEscClose } from "./hooks/use-modal-esc-close";
+import { useProjectAutosave } from "./hooks/use-project-autosave";
+import { useProxyProgress } from "./hooks/use-proxy-progress";
+import { useReplayAutoStart } from "./hooks/use-replay-auto-start";
+import { useReplayHotkeyPush } from "./hooks/use-replay-hotkey-push";
+import { useReplaySavedToast } from "./hooks/use-replay-saved-toast";
+import { useWaveformDraw } from "./hooks/use-waveform-draw";
+import { HintKbd } from "./components/HintKbd";
 import "./App.css";
-
-/** "#rrggbb" + alpha → "rgba(r, g, b, a)". Used for waveform fill colors so we
- *  can blend the per-track palette colors with translucency. */
-function hexWithAlpha(hex: string, alpha: number): string {
-  const m = hex.match(/^#([0-9a-f]{6})$/i);
-  if (!m) return hex;
-  const r = parseInt(m[1].slice(0, 2), 16);
-  const g = parseInt(m[1].slice(2, 4), 16);
-  const b = parseInt(m[1].slice(4, 6), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
 
 import { Showcase } from "./Showcase";
 
@@ -140,15 +129,7 @@ function Editor() {
   // the user sees on the topbar.
   const updater = useUpdater();
 
-  // Push the save-replay binding to the OS whenever it changes. Backend
-  // re-registers the global shortcut so it works while a game is focused.
-  useEffect(() => {
-    const s = keybindToShortcutString(keybinds.saveReplay);
-    if (!s) return;
-    invoke("replay_set_save_hotkey", { shortcut: s }).catch((e) =>
-      console.error("[clippy] replay_set_save_hotkey failed:", e)
-    );
-  }, [keybinds.saveReplay]);
+  useReplayHotkeyPush(keybinds.saveReplay);
 
   // Tips modal — opened by the "?" button in the topbar.
   const [tipsOpen, setTipsOpen] = useState(false);
@@ -371,104 +352,12 @@ function Editor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Window-level drag-and-drop: drop a video file on the window to open it.
   const [isDraggingFile, setIsDraggingFile] = useState(false);
-  useEffect(() => {
-    const VIDEO_EXTS = ["mkv", "mp4", "mov", "webm", "m4v", "avi"];
-    const isVideoPath = (p: string) =>
-      VIDEO_EXTS.includes(p.split(".").pop()?.toLowerCase() ?? "");
-    let unlisten: UnlistenFn | null = null;
-    import("@tauri-apps/api/webview").then(({ getCurrentWebview }) => {
-      getCurrentWebview()
-        .onDragDropEvent((event) => {
-          const p = event.payload as { type: string; paths?: string[] };
-          if (p.type === "enter" || p.type === "over") {
-            const hasVideo = (p.paths ?? []).some(isVideoPath);
-            setIsDraggingFile(hasVideo);
-          } else if (p.type === "drop") {
-            setIsDraggingFile(false);
-            const first = (p.paths ?? []).find(isVideoPath);
-            if (first) loadFile(first);
-          } else {
-            setIsDraggingFile(false);
-          }
-        })
-        .then((u) => (unlisten = u));
-    });
-    return () => {
-      unlisten?.();
-    };
-  }, [loadFile]);
-
-  // Auto-start the replay buffer at app launch if the user opted in. Runs
-  // once after the component mounts; failures are logged but never block
-  // the rest of startup.
-  useEffect(() => {
-    if (!getAutoStart()) return;
-    const t = setTimeout(() => {
-      invoke("replay_start", getReplayStartArgs()).catch((e) => {
-        console.warn("[clippy] replay auto-start failed:", e);
-      });
-    }, 400);
-    return () => clearTimeout(t);
-  }, []);
-
-  // Replay-buffer saves: backend writes an MP4 and emits its path as a
-  // string payload. The user's chosen save behavior (settings → Replay
-  // buffer) decides whether to open it immediately or just toast a
-  // "click to open" notice.
-  useEffect(() => {
-    let unlistenSaved: UnlistenFn | null = null;
-    let unlistenError: UnlistenFn | null = null;
-    listen<string>("replay://saved", (event) => {
-      const path = event.payload;
-      if (!path || typeof path !== "string") return;
-      if (getSaveBehavior() === "auto-open") {
-        loadFile(path).catch((e) =>
-          console.error("[clippy] replay auto-open failed:", e)
-        );
-      } else {
-        setReplaySavedToast(path);
-      }
-    }).then((u) => (unlistenSaved = u));
-    listen<string>("replay://save-error", (event) => {
-      console.error("[clippy] replay save error:", event.payload);
-    }).then((u) => (unlistenError = u));
-    return () => {
-      unlistenSaved?.();
-      unlistenError?.();
-    };
-  }, [loadFile]);
-
-  // proxy progress events
-  useEffect(() => {
-    let unlisten: UnlistenFn | null = null;
-    listen<ProxyProgress>("proxy:progress", (event) => {
-      setPhase((p) =>
-        p.kind === "proxying"
-          ? { kind: "proxying", progress: event.payload.progress, eta: event.payload.eta_secs }
-          : p
-      );
-    }).then((u) => (unlisten = u));
-    return () => {
-      unlisten?.();
-    };
-  }, []);
-
-  // export progress events
-  useEffect(() => {
-    let unlisten: UnlistenFn | null = null;
-    listen<ExportProgress>("export:progress", (event) => {
-      setPhase((p) =>
-        p.kind === "exporting"
-          ? { ...p, progress: event.payload.progress }
-          : p
-      );
-    }).then((u) => (unlisten = u));
-    return () => {
-      unlisten?.();
-    };
-  }, []);
+  useDragDropFile(loadFile, setIsDraggingFile);
+  useReplayAutoStart();
+  useReplaySavedToast(loadFile, setReplaySavedToast);
+  useProxyProgress(setPhase);
+  useExportProgress(setPhase);
 
   // ---- transport controls ----
   const playPause = useCallback(() => {
@@ -478,18 +367,7 @@ function Editor() {
     else v.pause();
   }, []);
 
-  // Debounced save of the project state (regions, crops, speeds, track mix,
-  // track colors, track names) to a sidecar JSON next to the proxy cache.
-  useEffect(() => {
-    if (!srcPath) return;
-    const handle = window.setTimeout(() => {
-      const state: ProjectState = { version: 1, regions, trackMix, trackColors, trackNames };
-      invoke("save_project", { srcPath, state }).catch((err) =>
-        console.warn("[clippy] save_project failed:", err)
-      );
-    }, 600);
-    return () => window.clearTimeout(handle);
-  }, [srcPath, regions, trackMix, trackColors, trackNames]);
+  useProjectAutosave({ srcPath, regions, trackMix, trackColors, trackNames });
 
   // Loop playback state (declared up here so seek/scrubTo can reference it
   // for the auto-stop-when-outside check below). The actual loop logic is
@@ -1156,84 +1034,35 @@ function Editor() {
   }, [srcPath, info, frameAction, clearFrameMode]);
 
   // ---- keyboard shortcuts ----
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      // Don't fire app shortcuts while the keybind editor is capturing.
-      if (listeningAction != null) return;
-      // openFile is allowed even before a video is loaded; everything else needs a ready/exporting phase.
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
-
-      const dispatch = (action: ActionId) => {
-        switch (action) {
-          case "openFile": handleOpen(); break;
-          case "playPause": playPause(); break;
-          case "frameBack": stepFrames(-1); break;
-          case "frameForward": stepFrames(1); break;
-          case "jumpStart": seek(0); break;
-          case "jumpEnd": seek(duration); break;
-          case "setIn": setIn(); break;
-          case "setOut": setOut(); break;
-          case "export": handleExport(); break;
-          case "loopRegion": toggleLoopRegion(); break;
-          case "cropRegion": cropCurrentRegion(); break;
-          case "saveFrame": saveCurrentFrame(); break;
-          default: {
-            // Region jumps: jumpRegion1..jumpRegion9 → seek to that region's in.
-            const m = action.match(/^jumpRegion(\d)$/);
-            if (m) {
-              const idx = parseInt(m[1], 10) - 1;
-              const r = regions[idx];
-              if (r) seek(r.inSecs);
-            }
-            break;
-          }
+  const dispatchKeybind = useCallback((action: ActionId) => {
+    switch (action) {
+      case "openFile": handleOpen(); break;
+      case "playPause": playPause(); break;
+      case "frameBack": stepFrames(-1); break;
+      case "frameForward": stepFrames(1); break;
+      case "jumpStart": seek(0); break;
+      case "jumpEnd": seek(duration); break;
+      case "setIn": setIn(); break;
+      case "setOut": setOut(); break;
+      case "export": handleExport(); break;
+      case "loopRegion": toggleLoopRegion(); break;
+      case "cropRegion": cropCurrentRegion(); break;
+      case "saveFrame": saveCurrentFrame(); break;
+      default: {
+        // Region jumps: jumpRegion1..jumpRegion9 → seek to that region's in.
+        const m = action.match(/^jumpRegion(\d)$/);
+        if (m) {
+          const idx = parseInt(m[1], 10) - 1;
+          const r = regions[idx];
+          if (r) seek(r.inSecs);
         }
-      };
-
-      for (const action of Object.keys(keybinds) as ActionId[]) {
-        // Global actions are routed by the OS hotkey, not the in-app dispatch.
-        if (GLOBAL_ACTIONS.has(action)) continue;
-        if (matchesBinding(e, keybinds[action])) {
-          if (action !== "openFile" && phase.kind !== "ready" && phase.kind !== "exporting") return;
-          e.preventDefault();
-          dispatch(action);
-          return;
-        }
+        break;
       }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [keybinds, listeningAction, phase, handleOpen, playPause, stepFrames, seek, duration, setIn, setOut, handleExport, toggleLoopRegion, regions, cropCurrentRegion, saveCurrentFrame]);
-
-  // Capture next keypress when listening to bind a new shortcut.
-  useEffect(() => {
-    if (!listeningAction) return;
-    const onKey = (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.key === "Escape" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-        setListeningAction(null);
-        return;
-      }
-      const captured = captureKeybind(e);
-      if (!captured) return;
-      setKeybinds((prev) => ({ ...prev, [listeningAction]: captured }));
-      setListeningAction(null);
-    };
-    window.addEventListener("keydown", onKey, { capture: true });
-    return () => window.removeEventListener("keydown", onKey, { capture: true } as AddEventListenerOptions);
-  }, [listeningAction]);
-
-  // Esc closes the keybinds modal (when not listening).
-  useEffect(() => {
-    if (!keybindsOpen || listeningAction) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setKeybindsOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [keybindsOpen, listeningAction]);
+    }
+  }, [handleOpen, playPause, stepFrames, seek, duration, setIn, setOut, handleExport, toggleLoopRegion, regions, cropCurrentRegion, saveCurrentFrame]);
+  useGlobalKeybinds({ keybinds, listeningAction, phase, dispatch: dispatchKeybind });
+  useKeybindCapture({ listeningAction, setListeningAction, setKeybinds });
+  useModalEscClose(keybindsOpen && !listeningAction, () => setKeybindsOpen(false));
 
   // ---- timeline interaction ----
   const timeFromPointer = useCallback(
@@ -1302,167 +1131,21 @@ function Editor() {
     }
   };
 
-  // Draw all per-track waveforms layered onto the canvas (and redraw on
-  // container resize). Each track uses its palette color; additive blend so
-  // simultaneously-loud tracks brighten where they overlap. Drawing centered
-  // on the mid-line — bar heights = max amplitude in that x's bin slice.
-  useEffect(() => {
-    const canvas = waveCanvasRef.current;
-    const container = timelineRef.current;
-    if (!canvas || !container) return;
-
-    const draw = () => {
-      const cssW = canvas.clientWidth;
-      const cssH = canvas.clientHeight;
-      if (cssW === 0 || cssH === 0) return;
-      const dpr = window.devicePixelRatio || 1;
-      if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
-        canvas.width = Math.round(cssW * dpr);
-        canvas.height = Math.round(cssH * dpr);
-      }
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.scale(dpr, dpr);
-      ctx.clearRect(0, 0, cssW, cssH);
-      if (waveforms.size === 0) return;
-
-      const mid = cssH / 2;
-      // Sort by index so colors are deterministic and the layering doesn't
-      // depend on Map insertion order (extraction parallelism).
-      const entries = [...waveforms.entries()].sort((a, b) => a[0] - b[0]);
-
-      // Build the per-x effective mix. For each pixel of timeline width, find
-      // which region's mix applies (or fall back to the source default).
-      // Pre-computed once so the inner draw loop stays cheap.
-      const dur = duration > 0 ? duration : 1;
-      const xMixes: TrackMix[] = new Array(cssW);
-      // Sorted regions are an invariant of setRegions; binary search overkill
-      // for typical N <= ~10.
-      for (let x = 0; x < cssW; x++) {
-        const t = (x / cssW) * dur;
-        let m: TrackMix = trackMix;
-        for (const r of regions) {
-          if (t >= r.inSecs && t <= r.outSecs) {
-            m = r.mix ?? trackMix;
-            break;
-          }
-        }
-        xMixes[x] = m;
-      }
-
-      // Two-pass render:
-      //   Pass 1 (source-over, grey, low alpha): muted tracks at original
-      //     amplitude — visible as ghost so the user knows what's there.
-      //   Pass 2 (lighter, track color): active tracks scaled by per-x volume
-      //     so 50% slider → half-height bars, 158% → ~1.6× taller. Heights
-      //     clamp to slightly past the track strip so 200% reads as "loud"
-      //     without escaping the canvas.
-      const maxBar = cssH * 0.92; // hard cap (canvas-bound)
-      const unityBar = cssH * 0.55; // bar height at volume == 1.0
-
-      ctx.globalCompositeOperation = "source-over";
-      ctx.fillStyle = "rgba(140, 144, 154, 0.16)";
-      for (const [idx, bins] of entries) {
-        const N = bins.length;
-        if (N === 0) continue;
-        for (let x = 0; x < cssW; x++) {
-          if (!xMixes[x][idx]?.muted) continue;
-          const binStart = Math.floor((x / cssW) * N);
-          const binEnd = Math.max(binStart + 1, Math.floor(((x + 1) / cssW) * N));
-          let max = 0;
-          for (let i = binStart; i < binEnd && i < N; i++) {
-            const v = bins[i];
-            if (v > max) max = v;
-          }
-          const h = Math.min(max * unityBar, maxBar);
-          if (h < 1) continue;
-          ctx.fillRect(x, mid - h / 2, 1, h);
-        }
-      }
-
-      // Average active-count for alpha — heuristic: count active in the
-      // middle x to avoid scanning all xMixes again.
-      const midMix = xMixes[Math.floor(cssW / 2)] ?? trackMix;
-      const activeCount = entries.filter(([i]) => !midMix[i]?.muted).length;
-      const baseAlpha = activeCount <= 1 ? 0.85 : 0.55;
-      ctx.globalCompositeOperation = "lighter";
-      for (const [idx, bins] of entries) {
-        const N = bins.length;
-        if (N === 0) continue;
-        ctx.fillStyle = hexWithAlpha(resolveTrackColor(idx, trackColors), baseAlpha);
-        for (let x = 0; x < cssW; x++) {
-          const m = xMixes[x][idx];
-          if (m?.muted) continue;
-          const vol = m?.volume ?? 1;
-          if (vol <= 0) continue;
-          const binStart = Math.floor((x / cssW) * N);
-          const binEnd = Math.max(binStart + 1, Math.floor(((x + 1) / cssW) * N));
-          let max = 0;
-          for (let i = binStart; i < binEnd && i < N; i++) {
-            const v = bins[i];
-            if (v > max) max = v;
-          }
-          const h = Math.min(max * vol * unityBar, maxBar);
-          if (h < 1) continue;
-          ctx.fillRect(x, mid - h / 2, 1, h);
-        }
-      }
-      ctx.globalCompositeOperation = "source-over";
-    };
-
-    draw();
-    const ro = new ResizeObserver(draw);
-    ro.observe(container);
-    return () => ro.disconnect();
-  }, [waveforms, trackMix, regions, duration, trackColors]);
-
-  // Draw keyframe ticks. Faint vertical hairlines at every video keyframe so
-  // the user can see where stream-copy cuts will snap. Sits below the wave
-  // canvas in the stacking order — the waveform additively blends on top so
-  // these ticks don't compete visually during playback.
-  useEffect(() => {
-    const canvas = keyframeCanvasRef.current;
-    const container = timelineRef.current;
-    if (!canvas || !container) return;
-
-    const draw = () => {
-      const cssW = canvas.clientWidth;
-      const cssH = canvas.clientHeight;
-      if (cssW === 0 || cssH === 0) return;
-      const dpr = window.devicePixelRatio || 1;
-      if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
-        canvas.width = Math.round(cssW * dpr);
-        canvas.height = Math.round(cssH * dpr);
-      }
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.scale(dpr, dpr);
-      ctx.clearRect(0, 0, cssW, cssH);
-      if (!keyframes || keyframes.length === 0 || duration <= 0) return;
-
-      // Hairline ticks. Color is intentionally low-contrast — these are
-      // navigational hints, not decoration. Use crisp 1px integer x.
-      ctx.fillStyle = "rgba(255, 255, 255, 0.10)";
-      let lastX = -2;
-      for (let i = 0; i < keyframes.length; i++) {
-        const t = keyframes[i];
-        if (t < 0 || t > duration) continue;
-        const x = Math.round((t / duration) * cssW);
-        // Skip duplicates at the same pixel — many keyframes can collapse
-        // into one column on a wide source / narrow timeline.
-        if (x === lastX) continue;
-        lastX = x;
-        ctx.fillRect(x, 0, 1, cssH);
-      }
-    };
-
-    draw();
-    const ro = new ResizeObserver(draw);
-    ro.observe(container);
-    return () => ro.disconnect();
-  }, [keyframes, duration]);
+  useWaveformDraw({
+    canvasRef: waveCanvasRef,
+    containerRef: timelineRef,
+    waveforms,
+    regions,
+    trackMix,
+    trackColors,
+    duration,
+  });
+  useKeyframeDraw({
+    canvasRef: keyframeCanvasRef,
+    containerRef: timelineRef,
+    keyframes,
+    duration,
+  });
 
   const playheadPct = duration > 0 ? (currentTime / duration) * 100 : 0;
   const draftInPct = draftIn != null && duration > 0 ? (draftIn / duration) * 100 : null;
@@ -2074,28 +1757,4 @@ function Editor() {
     </div>
   );
 }
-
-function HintKbd(props: {
-  bind: Keybind;
-  secondaryBind?: Keybind;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <span className="hint-item" onClick={props.onClick}>
-      <kbd>{formatKeybind(props.bind)}</kbd>
-      {props.secondaryBind && (
-        <>
-          /<kbd>{formatKeybind(props.secondaryBind)}</kbd>
-        </>
-      )}{" "}
-      {props.label}
-    </span>
-  );
-}
-
-// Settings tabs (Keyboard, Storage, About) and their tab-id constants live
-// in ./Settings — kept out of App.tsx so the Editor file isn't 600 lines
-// longer than it needs to be.
-
 
