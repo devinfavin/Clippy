@@ -248,7 +248,12 @@ export function OverlayApp() {
         setPhase((prev) => {
           // Ignore progress for a save we didn't see start (window opened
           // mid-save — shouldn't normally happen but be defensive).
-          if (prev.kind === "idle" || prev.kind === "done" || prev.kind === "error") {
+          if (
+            prev.kind === "idle" ||
+            prev.kind === "done" ||
+            prev.kind === "error" ||
+            prev.kind === "spawn-error"
+          ) {
             return prev;
           }
           if (prev.id !== e.payload.id) return prev;
