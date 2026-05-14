@@ -374,6 +374,10 @@ pub(crate) fn unix_nanos() -> u64 {
 pub async fn save_active(app: &tauri::AppHandle) -> Result<ReplaySaveResult, String> {
     use tauri::{Emitter, Manager};
     let id = unix_nanos();
+    // BEGIN marker so any single save attempt is grep-able in a busy log
+    // (`[save id=…] BEGIN` … `[save id=…] END`). Pairs with the END marker
+    // at every exit point in `finish_save`.
+    crate::diag(app, format!("[save id={id}] BEGIN"));
     let state = app.state::<ReplayState>();
 
     // Snapshot first so save-started can include window title + duration.
@@ -392,6 +396,7 @@ pub async fn save_active(app: &tauri::AppHandle) -> Result<ReplaySaveResult, Str
                 kind: classify_save_error(&e).into(),
                 msg: e.clone(),
             });
+            crate::diag(app, format!("[save id={id}] END · ERROR (snapshot) · {e}"));
             return Err(e);
         }
     };
@@ -430,12 +435,14 @@ pub(super) async fn finish_save(
 
     // Helper: emit a `replay://save-error` event + bail. Closes over `app` and
     // `save_id` so call sites read as a single `?`-style early return.
+    // Also writes the matching END marker so every BEGIN has a partner.
     let emit_error = |msg: &str| {
         let _ = app.emit("replay://save-error", &SaveErrorPayload {
             id: save_id,
             kind: classify_save_error(msg).into(),
             msg: msg.to_string(),
         });
+        crate::diag(app, format!("[save id={save_id}] END · ERROR · {msg}"));
     };
 
     // Refresh each captured-track's friendly name from the live audio_names
@@ -640,6 +647,14 @@ pub(super) async fn finish_save(
         tracks_saved,
         tracks_total: total as u32,
     });
+    crate::diag(
+        app,
+        format!(
+            "[save id={save_id}] END · OK · {:.1}MB · {tracks_saved}/{total} tracks · {}",
+            size_mb,
+            out_path
+        ),
+    );
     Ok(ReplaySaveResult {
         path: out_path,
         window_title: snap.window_title,

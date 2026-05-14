@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
 
-const DIAG_CAP: usize = 200;
+const DIAG_CAP: usize = 1000;
 
 /// In-memory ring buffer of timestamped log entries. Bounded so it can't
 /// grow unboundedly over a long session. Never written to disk and never sent
@@ -165,6 +165,24 @@ pub fn diag(app: &AppHandle, msg: impl std::fmt::Display) {
         buf.pop_front();
     }
     buf.push_back(entry);
+}
+
+/// Open the OS file manager with the persisted `diagnostics.log` selected.
+/// Lets a user attach prior-session logs to a bug report without having to
+/// hunt down the app data dir. The in-memory ring buffer's contents are
+/// only flushed to this file on graceful exit, so the *current* session's
+/// log lives in memory (use the "Copy log" affordance for that one).
+#[tauri::command]
+pub fn reveal_diagnostics_log(app: AppHandle) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let path = dir.join("diagnostics.log");
+    if !path.exists() {
+        // Nothing persisted yet — reveal the containing folder so the user
+        // sees where the file will land once a session exits gracefully.
+        let _ = std::fs::create_dir_all(&dir);
+        return crate::storage::reveal_in_folder(dir.to_string_lossy().into_owned());
+    }
+    crate::storage::reveal_in_folder(path.to_string_lossy().into_owned())
 }
 
 /// Delete the persisted diagnostics.log. The in-memory ring buffer is

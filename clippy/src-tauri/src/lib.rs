@@ -135,6 +135,22 @@ pub fn run() {
             app.manage(HideOnClose(std::sync::atomic::AtomicBool::new(false)));
             app.manage(DiagVerbose(std::sync::atomic::AtomicBool::new(false)));
 
+            // Session-start marker. First line of every session's diag log so
+            // multi-session persisted logs are visually splittable. Build
+            // flavor + version go on this line so a copy-pasted log opens with
+            // "what build is this".
+            let log_handle = app.handle().clone();
+            diag(
+                &log_handle,
+                format!(
+                    "===== Clippy v{} session started ({}) — {}/{} =====",
+                    env!("CARGO_PKG_VERSION"),
+                    if cfg!(debug_assertions) { "dev build" } else { "release" },
+                    std::env::consts::OS,
+                    std::env::consts::ARCH,
+                ),
+            );
+
             // Replay save dir — load persisted preference if present, otherwise
             // compute the default and create it on disk so the user's first
             // save doesn't fail on a missing folder.
@@ -142,9 +158,12 @@ pub fn run() {
                 let handle = app.handle();
                 let save_dir = replay::load_save_dir(&handle.clone());
                 if let Err(e) = std::fs::create_dir_all(&save_dir) {
-                    eprintln!(
-                        "[clippy] couldn't create replay save dir {}: {e}",
-                        save_dir.display()
+                    diag(
+                        &log_handle,
+                        format!(
+                            "[startup] couldn't create replay save dir {}: {e}",
+                            save_dir.display()
+                        ),
                     );
                 }
                 app.manage(ReplaySaveDir(Mutex::new(save_dir)));
@@ -242,7 +261,7 @@ pub fn run() {
             // Re-registered at runtime by `replay_set_save_hotkey` when the
             // user rebinds via the keybind editor.
             if let Err(e) = register_save_hotkey(&app.handle().clone(), "Alt+F10") {
-                eprintln!("[clippy] save hotkey init failed: {e}");
+                diag(&log_handle, format!("[startup] save hotkey init FAILED: {e}"));
             }
 
             // Auto-prune cache files >30 days untouched. Background thread so a
@@ -268,21 +287,101 @@ pub fn run() {
                 port,
                 state: server_state.clone(),
             });
+            let log_for_server = log_handle.clone();
             tauri::async_runtime::spawn(async move {
                 let tokio_listener = match tokio::net::TcpListener::from_std(listener) {
                     Ok(l) => l,
                     Err(e) => {
-                        eprintln!("[clippy] failed to convert listener: {}", e);
+                        diag(&log_for_server, format!("[startup] media server listener convert FAILED: {e} — editor playback will not work"));
                         return;
                     }
                 };
-                let app = Router::new()
+                let router = Router::new()
                     .route("/vid", get(media_server::serve_file).options(media_server::serve_options))
                     .with_state(server_state);
-                if let Err(e) = axum::serve(tokio_listener, app).await {
-                    eprintln!("[clippy] media server stopped: {}", e);
+                if let Err(e) = axum::serve(tokio_listener, router).await {
+                    diag(&log_for_server, format!("[runtime] media server stopped: {e} — editor playback will not work"));
                 }
             });
+
+            // ----- Startup probe (G1) ---------------------------------------
+            // Single snapshot of the environment so support-ticket reports
+            // begin with "what hardware + software was this on". Each line is
+            // prefixed `[startup]` so they cluster after the session-start
+            // marker. Cheap: all probes here are already invoked elsewhere
+            // (sysinfo for the resource calculator, capture/audio enumeration
+            // for the replay settings UI).
+            {
+                let sys = replay::sysinfo::collect();
+                let enc_summary = if sys.hw_encoders.is_empty() {
+                    "none detected (software fallback only)".to_string()
+                } else {
+                    sys.hw_encoders.join(", ")
+                };
+                diag(
+                    &log_handle,
+                    format!(
+                        "[startup] GPU: \"{}\" · VRAM {}MB · RAM {}MB",
+                        sys.gpu_name, sys.gpu_vram_mb, sys.ram_total_mb
+                    ),
+                );
+                diag(
+                    &log_handle,
+                    format!("[startup] HW H.264 encoders: {enc_summary}"),
+                );
+
+                let monitors = replay::capture::list_monitors();
+                let mon_summary: String = monitors
+                    .iter()
+                    .map(|m| {
+                        format!(
+                            "{}({}x{}{})",
+                            m.label,
+                            m.width,
+                            m.height,
+                            if m.primary { "*" } else { "" }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                diag(
+                    &log_handle,
+                    format!(
+                        "[startup] Monitors: {} detected — {}",
+                        monitors.len(),
+                        if mon_summary.is_empty() { "(none)".into() } else { mon_summary }
+                    ),
+                );
+
+                let audio_devs = replay::audio::enumerate_render_devices();
+                let default = audio_devs
+                    .iter()
+                    .find(|d| d.is_default)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_else(|| "(none default)".to_string());
+                diag(
+                    &log_handle,
+                    format!(
+                        "[startup] Audio render endpoints: {} (default: \"{}\")",
+                        audio_devs.len(),
+                        default
+                    ),
+                );
+
+                diag(
+                    &log_handle,
+                    format!("[startup] Media server bound on 127.0.0.1:{port}"),
+                );
+
+                if let Some(rs) = app.try_state::<replay::ReplayState>() {
+                    let allowlist = rs.allowlist.lock().map(|g| g.len()).unwrap_or(0);
+                    diag(
+                        &log_handle,
+                        format!("[startup] Game allowlist: {allowlist} entries"),
+                    );
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -331,6 +430,7 @@ pub fn run() {
             replay::commands::replay_reset_save_dir,
             storage::storage_summary,
             diag::clear_diagnostics_log,
+            diag::reveal_diagnostics_log,
             replay_set_save_hotkey,
             state::set_hide_on_close,
             diag::set_diag_verbose,

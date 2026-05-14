@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { logErr } from "./logErr";
 
 /**
  * Auto-updater state machine. Drives the About-tab UI and the on-launch
@@ -54,7 +55,7 @@ export function useUpdater() {
         // Silent check (on launch) — log but don't surface a banner if the
         // manifest 404s or the network is unavailable; we don't want the
         // app yelling at the user on every launch when offline.
-        console.warn("[clippy] silent update check failed:", msg);
+        logErr("updater silent check", msg);
         return;
       }
       setState({ kind: "error", message: msg });

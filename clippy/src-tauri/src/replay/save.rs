@@ -291,8 +291,14 @@ pub async fn write_and_mux(
         let path = save_dir.join(format!("a{i}.pcm"));
         if let Err(e) = write_pcm_raw(track, &path).await {
             // Skip this track but keep going — better to save without audio
-            // than to fail the whole save.
-            eprintln!("audio track {i} write failed: {e}");
+            // than to fail the whole save. Route through diag so "I picked
+            // 4 devices but only got 3 in the MP4" has a trace.
+            if let Some((app, _)) = progress {
+                crate::diag(
+                    app,
+                    format!("[replay] save · audio track {i} PCM write FAILED: {e} (track will be omitted)"),
+                );
+            }
             continue;
         }
         pcm_bytes += track.packets.iter().map(|p| p.data.len() as u64).sum::<u64>();

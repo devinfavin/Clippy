@@ -25,6 +25,7 @@ import {
   type VideoInfo,
 } from "./types";
 import { fmtTime } from "./formatters";
+import { logErr } from "./logErr";
 import {
   DEFAULT_KEYBINDS,
   formatKeybind,
@@ -180,7 +181,7 @@ function Editor() {
       })
       .catch((err) => {
         if (!cancelled) {
-          console.error("[clippy] register_file_url failed:", err);
+          logErr("register_file_url", err);
           setPhase({ kind: "error", message: `Couldn't register file URL: ${err}` });
         }
       });
@@ -274,7 +275,7 @@ function Editor() {
           setTrackNames(saved.trackNames as TrackNameOverrides);
         }
       } catch (err) {
-        console.warn("[clippy] load_project failed:", err);
+        logErr("load_project", err);
       }
 
       // Kick off waveform extraction per audio track in parallel. Doesn't block
@@ -299,7 +300,7 @@ function Editor() {
           })
           .catch((err) => {
             if (waveId !== waveformIdRef.current) return;
-            console.error(`[clippy] waveform extract (track ${idx}) failed:`, err);
+            logErr(`waveform extract track ${idx}`, err);
           });
       }
 
@@ -311,7 +312,7 @@ function Editor() {
         })
         .catch((err) => {
           if (waveId !== waveformIdRef.current) return;
-          console.warn("[clippy] probe_keyframes failed:", err);
+          logErr("probe_keyframes", err);
         });
     } catch (e) {
       setPhase({ kind: "error", message: String(e) });
@@ -346,7 +347,7 @@ function Editor() {
       .then((p) => {
         if (p) loadFile(p);
       })
-      .catch((err) => console.error("[clippy] get_initial_path failed:", err));
+      .catch((err) => logErr("get_initial_path", err));
     // loadFile is stable (useCallback with empty deps), but we intentionally
     // run this only once at mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1207,7 +1208,7 @@ function Editor() {
         onOpen: () => {
           const p = replaySavedToast;
           setReplaySavedToast(null);
-          loadFile(p).catch((e) => console.error("[clippy] replay open failed:", e));
+          loadFile(p).catch((e) => logErr("replay clip open after save", e));
         },
         onDismiss: () => setReplaySavedToast(null),
       };
@@ -1739,7 +1740,7 @@ function Editor() {
                     const s = keybindToShortcutString(DEFAULT_KEYBINDS.saveReplay);
                     if (s) {
                       invoke("replay_set_save_hotkey", { shortcut: s }).catch((e) =>
-                        console.error("[clippy] replay_set_save_hotkey failed:", e)
+                        logErr("replay_set_save_hotkey", e)
                       );
                     }
                   }}

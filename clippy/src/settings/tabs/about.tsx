@@ -124,13 +124,24 @@ function DiagnosticsButton() {
       setTimeout(() => setState("idle"), 2500);
     }
   };
+  const reveal = async () => {
+    try {
+      await invoke("reveal_diagnostics_log");
+    } catch {
+      setState("error");
+      setTimeout(() => setState("idle"), 2500);
+    }
+  };
   return (
     <div className="cache-row">
       <span className="cache-label">Diagnostics</span>
       <span className="cache-size mono" style={{ fontSize: "var(--type-xs)", opacity: 0.6 }}>
-        {state === "copied" ? "Copied to clipboard" : state === "error" ? "Copy failed" : "operation log"}
+        {state === "copied" ? "Copied to clipboard" : state === "error" ? "Operation failed" : "operation log"}
       </span>
-      <button className="cache-clear" onClick={copy} title="Copy the diagnostic log to clipboard — paste it when reporting a bug">
+      <button className="cache-clear" onClick={reveal} title="Open the folder containing diagnostics.log — useful for attaching prior-session logs to a bug report" style={{ marginRight: 8 }}>
+        Reveal file
+      </button>
+      <button className="cache-clear" onClick={copy} title="Copy the in-memory diagnostic log to clipboard — paste it when reporting a bug">
         Copy log
       </button>
     </div>
