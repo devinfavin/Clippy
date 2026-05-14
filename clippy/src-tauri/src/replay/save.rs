@@ -220,13 +220,29 @@ async fn probe_saved_clip(mp4: &Path) -> Option<(f64, f64)> {
 
 /// Write the snapshot to disk and mux into a single MP4 with video + N audio
 /// tracks. Video is stream-copied; audio is encoded to AAC at 192kbps each.
+///
+/// `progress` is an optional `(AppHandle, save_id)` pair — when present, the
+/// pipeline emits `replay://save-progress` events at each stage boundary so
+/// the in-game overlay can reflect "writing → bsf → muxing → finalizing".
+/// Pure-Rust call sites (`clippy-self-test`'s `save_path` step, test
+/// harnesses) pass `None` and skip the events.
 pub async fn write_and_mux(
     packets: &[VideoPacket],
     audio_tracks: &[AudioTrackSnapshot],
     fps: u32,
     encoder_name: &str,
     out_mp4: &Path,
+    progress: Option<(&tauri::AppHandle, u64)>,
 ) -> Result<SaveTimings, String> {
+    use tauri::Emitter;
+    let emit_stage = |stage: &str| {
+        if let Some((app, save_id)) = progress {
+            #[derive(serde::Serialize, Clone)]
+            #[serde(rename_all = "camelCase")]
+            struct P<'a> { id: u64, stage: &'a str }
+            let _ = app.emit("replay://save-progress", P { id: save_id, stage });
+        }
+    };
     use std::time::Instant;
     let total_start = Instant::now();
     if packets.is_empty() {
@@ -304,6 +320,7 @@ pub async fn write_and_mux(
     let needs_bsf = needs_bsf_pass(encoder_name);
     let bsf_start = Instant::now();
     let mux_input_path: PathBuf = if needs_bsf {
+        emit_stage("bsf");
         let h264_fixed_path = save_dir.join("fixed.h264");
         let bsf_result = {
             let mut cmd = tokio::process::Command::new(&ffmpeg);
@@ -476,6 +493,7 @@ pub async fn write_and_mux(
 
     args.push(out_mp4.to_string_lossy().into_owned());
 
+    emit_stage("muxing");
     let mut cmd = tokio::process::Command::new(&ffmpeg);
     cmd.args(&args);
     // Suppress the flash-of-console-window when ffmpeg launches mid-game.
@@ -500,6 +518,7 @@ pub async fn write_and_mux(
         ));
     }
 
+    emit_stage("finalizing");
     // Post-save ffprobe verification. Never blocks; returns None if probe
     // failed for any reason. Caller does the expected-vs-actual comparison.
     let probe_start = Instant::now();

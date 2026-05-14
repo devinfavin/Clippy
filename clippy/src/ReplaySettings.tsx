@@ -11,6 +11,7 @@ import { resolvedAutoEncoder } from "./settings/encoder-name";
 import {
   BITRATE_PRESETS,
   LS,
+  OVERLAY_DEFAULTS,
   getAutoStart,
   getReplayStartArgs,
   getSaveBehavior,
@@ -18,6 +19,7 @@ import {
   lsBool,
   lsMap,
   lsNum,
+  type OverlayPosition,
 } from "./settings/replay-ls";
 import type {
   AudioDevice,
@@ -35,6 +37,13 @@ export { capabilityHint } from "./settings/resource-impact";
 export type { EncoderPref, SaveBehavior, SystemInfo } from "./settings/replay-types";
 
 export const ReplaySettings = memo(ReplaySettingsImpl);
+
+const POSITION_LABELS: Record<OverlayPosition, string> = {
+  topLeft: "top-left",
+  topRight: "top-right",
+  bottomLeft: "bottom-left",
+  bottomRight: "bottom-right",
+};
 
 function ReplaySettingsImpl() {
   const status = useReplayStatus(500);
@@ -73,6 +82,27 @@ function ReplaySettingsImpl() {
   const [audioOpen, setAudioOpen] = useState<boolean>(() => lsBool(LS.audioOpen, false));
   const [gamesOpen, setGamesOpen] = useState<boolean>(() => lsBool(LS.gamesOpen, false));
   const [qualityOpen, setQualityOpen] = useState<boolean>(() => lsBool(LS.qualityOpen, false));
+  const [notifyOpen, setNotifyOpen] = useState<boolean>(() => lsBool(LS.notifyOpen, false));
+
+  // ----- in-game save-progress overlay settings -----
+  const [overlayEnabled, setOverlayEnabled] = useState<boolean>(
+    () => lsBool(LS.overlayEnabled, OVERLAY_DEFAULTS.enabled),
+  );
+  const [overlayPosition, setOverlayPosition] = useState<OverlayPosition>(
+    () => (localStorage.getItem(LS.overlayPosition) as OverlayPosition | null) ?? OVERLAY_DEFAULTS.position,
+  );
+  const [overlayHideMs, setOverlayHideMs] = useState<number>(
+    () => lsNum(LS.overlayHideMs, OVERLAY_DEFAULTS.hideMs),
+  );
+  const [overlaySuccessSound, setOverlaySuccessSound] = useState<boolean>(
+    () => lsBool(LS.overlaySuccessSound, OVERLAY_DEFAULTS.successSound),
+  );
+  const [overlayFailureSound, setOverlayFailureSound] = useState<boolean>(
+    () => lsBool(LS.overlayFailureSound, OVERLAY_DEFAULTS.failureSound),
+  );
+  const [overlayVolume, setOverlayVolume] = useState<number>(
+    () => lsNum(LS.overlayVolume, OVERLAY_DEFAULTS.volume),
+  );
 
   // ----- Phase 7 quality controls (fps removed — hardcoded 60 backend-side) -----
   const [bitrateKbps, setBitrateKbps] = useState<number>(() => lsNum(LS.bitrate, 25_000));
@@ -240,6 +270,13 @@ function ReplaySettingsImpl() {
   useEffect(() => { localStorage.setItem(LS.audioOpen, String(audioOpen)); }, [audioOpen]);
   useEffect(() => { localStorage.setItem(LS.gamesOpen, String(gamesOpen)); }, [gamesOpen]);
   useEffect(() => { localStorage.setItem(LS.qualityOpen, String(qualityOpen)); }, [qualityOpen]);
+  useEffect(() => { localStorage.setItem(LS.notifyOpen, String(notifyOpen)); }, [notifyOpen]);
+  useEffect(() => { localStorage.setItem(LS.overlayEnabled, String(overlayEnabled)); }, [overlayEnabled]);
+  useEffect(() => { localStorage.setItem(LS.overlayPosition, overlayPosition); }, [overlayPosition]);
+  useEffect(() => { localStorage.setItem(LS.overlayHideMs, String(overlayHideMs)); }, [overlayHideMs]);
+  useEffect(() => { localStorage.setItem(LS.overlaySuccessSound, String(overlaySuccessSound)); }, [overlaySuccessSound]);
+  useEffect(() => { localStorage.setItem(LS.overlayFailureSound, String(overlayFailureSound)); }, [overlayFailureSound]);
+  useEffect(() => { localStorage.setItem(LS.overlayVolume, String(overlayVolume)); }, [overlayVolume]);
   useEffect(() => { localStorage.setItem(LS.autoStart, String(autoStart)); }, [autoStart]);
   useEffect(() => { localStorage.setItem(LS.bitrate, String(bitrateKbps)); }, [bitrateKbps]);
   useEffect(() => { localStorage.setItem(LS.resolutionKind, resKind); }, [resKind]);
@@ -538,6 +575,111 @@ function ReplaySettingsImpl() {
           </button>
         </div>
       </div>
+
+      {/* ---------------- In-game save overlay ---------------- */}
+      <Accordion
+        open={notifyOpen}
+        onToggle={() => setNotifyOpen((v) => !v)}
+        title="In-game save overlay"
+        summary={
+          overlayEnabled
+            ? `Shown at ${POSITION_LABELS[overlayPosition]}`
+            : "Off — saves happen silently"
+        }
+      >
+        <p className="settings-section-blurb">
+          When you press the save hotkey during a game, a small overlay surfaces
+          in the corner of your screen so you can see the save's progress without
+          alt-tabbing. Errors persist by default so a failed save can't be
+          missed.
+        </p>
+
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={overlayEnabled}
+            onChange={(e) => setOverlayEnabled(e.target.checked)}
+          />
+          <span>Show overlay on save</span>
+        </label>
+
+        <div
+          className="settings-row"
+          style={{ opacity: overlayEnabled ? 1 : 0.5 }}
+        >
+          <label className="settings-label">Position</label>
+          <select
+            value={overlayPosition}
+            onChange={(e) => setOverlayPosition(e.target.value as OverlayPosition)}
+            disabled={!overlayEnabled}
+          >
+            <option value="topLeft">Top-left</option>
+            <option value="topRight">Top-right</option>
+            <option value="bottomLeft">Bottom-left</option>
+            <option value="bottomRight">Bottom-right</option>
+          </select>
+        </div>
+
+        <p className="settings-section-blurb settings-help">
+          Hovering the overlay pauses its auto-hide timer; moving the cursor
+          away restarts a fresh countdown.
+        </p>
+
+        <div
+          className="settings-row"
+          style={{ opacity: overlayEnabled ? 1 : 0.5 }}
+        >
+          <label className="settings-label">Auto-hide after</label>
+          <select
+            value={String(overlayHideMs)}
+            onChange={(e) => setOverlayHideMs(parseInt(e.target.value, 10))}
+            disabled={!overlayEnabled}
+          >
+            <option value="3000">3 seconds</option>
+            <option value="5000">5 seconds</option>
+            <option value="8000">8 seconds</option>
+            <option value="15000">15 seconds</option>
+            <option value="30000">30 seconds</option>
+          </select>
+        </div>
+
+        <label className="settings-checkbox" style={{ opacity: overlayEnabled ? 1 : 0.5 }}>
+          <input
+            type="checkbox"
+            checked={overlaySuccessSound}
+            onChange={(e) => setOverlaySuccessSound(e.target.checked)}
+            disabled={!overlayEnabled}
+          />
+          <span>Play a chime when a save completes</span>
+        </label>
+
+        <label className="settings-checkbox" style={{ opacity: overlayEnabled ? 1 : 0.5 }}>
+          <input
+            type="checkbox"
+            checked={overlayFailureSound}
+            onChange={(e) => setOverlayFailureSound(e.target.checked)}
+            disabled={!overlayEnabled}
+          />
+          <span>Play a tone when a save fails</span>
+        </label>
+
+        <div
+          className="settings-row"
+          style={{ opacity: overlayEnabled && (overlaySuccessSound || overlayFailureSound) ? 1 : 0.5 }}
+        >
+          <label className="settings-label">Overlay sound volume</label>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={overlayVolume}
+            onChange={(e) => setOverlayVolume(parseInt(e.target.value, 10))}
+            disabled={!overlayEnabled || (!overlaySuccessSound && !overlayFailureSound)}
+          />
+          <span className="settings-value mono">{overlayVolume}%</span>
+        </div>
+      </Accordion>
 
       {/* ---------------- Audio sources ---------------- */}
       <Accordion

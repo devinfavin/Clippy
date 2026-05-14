@@ -474,7 +474,7 @@ fn check_save_path() -> Result<String, String> {
         .build()
         .map_err(|e| format!("build tokio runtime: {e}"))?;
     let timings = rt
-        .block_on(save::write_and_mux(&packets, &[], 60, "libx264", &out_mp4))
+        .block_on(save::write_and_mux(&packets, &[], 60, "libx264", &out_mp4, None))
         .map_err(|e| format!("write_and_mux: {e}"))?;
 
     // Stage 3: assertions.

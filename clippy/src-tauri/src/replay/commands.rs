@@ -11,9 +11,9 @@
 use std::sync::Arc;
 
 use super::{
-    allowlist_file, audio, capture, coordinator, finish_save, games,
+    allowlist_file, audio, capture, coordinator, games,
     load_recent_adds, persist_manual, prune_dead_coord, save_dir_pref_file, sysinfo,
-    take_snapshot, track_recent_add, untrack_recent_add,
+    track_recent_add, untrack_recent_add,
 };
 use super::{
     CaptureModeArg, EncoderPreference, ReplaySaveResult, ReplaySettings, ReplayState,
@@ -248,10 +248,13 @@ pub fn replay_stop(
 #[tauri::command]
 pub async fn replay_save(
     app: tauri::AppHandle,
-    state: tauri::State<'_, ReplayState>,
+    _state: tauri::State<'_, ReplayState>,
 ) -> Result<ReplaySaveResult, String> {
-    let snap = take_snapshot(&state)?;
-    finish_save(&app, snap).await
+    // Funnel through save_active so the same overlay events (save-started,
+    // save-progress, saved/save-error) fire for the frontend "Save now"
+    // button and the global hotkey alike. The unused state param is kept
+    // for API stability; save_active re-fetches it.
+    super::save_active(&app).await
 }
 
 #[tauri::command]

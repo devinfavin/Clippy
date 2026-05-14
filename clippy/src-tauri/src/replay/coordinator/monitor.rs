@@ -35,6 +35,16 @@ pub(super) fn run_monitor(
         Ok(w) => w,
         Err(e) => {
             crate::diag(&app, format!("[replay] monitor worker spawn FAILED: {e}"));
+            use tauri::Emitter;
+            let _ = app.emit(
+                "replay://spawn-failed",
+                crate::replay::SpawnFailedPayload {
+                    id: crate::replay::unix_nanos(),
+                    window_title: String::new(),
+                    kind: "encoder_init".into(),
+                    msg: e.clone(),
+                },
+            );
             if let Ok(mut s) = status.lock() {
                 *s = ReplayStatus::Idle;
             }

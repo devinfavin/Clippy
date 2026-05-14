@@ -24,7 +24,39 @@ export const LS = {
   encoderPref: "clippy-replay-encoder-pref",
   keyframeSecs: "clippy-replay-keyframe-secs", // 0 = auto
   maxWorkers: "clippy-replay-max-workers",
+  // ----- in-game save-progress overlay -----
+  overlayEnabled: "clippy-overlay-enabled",
+  overlayPosition: "clippy-overlay-position",            // "bottomRight" | "topRight" | "topLeft" | "bottomLeft"
+  overlayHideMs: "clippy-overlay-hide-ms",               // number, ms; bounded, hover pauses
+  overlaySuccessSound: "clippy-overlay-success-sound",   // bool
+  overlayFailureSound: "clippy-overlay-failure-sound",   // bool
+  overlayVolume: "clippy-overlay-volume",                // 0..100
+  notifyOpen: "clippy-replay-notify-section-open",
 } as const;
+
+export type OverlayPosition = "bottomRight" | "topRight" | "topLeft" | "bottomLeft";
+
+export const OVERLAY_DEFAULTS = {
+  enabled: true,
+  position: "bottomRight" as OverlayPosition,
+  // Single auto-hide timer for both success and failure. Always > 0 so the
+  // cursor-poll loop backing click-through can't run indefinitely.
+  hideMs: 5000,
+  successSound: true,
+  failureSound: true,
+  volume: 50,
+} as const;
+
+export function readOverlaySettings() {
+  return {
+    enabled: lsBool(LS.overlayEnabled, OVERLAY_DEFAULTS.enabled),
+    position: (localStorage.getItem(LS.overlayPosition) as OverlayPosition | null) ?? OVERLAY_DEFAULTS.position,
+    hideMs: lsNum(LS.overlayHideMs, OVERLAY_DEFAULTS.hideMs),
+    successSound: lsBool(LS.overlaySuccessSound, OVERLAY_DEFAULTS.successSound),
+    failureSound: lsBool(LS.overlayFailureSound, OVERLAY_DEFAULTS.failureSound),
+    volume: lsNum(LS.overlayVolume, OVERLAY_DEFAULTS.volume),
+  };
+}
 
 /** Bitrate presets (kbps). Custom = user-typed value. */
 export const BITRATE_PRESETS = [

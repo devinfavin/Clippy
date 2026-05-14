@@ -23,7 +23,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use axum::routing::get;
 use axum::Router;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex as AsyncMutex;
 
 /// (Re)register the global save-replay hotkey.
@@ -57,21 +57,19 @@ fn register_save_hotkey(app: &AppHandle, shortcut_str: &str) -> Result<(), Strin
                 format!("[replay] save hotkey FIRED ({shortcut_label}) — invoking save"),
             );
             tauri::async_runtime::spawn(async move {
+                // save_active emits replay://save-started / save-progress /
+                // saved / save-error itself so the in-game overlay window
+                // can drive its UI off the events. We just log the outcome
+                // for post-mortem diagnostics.
                 match replay::save_active(&handle).await {
-                    Ok(result) => {
-                        diag(
-                            &handle,
-                            format!(
-                                "replay save OK — window=\"{}\" → {}",
-                                result.window_title, result.path
-                            ),
-                        );
-                        let _ = handle.emit("replay://saved", &result.path);
-                    }
-                    Err(e) => {
-                        diag(&handle, format!("replay save FAILED: {e}"));
-                        let _ = handle.emit("replay://save-error", e);
-                    }
+                    Ok(result) => diag(
+                        &handle,
+                        format!(
+                            "replay save OK — window=\"{}\" → {}",
+                            result.window_title, result.path
+                        ),
+                    ),
+                    Err(e) => diag(&handle, format!("replay save FAILED: {e}")),
                 }
             });
         })
@@ -93,7 +91,16 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // window-state restores saved geometry per window label. Exclude
+        // "save-overlay" from tracking — its size + position are computed
+        // at runtime (per-monitor corner + fixed inner_size), and persisting
+        // them across sessions would clobber the builder's inner_size with
+        // whatever the plugin restored.
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_denylist(&["save-overlay"])
+                .build(),
+        )
         // Intercept the X button so we can hide-to-tray instead of exit when
         // the user opted in (keeps the replay buffer running in background).
         .on_window_event(|window, event| {
@@ -202,6 +209,35 @@ pub fn run() {
                 win.open_devtools();
             }
 
+            // In-game save-progress overlay window. Created hidden at startup;
+            // the frontend (?overlay=1 → OverlayApp.tsx) listens to
+            // `replay://save-*` events and shows/hides this window itself.
+            // Borderless + transparent + always-on-top + skip-taskbar = a
+            // notification-style surface that paints over the game (when it's
+            // running in borderless windowed mode; exclusive-fullscreen games
+            // suppress all overlays — same failure mode as Windows toasts).
+            // The window is only composited when visible; while hidden, DWM
+            // doesn't include it in the present chain, so it's zero-cost.
+            {
+                use tauri::WebviewUrl;
+                let _ = tauri::WebviewWindowBuilder::new(
+                    app,
+                    "save-overlay",
+                    WebviewUrl::App("index.html?overlay=1".into()),
+                )
+                .title("Clippy save overlay")
+                .inner_size(400.0, 150.0)
+                .decorations(false)
+                .resizable(false)
+                .skip_taskbar(true)
+                .always_on_top(true)
+                .visible(false)
+                .transparent(true)
+                .shadow(false)
+                .focused(false)
+                .build();
+            }
+
             // Global hotkey for "save replay buffer" — defaults to Alt+F10.
             // Re-registered at runtime by `replay_set_save_hotkey` when the
             // user rebinds via the keybind editor.
@@ -275,6 +311,7 @@ pub fn run() {
             extract::extract_track,
             extract::extract_tracks_batch,
             diag::get_diagnostics,
+            diag::frontend_diag,
             replay::commands::get_replay_status,
             replay::commands::replay_start,
             replay::commands::replay_stop,

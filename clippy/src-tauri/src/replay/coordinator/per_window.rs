@@ -187,6 +187,30 @@ pub(super) fn run_per_window(
                                 &app,
                                 format!("[replay] worker spawn FAILED for \"{title}\": {e}{hint}"),
                             );
+                            // Surface to the user via the in-game overlay so
+                            // they actually see that the buffer didn't start.
+                            // Without this, the user fires the save hotkey
+                            // later, nothing happens, no clue why.
+                            use tauri::Emitter;
+                            let kind = if !hint.is_empty() {
+                                "nvenc_ceiling"
+                            } else {
+                                "encoder_init"
+                            };
+                            let combined_msg = if hint.is_empty() {
+                                e.clone()
+                            } else {
+                                format!("{e}{hint}")
+                            };
+                            let _ = app.emit(
+                                "replay://spawn-failed",
+                                crate::replay::SpawnFailedPayload {
+                                    id: crate::replay::unix_nanos(),
+                                    window_title: title.clone(),
+                                    kind: kind.into(),
+                                    msg: combined_msg,
+                                },
+                            );
                             continue;
                         }
                     }

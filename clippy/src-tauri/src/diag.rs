@@ -32,6 +32,21 @@ pub fn set_diag_verbose(state: tauri::State<'_, DiagVerbose>, enabled: bool) {
     state.0.store(enabled, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Frontend-callable diag entry. Lets any renderer-side hook (notably the
+/// in-game overlay window, which can't easily share console output) emit a
+/// line into the canonical diag log so the user can copy-paste it for
+/// post-mortem debugging. Caps the message at 512 chars to bound RAM
+/// pressure on the ring buffer.
+#[tauri::command]
+pub fn frontend_diag(app: AppHandle, msg: String) {
+    let truncated = if msg.chars().count() > 512 {
+        msg.chars().take(512).collect::<String>()
+    } else {
+        msg
+    };
+    diag(&app, format!("[fe] {truncated}"));
+}
+
 /// Convert a Unix epoch (seconds) to a calendar (year, month, day) tuple in
 /// UTC. Pure-Rust adaptation of Howard Hinnant's `civil_from_days`. Avoids
 /// dragging in `chrono`/`time` for the few timestamps we render.

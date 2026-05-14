@@ -270,13 +270,144 @@ pub struct ReplaySaveResult {
     pub window_title: String,
 }
 
+// ---------- save-progress event payloads ----------
+//
+// Drives the in-game save overlay. Every save flow emits four kinds of
+// events keyed by a per-save `id` (Unix nanos at hotkey press): a `started`
+// event fired the moment the save begins, zero or more `progress` events as
+// the pipeline transitions stages, then exactly one terminal event
+// (`saved` on success, `save-error` on failure). The overlay window keys
+// off `id` so concurrent saves don't blend together in the UI.
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveStartedPayload {
+    pub id: u64,
+    /// Game window name from the snapshot, or empty if the snapshot couldn't
+    /// be taken (e.g. buffer not running). The overlay shows "Saving…" while
+    /// this is empty.
+    pub window_title: String,
+    /// Approximate captured buffer length, computed from packet count and
+    /// effective fps. Used for the overlay's "Saving 60s of MyGame…" line.
+    pub duration_secs: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveProgressPayload {
+    pub id: u64,
+    /// One of: "writing" | "bsf" | "muxing" | "finalizing". The overlay maps
+    /// each to a human-readable line; unknown stages render verbatim.
+    pub stage: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedPayload {
+    pub id: u64,
+    pub path: String,
+    pub size_mb: f64,
+    pub window_title: String,
+    /// Number of audio tracks that captured non-empty packets (made it into
+    /// the saved MP4). When less than `tracks_total`, the overlay surfaces
+    /// "Saved with N of M audio tracks" so the user notices missing tracks
+    /// instead of finding them gone hours later.
+    pub tracks_saved: u32,
+    pub tracks_total: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveErrorPayload {
+    pub id: u64,
+    /// Coarse machine-readable bucket so the frontend can map to friendly
+    /// text. One of: "buffer_empty" | "not_running" | "io" | "ffmpeg" | "generic".
+    pub kind: String,
+    pub msg: String,
+}
+
+/// Emitted when a per-window worker fails to start (encoder init error, MFT
+/// activation failure, NVENC concurrent-session cap). Surfaced via the
+/// in-game overlay's spawn-error phase so the user sees in-game feedback
+/// when a buffer silently fails to start for a focused game — otherwise the
+/// hotkey just does nothing later and the user has no idea why.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnFailedPayload {
+    pub id: u64,
+    pub window_title: String,
+    /// One of: "nvenc_ceiling" | "encoder_init" | "generic".
+    pub kind: String,
+    pub msg: String,
+}
+
+fn classify_save_error(msg: &str) -> &'static str {
+    let l = msg.to_ascii_lowercase();
+    if l.contains("buffer is empty") { return "buffer_empty"; }
+    if l.contains("not running") { return "not_running"; }
+    if l.contains("ffmpeg") { return "ffmpeg"; }
+    if l.contains("write h264")
+        || l.contains("create save")
+        || l.contains("permission denied")
+        || l.contains("no space")
+        || l.contains("disk full")
+        || l.contains("audio track")
+    {
+        return "io";
+    }
+    "generic"
+}
+
+pub(crate) fn unix_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
 /// Same flow as `replay_save`, but callable from non-command contexts (e.g.
-/// the global hotkey handler in `lib.rs`).
+/// the global hotkey handler in `lib.rs`). Emits `replay://save-started`
+/// immediately, `replay://save-progress` at each pipeline stage, and exactly
+/// one of `replay://saved` / `replay://save-error` at completion so the
+/// in-game overlay window can surface the save state without the renderer
+/// being foreground.
 pub async fn save_active(app: &tauri::AppHandle) -> Result<ReplaySaveResult, String> {
-    use tauri::Manager;
+    use tauri::{Emitter, Manager};
+    let id = unix_nanos();
     let state = app.state::<ReplayState>();
-    let snap = take_snapshot(&state)?;
-    finish_save(app, snap).await
+
+    // Snapshot first so save-started can include window title + duration.
+    // Snapshot is fast (clones Arc-shared packet buffers — ~tens of ms),
+    // well below human perception of "instant feedback on hotkey".
+    let snap = match take_snapshot(&state) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = app.emit("replay://save-started", &SaveStartedPayload {
+                id,
+                window_title: String::new(),
+                duration_secs: 0,
+            });
+            let _ = app.emit("replay://save-error", &SaveErrorPayload {
+                id,
+                kind: classify_save_error(&e).into(),
+                msg: e.clone(),
+            });
+            return Err(e);
+        }
+    };
+
+    // Estimate display duration from packet count + fps. PTS-span would be
+    // more accurate but write_and_mux does that math too; for an overlay
+    // header line "Saving Ns of MyGame…", packets/fps is fine.
+    let approx_duration_secs =
+        (snap.packets.len() as f64 / (snap.fps.max(1) as f64)).round() as u32;
+    let _ = app.emit("replay://save-started", &SaveStartedPayload {
+        id,
+        window_title: snap.window_title.clone(),
+        duration_secs: approx_duration_secs,
+    });
+
+    finish_save(app, snap, id).await
 }
 
 pub(super) fn take_snapshot(state: &ReplayState) -> Result<coordinator::SaveSnapshot, String> {
@@ -293,8 +424,19 @@ pub(super) fn take_snapshot(state: &ReplayState) -> Result<coordinator::SaveSnap
 pub(super) async fn finish_save(
     app: &tauri::AppHandle,
     mut snap: coordinator::SaveSnapshot,
+    save_id: u64,
 ) -> Result<ReplaySaveResult, String> {
-    use tauri::Manager;
+    use tauri::{Emitter, Manager};
+
+    // Helper: emit a `replay://save-error` event + bail. Closes over `app` and
+    // `save_id` so call sites read as a single `?`-style early return.
+    let emit_error = |msg: &str| {
+        let _ = app.emit("replay://save-error", &SaveErrorPayload {
+            id: save_id,
+            kind: classify_save_error(msg).into(),
+            msg: msg.to_string(),
+        });
+    };
 
     // Refresh each captured-track's friendly name from the live audio_names
     // map before muxing. This is what makes "rename a device after Start"
@@ -319,17 +461,19 @@ pub(super) async fn finish_save(
     }
 
     let dir = match app.try_state::<crate::ReplaySaveDir>() {
-        Some(s) => s.0.lock().map_err(|e| e.to_string())?.clone(),
+        Some(s) => match s.0.lock().map_err(|e| e.to_string()) {
+            Ok(g) => g.clone(),
+            Err(e) => { emit_error(&e); return Err(e); }
+        },
         None => default_save_dir(app),
     };
     // Best-effort: create the directory if it disappeared since startup
     // (user deleted it, network drive offline, etc.).
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        format!(
-            "couldn't create replay save folder {}: {e}",
-            dir.display()
-        )
-    })?;
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        let msg = format!("couldn't create replay save folder {}: {e}", dir.display());
+        emit_error(&msg);
+        return Err(msg);
+    }
 
     let ts_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -404,14 +548,26 @@ pub(super) async fn finish_save(
         ),
     );
 
-    let timings = save::write_and_mux(
+    // Emit the first stage event. By the time we reach write_and_mux, the
+    // snapshot + path resolution + audio summary diag have already run; from
+    // the user's perspective the save is now "writing to disk".
+    let _ = app.emit("replay://save-progress", &SaveProgressPayload {
+        id: save_id,
+        stage: "writing".into(),
+    });
+
+    let timings = match save::write_and_mux(
         &snap.packets,
         &snap.audio_tracks,
         snap.fps,
         &snap.encoder_name,
         &out,
+        Some((app, save_id)),
     )
-    .await?;
+    .await {
+        Ok(t) => t,
+        Err(e) => { emit_error(&e); return Err(e); }
+    };
 
     // Save timing breakdown: lets us see *where* a slow save is slow
     // (snapshot copy / disk write / ffmpeg mux / post-probe) without guessing.
@@ -469,8 +625,23 @@ pub(super) async fn finish_save(
         crate::diag(app, "[replay] save · probe skipped or failed (clip should still be playable)");
     }
 
+    let out_path = out.to_string_lossy().into_owned();
+    let size_mb = std::fs::metadata(&out)
+        .map(|m| m.len() as f64 / (1024.0 * 1024.0))
+        .unwrap_or(0.0);
+    // `total` + `dropped` were computed before the mux above. tracks_saved is
+    // tracks with non-empty packet sets that actually landed in the MP4.
+    let tracks_saved = (total - dropped.len()) as u32;
+    let _ = app.emit("replay://saved", &SavedPayload {
+        id: save_id,
+        path: out_path.clone(),
+        size_mb,
+        window_title: snap.window_title.clone(),
+        tracks_saved,
+        tracks_total: total as u32,
+    });
     Ok(ReplaySaveResult {
-        path: out.to_string_lossy().into_owned(),
+        path: out_path,
         window_title: snap.window_title,
     })
 }
