@@ -21,6 +21,15 @@ import {
   lsNum,
   type OverlayPosition,
 } from "./settings/replay-ls";
+import {
+  SelectField,
+  SettingsGroup,
+  SettingsLabel,
+  SettingsRow,
+  StatusCard,
+  Stepper,
+  Toggle,
+} from "./settings/primitives";
 import type {
   AudioDevice,
   CaptureMode,
@@ -37,13 +46,6 @@ export { capabilityHint } from "./settings/resource-impact";
 export type { EncoderPref, SaveBehavior, SystemInfo } from "./settings/replay-types";
 
 export const ReplaySettings = memo(ReplaySettingsImpl);
-
-const POSITION_LABELS: Record<OverlayPosition, string> = {
-  topLeft: "top-left",
-  topRight: "top-right",
-  bottomLeft: "bottom-left",
-  bottomRight: "bottom-right",
-};
 
 function ReplaySettingsImpl() {
   const status = useReplayStatus(500);
@@ -78,11 +80,11 @@ function ReplaySettingsImpl() {
   const [gameSearch, setGameSearch] = useState("");
   const [addCountdown, setAddCountdown] = useState<number | null>(null);
 
-  // ----- accordion state -----
+  // ----- accordion state — only Audio sources + Games tracked keep their
+  // accordion treatment after the Phase-7 retrofit. Quality and Overlay
+  // sections moved to flat SettingsGroups.
   const [audioOpen, setAudioOpen] = useState<boolean>(() => lsBool(LS.audioOpen, false));
   const [gamesOpen, setGamesOpen] = useState<boolean>(() => lsBool(LS.gamesOpen, false));
-  const [qualityOpen, setQualityOpen] = useState<boolean>(() => lsBool(LS.qualityOpen, false));
-  const [notifyOpen, setNotifyOpen] = useState<boolean>(() => lsBool(LS.notifyOpen, false));
 
   // ----- in-game save-progress overlay settings -----
   const [overlayEnabled, setOverlayEnabled] = useState<boolean>(
@@ -269,8 +271,6 @@ function ReplaySettingsImpl() {
   }, [useProcessLoopback]);
   useEffect(() => { localStorage.setItem(LS.audioOpen, String(audioOpen)); }, [audioOpen]);
   useEffect(() => { localStorage.setItem(LS.gamesOpen, String(gamesOpen)); }, [gamesOpen]);
-  useEffect(() => { localStorage.setItem(LS.qualityOpen, String(qualityOpen)); }, [qualityOpen]);
-  useEffect(() => { localStorage.setItem(LS.notifyOpen, String(notifyOpen)); }, [notifyOpen]);
   useEffect(() => { localStorage.setItem(LS.overlayEnabled, String(overlayEnabled)); }, [overlayEnabled]);
   useEffect(() => { localStorage.setItem(LS.overlayPosition, overlayPosition); }, [overlayPosition]);
   useEffect(() => { localStorage.setItem(LS.overlayHideMs, String(overlayHideMs)); }, [overlayHideMs]);
@@ -411,275 +411,242 @@ function ReplaySettingsImpl() {
   // GamesTrackedList — it owns its own filtering + auto-expand-on-search.)
 
   return (
-    <section className="settings-section">
-      <header className="settings-tab-header">
-        <h3 className="settings-tab-title">Replay buffer</h3>
-        <p className="settings-tab-blurb">
-          Continuously captures the last few minutes of focused gameplay so you can save a clip after the fact. Press your save hotkey to flush the buffer to an MP4.
+    <section className="settings-tab-pane">
+      <header>
+        <h3 className="settings-tab-pane-title">Replay buffer</h3>
+        <p className="settings-tab-pane-blurb">
+          Continuously captures the last few minutes of focused gameplay so you can
+          save a clip after the fact. Press your save hotkey to flush the buffer
+          to an MP4.
         </p>
       </header>
 
-      <div className="settings-row">
+      {/* Big status / start-stop card at the top — answers "is it running?"
+          at a glance and gives the primary action. */}
+      <StatusCard tone={isRunning ? "good" : "info"}>
+        <span
+          className="replay-buffer-status-dot"
+          data-running={isRunning ? "1" : "0"}
+          aria-hidden
+        />
+        <div className="replay-buffer-status-text">
+          <div className="replay-buffer-status-title">
+            {!isRunning
+              ? "Replay buffer is off"
+              : status.state === "Saving"
+                ? "Saving last replay…"
+                : status.state === "Active"
+                  ? `Capturing · ${status.window_title || "focused game"}`
+                  : captureMode === "monitor"
+                    ? "Watching the selected display"
+                    : "Watching for games"}
+          </div>
+          <div className="replay-buffer-status-sub mono">
+            {isRunning
+              ? `${minutes} min buffer · h264/aac · ${captureMode === "monitor" ? "monitor" : "per-window"}`
+              : "Press Start to arm the buffer."}
+          </div>
+        </div>
         <button
-          className={`settings-primary-btn${isRunning ? " is-on" : ""}`}
+          className={`btn primary${busy ? " is-busy" : ""}`}
           onClick={isRunning ? stop : start}
           disabled={busy}
         >
-          {busy ? "…" : isRunning ? "Stop replay buffer" : "Start replay buffer"}
+          {busy ? "…" : isRunning ? "Stop" : "Start"}
         </button>
-        <span className="settings-aux">
-          {!isRunning
-            ? "Off"
-            : status.state === "Saving"
-              ? "Saving…"
-              : status.state === "Active"
-                ? `Recording: ${status.window_title || "current target"}`
-                : captureMode === "monitor"
-                  ? "Watching the selected display"
-                  : "Watching for games — focus a game in the allowlist to start capturing"}
-        </span>
-      </div>
+      </StatusCard>
 
       {error && <div className="settings-error">{error}</div>}
 
-      <label className="settings-checkbox">
-        <input
-          type="checkbox"
-          checked={autostartWithOs}
-          onChange={(e) => toggleAutostartWithOs(e.target.checked)}
-        />
-        <span>Start Clippy when Windows starts</span>
-      </label>
-
-      <label className="settings-checkbox">
-        <input
-          type="checkbox"
-          checked={autoStart}
-          onChange={(e) => setAutoStart(e.target.checked)}
-        />
-        <span>Start the replay buffer when Clippy launches</span>
-      </label>
-
-      <label className="settings-checkbox">
-        <input
-          type="checkbox"
-          checked={hideOnClose}
-          onChange={(e) => setHideOnCloseState(e.target.checked)}
-        />
-        <span>
-          Close to system tray (keep Clippy running in the background)
-          <span className="settings-aux"> Right-click the tray icon to fully quit.</span>
-        </span>
-      </label>
-
-      <label className="settings-checkbox">
-        <input
-          type="checkbox"
-          checked={diagVerbose}
-          onChange={(e) => setDiagVerbose(e.target.checked)}
-        />
-        <span>
-          Verbose diagnostics (log non-game window titles)
-          <span className="settings-aux">
-            {" "}
-            Off by default for privacy — non-game window titles (browser tabs,
-            document names) appear as &lt;non-game window&gt; in the log unless
-            this is on.
-          </span>
-        </span>
-      </label>
-
-      <div className="settings-row">
-        <label className="settings-label">Buffer duration</label>
-        <input
-          type="range"
-          min={60}
-          max={600}
-          step={30}
-          value={durationSecs}
-          onChange={(e) => setDurationSecs(parseInt(e.target.value, 10))}
-          disabled={isRunning}
-        />
-        <span className="settings-value mono">{minutes} min</span>
+      <div>
+        <SettingsLabel>App behavior</SettingsLabel>
+        <SettingsGroup>
+          <SettingsRow
+            title="Start Clippy when Windows starts"
+            subtitle="Auto-launch on login so the buffer is armed before your games are."
+          >
+            <Toggle value={autostartWithOs} onChange={toggleAutostartWithOs} />
+          </SettingsRow>
+          <SettingsRow
+            title="Start the replay buffer when Clippy launches"
+            subtitle="Skip the manual Start click each session."
+          >
+            <Toggle value={autoStart} onChange={setAutoStart} />
+          </SettingsRow>
+          <SettingsRow
+            title="Close to system tray"
+            subtitle="Keep Clippy running in the background when you hit ×. Right-click the tray icon to fully quit."
+          >
+            <Toggle value={hideOnClose} onChange={setHideOnCloseState} />
+          </SettingsRow>
+          <SettingsRow
+            title="Verbose diagnostics"
+            subtitle={
+              <>Log non-game window titles. Off by default for privacy — browser tabs and document names appear as <span className="mono">&lt;non-game window&gt;</span> in the log unless this is on.</>
+            }
+          >
+            <Toggle value={diagVerbose} onChange={setDiagVerbose} />
+          </SettingsRow>
+        </SettingsGroup>
       </div>
 
-      <div className="settings-row">
-        <label className="settings-label">Capture mode</label>
-        <select
-          value={captureMode}
-          onChange={(e) => setCaptureMode(e.target.value as CaptureMode)}
-          disabled={isRunning}
-        >
-          <option value="perWindow">Per-window (game allowlist)</option>
-          <option value="monitor">Full screen (single display)</option>
-        </select>
+      <div>
+        <SettingsLabel>Buffer</SettingsLabel>
+        <SettingsGroup>
+          <SettingsRow
+            title="Buffer duration"
+            subtitle="How many seconds Clippy keeps in memory before the save hotkey trims a clip."
+          >
+            <Stepper
+              value={durationSecs}
+              onChange={setDurationSecs}
+              min={60}
+              max={600}
+              step={30}
+              unit="s"
+            />
+          </SettingsRow>
+          <SettingsRow
+            title="Capture mode"
+            subtitle="Per-window keeps Clippy invisible until a tracked game has focus."
+          >
+            <SelectField
+              value={captureMode}
+              onChange={(v) => setCaptureMode(v as CaptureMode)}
+              options={[
+                { value: "perWindow", label: "Per-window (allowlist)" },
+                { value: "monitor", label: "Full-screen monitor" },
+              ]}
+              width={200}
+            />
+          </SettingsRow>
+          {captureMode === "monitor" && (
+            <SettingsRow title="Display">
+              <SelectField
+                value={monitorHwnd}
+                onChange={(v) => setMonitorHwnd(String(v))}
+                options={
+                  monitors.length === 0
+                    ? [{ value: "", label: "(no displays detected)" }]
+                    : monitors.map((m) => ({
+                        value: m.hmonitor,
+                        label: `${m.label} — ${m.width}×${m.height}`,
+                      }))
+                }
+                width={240}
+              />
+            </SettingsRow>
+          )}
+          <SettingsRow
+            title="When a replay is saved"
+            subtitle="Auto-open lands you in the editor; Notify keeps the game in focus."
+          >
+            <SelectField
+              value={saveBehavior}
+              onChange={(v) => setSaveBehavior(v as SaveBehavior)}
+              options={[
+                { value: "auto-open", label: "Open in editor" },
+                { value: "notify",    label: "Notification only" },
+              ]}
+              width={200}
+            />
+          </SettingsRow>
+          <SettingsRow
+            title="Save folder"
+            subtitle={<span className="mono">{saveDir || "(loading…)"}</span>}
+          >
+            <button
+              className="settings-secondary-btn"
+              onClick={openSaveDir}
+              disabled={!saveDir}
+              title="Open this folder in File Explorer"
+            >
+              Open
+            </button>
+            <button
+              className="settings-secondary-btn"
+              onClick={browseSaveDir}
+              title="Pick a different folder for saved replays"
+            >
+              Change…
+            </button>
+            <button
+              className="settings-secondary-btn"
+              onClick={resetSaveDir}
+              title="Restore the default (Videos\Clippy Replays)"
+            >
+              Reset
+            </button>
+          </SettingsRow>
+        </SettingsGroup>
       </div>
 
-      {captureMode === "monitor" && (
-        <div className="settings-row">
-          <label className="settings-label">Display</label>
-          <select
-            value={monitorHwnd}
-            onChange={(e) => setMonitorHwnd(e.target.value)}
-            disabled={isRunning}
+      <div>
+        <SettingsLabel>In-game save overlay</SettingsLabel>
+        <SettingsGroup>
+          <SettingsRow
+            title="Show overlay on save"
+            subtitle="Bottom-corner toast over the game while the save flushes."
           >
-            {monitors.length === 0 && <option value="">(no displays detected)</option>}
-            {monitors.map((m) => (
-              <option key={m.hmonitor} value={m.hmonitor}>
-                {m.label} — {m.width}×{m.height}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-
-      <div className="settings-row">
-        <label className="settings-label">When a replay is saved</label>
-        <select
-          value={saveBehavior}
-          onChange={(e) => setSaveBehavior(e.target.value as SaveBehavior)}
-        >
-          <option value="auto-open">Open in editor immediately</option>
-          <option value="notify">Show a notification (click to open)</option>
-        </select>
+            <Toggle value={overlayEnabled} onChange={setOverlayEnabled} />
+          </SettingsRow>
+          <SettingsRow title="Position">
+            <SelectField
+              value={overlayPosition}
+              onChange={(v) => setOverlayPosition(v as OverlayPosition)}
+              options={[
+                { value: "topLeft",     label: "Top-left" },
+                { value: "topRight",    label: "Top-right" },
+                { value: "bottomLeft",  label: "Bottom-left" },
+                { value: "bottomRight", label: "Bottom-right" },
+              ]}
+              width={150}
+            />
+          </SettingsRow>
+          <SettingsRow
+            title="Auto-hide after"
+            subtitle="Hovering the overlay pauses the timer; moving away restarts a fresh countdown."
+          >
+            <SelectField
+              value={overlayHideMs}
+              onChange={(v) => setOverlayHideMs(Number(v))}
+              options={[
+                { value: 3000,  label: "3 seconds" },
+                { value: 5000,  label: "5 seconds" },
+                { value: 8000,  label: "8 seconds" },
+                { value: 15000, label: "15 seconds" },
+                { value: 30000, label: "30 seconds" },
+              ]}
+              width={130}
+            />
+          </SettingsRow>
+          <SettingsRow
+            title="Chime on save"
+            subtitle="Soft sound when a replay finishes saving."
+          >
+            <Toggle value={overlaySuccessSound} onChange={setOverlaySuccessSound} />
+          </SettingsRow>
+          <SettingsRow
+            title="Tone on save failure"
+            subtitle="Different sound when the save fails — so you notice while in-game."
+          >
+            <Toggle value={overlayFailureSound} onChange={setOverlayFailureSound} />
+          </SettingsRow>
+          <SettingsRow title="Overlay sound volume">
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={5}
+              value={overlayVolume}
+              onChange={(e) => setOverlayVolume(parseInt(e.target.value, 10))}
+              disabled={!overlayEnabled || (!overlaySuccessSound && !overlayFailureSound)}
+              className="replay-volume-slider"
+            />
+            <span className="mono s-row-stat">{overlayVolume}%</span>
+          </SettingsRow>
+        </SettingsGroup>
       </div>
-
-      {/* ---------------- Save location ---------------- */}
-      <div className="settings-row settings-row-stack">
-        <label className="settings-label">Save folder</label>
-        <div className="settings-path-row">
-          <span className="settings-path mono" title={saveDir}>
-            {saveDir || "(loading…)"}
-          </span>
-          <button
-            className="settings-secondary-btn"
-            onClick={openSaveDir}
-            disabled={!saveDir}
-            title="Open this folder in File Explorer"
-          >
-            Open
-          </button>
-          <button
-            className="settings-secondary-btn"
-            onClick={browseSaveDir}
-            title="Pick a different folder for saved replays"
-          >
-            Browse…
-          </button>
-          <button
-            className="settings-secondary-btn"
-            onClick={resetSaveDir}
-            title="Restore the default (Videos\Clippy Replays)"
-          >
-            Reset
-          </button>
-        </div>
-      </div>
-
-      {/* ---------------- In-game save overlay ---------------- */}
-      <Accordion
-        open={notifyOpen}
-        onToggle={() => setNotifyOpen((v) => !v)}
-        title="In-game save overlay"
-        summary={
-          overlayEnabled
-            ? `Shown at ${POSITION_LABELS[overlayPosition]}`
-            : "Off — saves happen silently"
-        }
-      >
-        <p className="settings-section-blurb">
-          When you press the save hotkey during a game, a small overlay surfaces
-          in the corner of your screen so you can see the save's progress without
-          alt-tabbing. Errors persist by default so a failed save can't be
-          missed.
-        </p>
-
-        <label className="settings-checkbox">
-          <input
-            type="checkbox"
-            checked={overlayEnabled}
-            onChange={(e) => setOverlayEnabled(e.target.checked)}
-          />
-          <span>Show overlay on save</span>
-        </label>
-
-        <div
-          className="settings-row"
-          style={{ opacity: overlayEnabled ? 1 : 0.5 }}
-        >
-          <label className="settings-label">Position</label>
-          <select
-            value={overlayPosition}
-            onChange={(e) => setOverlayPosition(e.target.value as OverlayPosition)}
-            disabled={!overlayEnabled}
-          >
-            <option value="topLeft">Top-left</option>
-            <option value="topRight">Top-right</option>
-            <option value="bottomLeft">Bottom-left</option>
-            <option value="bottomRight">Bottom-right</option>
-          </select>
-        </div>
-
-        <p className="settings-section-blurb settings-help">
-          Hovering the overlay pauses its auto-hide timer; moving the cursor
-          away restarts a fresh countdown.
-        </p>
-
-        <div
-          className="settings-row"
-          style={{ opacity: overlayEnabled ? 1 : 0.5 }}
-        >
-          <label className="settings-label">Auto-hide after</label>
-          <select
-            value={String(overlayHideMs)}
-            onChange={(e) => setOverlayHideMs(parseInt(e.target.value, 10))}
-            disabled={!overlayEnabled}
-          >
-            <option value="3000">3 seconds</option>
-            <option value="5000">5 seconds</option>
-            <option value="8000">8 seconds</option>
-            <option value="15000">15 seconds</option>
-            <option value="30000">30 seconds</option>
-          </select>
-        </div>
-
-        <label className="settings-checkbox" style={{ opacity: overlayEnabled ? 1 : 0.5 }}>
-          <input
-            type="checkbox"
-            checked={overlaySuccessSound}
-            onChange={(e) => setOverlaySuccessSound(e.target.checked)}
-            disabled={!overlayEnabled}
-          />
-          <span>Play a chime when a save completes</span>
-        </label>
-
-        <label className="settings-checkbox" style={{ opacity: overlayEnabled ? 1 : 0.5 }}>
-          <input
-            type="checkbox"
-            checked={overlayFailureSound}
-            onChange={(e) => setOverlayFailureSound(e.target.checked)}
-            disabled={!overlayEnabled}
-          />
-          <span>Play a tone when a save fails</span>
-        </label>
-
-        <div
-          className="settings-row"
-          style={{ opacity: overlayEnabled && (overlaySuccessSound || overlayFailureSound) ? 1 : 0.5 }}
-        >
-          <label className="settings-label">Overlay sound volume</label>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            step={5}
-            value={overlayVolume}
-            onChange={(e) => setOverlayVolume(parseInt(e.target.value, 10))}
-            disabled={!overlayEnabled || (!overlaySuccessSound && !overlayFailureSound)}
-          />
-          <span className="settings-value mono">{overlayVolume}%</span>
-        </div>
-      </Accordion>
 
       {/* ---------------- Audio sources ---------------- */}
       <Accordion
@@ -728,28 +695,26 @@ function ReplaySettingsImpl() {
         )}
       </Accordion>
 
-      {/* ---------------- Quality controls ---------------- */}
-      <Accordion
-        open={qualityOpen}
-        onToggle={() => setQualityOpen((v) => !v)}
-        title="Quality & performance"
-        summary={`${(bitrateKbps / 1000).toFixed(0)} Mbps · ${
-          resKind === "source" ? "source res" : resKind === "half" ? "½ res" : `${customW}×${customH}`
-        }${encoderPref !== "auto" ? ` · ${encoderPref.toUpperCase()}` : ""}`}
-      >
-        <div className="settings-row">
-          <label className="settings-label">Resolution</label>
-          <select
-            value={resKind}
-            onChange={(e) => setResKind(e.target.value as ResolutionKind)}
-            disabled={isRunning}
+      <div>
+        <SettingsLabel>Encoding</SettingsLabel>
+        <SettingsGroup>
+          <SettingsRow
+            title="Resolution"
+            subtitle="Source matches the captured surface; Half saves disk space."
           >
-            <option value="source">Source (match captured surface)</option>
-            <option value="half">Half (¼ pixels — lighter on disk)</option>
-            <option value="custom">Custom…</option>
-          </select>
+            <SelectField
+              value={resKind}
+              onChange={(v) => setResKind(v as ResolutionKind)}
+              options={[
+                { value: "source", label: "Source" },
+                { value: "half",   label: "Half (¼ pixels)" },
+                { value: "custom", label: "Custom…" },
+              ]}
+              width={150}
+            />
+          </SettingsRow>
           {resKind === "custom" && (
-            <span className="settings-row-inline">
+            <SettingsRow title="Custom dimensions">
               <input
                 type="number"
                 className="settings-text settings-num"
@@ -760,7 +725,7 @@ function ReplaySettingsImpl() {
                 onChange={(e) => setCustomW(parseInt(e.target.value, 10) || 0)}
                 disabled={isRunning}
               />
-              <span className="settings-aux">×</span>
+              <span className="s-row-stat">×</span>
               <input
                 type="number"
                 className="settings-text settings-num"
@@ -771,31 +736,27 @@ function ReplaySettingsImpl() {
                 onChange={(e) => setCustomH(parseInt(e.target.value, 10) || 0)}
                 disabled={isRunning}
               />
-            </span>
+            </SettingsRow>
           )}
-        </div>
-
-        <div className="settings-row">
-          <label className="settings-label">Bitrate</label>
-          <select
-            value={
-              BITRATE_PRESETS.find((p) => p.kbps === bitrateKbps)?.kbps ?? -1
-            }
-            onChange={(e) => {
-              const v = parseInt(e.target.value, 10);
-              if (v > 0) setBitrateKbps(v);
-            }}
-            disabled={isRunning}
-          >
-            {BITRATE_PRESETS.map((p) => (
-              <option key={p.label} value={p.kbps}>
-                {p.label} — {p.kbps / 1000} Mbps
-              </option>
-            ))}
-            <option value={-1}>Custom…</option>
-          </select>
+          <SettingsRow title="Bitrate">
+            <SelectField
+              value={BITRATE_PRESETS.find((p) => p.kbps === bitrateKbps)?.kbps ?? -1}
+              onChange={(v) => {
+                const n = Number(v);
+                if (n > 0) setBitrateKbps(n);
+              }}
+              options={[
+                ...BITRATE_PRESETS.map((p) => ({
+                  value: p.kbps,
+                  label: `${p.label} — ${p.kbps / 1000} Mbps`,
+                })),
+                { value: -1, label: "Custom…" },
+              ]}
+              width={220}
+            />
+          </SettingsRow>
           {!BITRATE_PRESETS.some((p) => p.kbps === bitrateKbps) && (
-            <span className="settings-row-inline">
+            <SettingsRow title="Custom bitrate">
               <input
                 type="number"
                 className="settings-text settings-num"
@@ -803,71 +764,59 @@ function ReplaySettingsImpl() {
                 max={200000}
                 step={1000}
                 value={bitrateKbps}
-                onChange={(e) =>
-                  setBitrateKbps(parseInt(e.target.value, 10) || 0)
-                }
+                onChange={(e) => setBitrateKbps(parseInt(e.target.value, 10) || 0)}
                 disabled={isRunning}
               />
-              <span className="settings-aux">kbps</span>
-            </span>
+              <span className="s-row-stat">kbps</span>
+            </SettingsRow>
           )}
-        </div>
-
-        <div className="settings-row">
-          <label className="settings-label">Encoder</label>
-          <select
-            value={encoderPref}
-            onChange={(e) => setEncoderPref(e.target.value as EncoderPref)}
-            disabled={isRunning}
+          <SettingsRow
+            title="Encoder"
+            subtitle={sysInfo ? `Auto resolves to ${resolvedAutoEncoder(sysInfo)} on this system.` : "Auto picks the best hardware encoder available."}
           >
-            {/* Auto label includes the resolved vendor so the user isn't
-                left guessing what "Auto" will actually pick. */}
-            <option value="auto">
-              {sysInfo
-                ? `Auto · ${resolvedAutoEncoder(sysInfo)}`
-                : "Auto (let Windows pick)"}
-            </option>
-            <option value="nvenc">NVIDIA NVENC</option>
-            <option value="amf">AMD AMF</option>
-            <option value="qsv">Intel Quick Sync</option>
-            <option value="software">Software (CPU fallback)</option>
-          </select>
-        </div>
-
-        <div className="settings-row">
-          <label className="settings-label">Keyframe interval</label>
-          <select
-            value={keyframeSecs}
-            onChange={(e) => setKeyframeSecs(parseInt(e.target.value, 10))}
-            disabled={isRunning}
+            <SelectField
+              value={encoderPref}
+              onChange={(v) => setEncoderPref(v as EncoderPref)}
+              options={[
+                { value: "auto",     label: sysInfo ? `Auto · ${resolvedAutoEncoder(sysInfo)}` : "Auto" },
+                { value: "nvenc",    label: "NVIDIA NVENC" },
+                { value: "amf",      label: "AMD AMF" },
+                { value: "qsv",      label: "Intel Quick Sync" },
+                { value: "software", label: "Software (CPU)" },
+              ]}
+              width={220}
+            />
+          </SettingsRow>
+          <SettingsRow
+            title="Keyframe interval"
+            subtitle="Tighter intervals = tighter trims at save time."
           >
-            <option value={0}>Auto (encoder default)</option>
-            <option value={1}>1 second</option>
-            <option value={2}>2 seconds</option>
-            <option value={4}>4 seconds</option>
-          </select>
-          <span className="settings-aux">tighter trims at save</span>
-        </div>
-
-        <div className="settings-row">
-          <label className="settings-label">Max games captured</label>
-          <input
-            type="number"
-            className="settings-text settings-num"
-            min={1}
-            max={10}
-            step={1}
-            value={maxWorkers}
-            onChange={(e) =>
-              setMaxWorkers(Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1)))
-            }
-            disabled={isRunning}
-          />
-          <span className="settings-aux">
-            oldest is evicted when you focus a new game past the cap
-          </span>
-        </div>
-      </Accordion>
+            <SelectField
+              value={keyframeSecs}
+              onChange={(v) => setKeyframeSecs(Number(v))}
+              options={[
+                { value: 0, label: "Auto" },
+                { value: 1, label: "1 second" },
+                { value: 2, label: "2 seconds" },
+                { value: 4, label: "4 seconds" },
+              ]}
+              width={140}
+            />
+          </SettingsRow>
+          <SettingsRow
+            title="Max games captured"
+            subtitle="When you focus a new game past the cap, the oldest worker is evicted."
+          >
+            <Stepper
+              value={maxWorkers}
+              onChange={setMaxWorkers}
+              min={1}
+              max={10}
+              step={1}
+            />
+          </SettingsRow>
+        </SettingsGroup>
+      </div>
 
       {/* ---------------- Resource impact calculator ---------------- *
        *  Source-resolution policy:

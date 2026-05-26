@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { UpdateState } from "../../useUpdater";
-
-const APP_VERSION = "0.3.2";
+import { APP_VERSION } from "../index";
+import { SettingsGroup, SettingsLabel, SettingsRow } from "../primitives";
 
 type AboutSystemInfo = {
   gpu_name: string;
@@ -36,13 +36,22 @@ export function AboutTab(props: {
   };
 
   return (
-    <section className="settings-section">
-      <header className="settings-tab-header">
-        <h3 className="settings-tab-title">About Clippy</h3>
-        <p className="settings-tab-blurb">
+    <section className="settings-tab-pane">
+      {/* Hero block — lilac logo + product name + version. Replaces the
+          standard h3/blurb header for this tab so About reads as an identity
+          surface rather than another settings list. */}
+      <div className="settings-about-hero">
+        <div className="settings-about-hero-logo" aria-hidden>
+          <svg width="40" height="40" viewBox="0 0 32 32">
+            <path d="M11 10.5v11l9-5.5z" fill="currentColor" />
+          </svg>
+        </div>
+        <div className="settings-about-hero-name">Clippy</div>
+        <div className="settings-about-hero-version mono">v{APP_VERSION}</div>
+        <p className="settings-about-hero-blurb">
           Local-only video clip editor for Windows. No telemetry, no cloud.
         </p>
-      </header>
+      </div>
 
       <UpdaterPanel
         state={props.updater}
@@ -50,68 +59,67 @@ export function AboutTab(props: {
         onInstall={props.onInstallUpdate}
       />
 
-      <div className="settings-about-grid">
-        <div className="settings-about-row">
-          <span className="settings-about-key">Version</span>
-          <span className="settings-about-value mono">{APP_VERSION}</span>
-        </div>
-        <div className="settings-about-row">
-          <span className="settings-about-key">Build</span>
-          <span className="settings-about-value mono">
-            {import.meta.env.DEV ? "dev" : "release"}
-          </span>
-        </div>
-        <div className="settings-about-row">
-          <span className="settings-about-key">GPU</span>
-          <span className="settings-about-value mono" title={sys?.gpu_name}>
-            {sys
-              ? sys.gpu_vram_mb > 0
-                ? `${sys.gpu_name} · ${(sys.gpu_vram_mb / 1024).toFixed(1)} GB`
-                : sys.gpu_name || "—"
-              : "probing…"}
-          </span>
-        </div>
-        <div className="settings-about-row">
-          <span className="settings-about-key">System RAM</span>
-          <span className="settings-about-value mono">
-            {sys && sys.ram_total_mb > 0
-              ? `${(sys.ram_total_mb / 1024).toFixed(0)} GB`
-              : "—"}
-          </span>
-        </div>
-        <div className="settings-about-row">
-          <span className="settings-about-key">HW encoders</span>
-          <span className="settings-about-value mono">
-            {sys
-              ? sys.hw_encoders.length > 0
-                ? sys.hw_encoders.map(shortenEncoderAbout).join(", ")
-                : "none detected"
-              : "probing…"}
-          </span>
-        </div>
+      <div>
+        <SettingsLabel>System</SettingsLabel>
+        <SettingsGroup>
+          <SettingsRow title="Version">
+            <span className="mono s-row-stat">v{APP_VERSION}</span>
+          </SettingsRow>
+          <SettingsRow title="Build">
+            <span className="mono s-row-stat">
+              {import.meta.env.DEV ? "dev" : "release"}
+            </span>
+          </SettingsRow>
+          <SettingsRow title="GPU" subtitle={sys?.gpu_name}>
+            <span className="mono s-row-stat">
+              {sys
+                ? sys.gpu_vram_mb > 0
+                  ? `${(sys.gpu_vram_mb / 1024).toFixed(1)} GB`
+                  : "—"
+                : "probing…"}
+            </span>
+          </SettingsRow>
+          <SettingsRow title="System RAM">
+            <span className="mono s-row-stat">
+              {sys && sys.ram_total_mb > 0
+                ? `${(sys.ram_total_mb / 1024).toFixed(0)} GB`
+                : "—"}
+            </span>
+          </SettingsRow>
+          <SettingsRow title="HW encoders">
+            <span className="mono s-row-stat">
+              {sys
+                ? sys.hw_encoders.length > 0
+                  ? sys.hw_encoders.map(shortenEncoderAbout).join(", ")
+                  : "none detected"
+                : "probing…"}
+            </span>
+          </SettingsRow>
+        </SettingsGroup>
       </div>
 
-      <div className="settings-about-actions">
-        <DiagnosticsButton />
-        <button
-          className="settings-secondary-btn"
-          onClick={openIssues}
-          title="Open the GitHub issues page in your browser"
-        >
-          Report an issue…
-        </button>
+      <div>
+        <SettingsLabel>Diagnostics</SettingsLabel>
+        <SettingsGroup>
+          <DiagnosticsRow />
+          <SettingsRow
+            title="Report an issue"
+            subtitle="Open the GitHub issues page in your browser"
+            onClick={openIssues}
+            accessory
+          />
+        </SettingsGroup>
+        <p className="settings-tab-help">
+          Diagnostics include detected GPU, hardware encoders, audio devices, monitor
+          list, and the most recent event log. Non-game window titles are redacted
+          unless you turn on Verbose diagnostics under <strong>Replay buffer</strong>.
+        </p>
       </div>
-
-      <p className="settings-tab-help">
-        Diagnostics include detected GPU, hardware encoders, audio devices, monitor
-        list, and the most recent event log. Non-game window titles are redacted
-        unless you turn on Verbose diagnostics under <strong>Replay buffer</strong>.
-      </p>
     </section>
   );
 }
 
-function DiagnosticsButton() {
+function DiagnosticsRow() {
   const [state, setState] = useState<"idle" | "copied" | "error">("idle");
   const copy = async () => {
     try {
@@ -125,26 +133,33 @@ function DiagnosticsButton() {
     }
   };
   const reveal = async () => {
-    try {
-      await invoke("reveal_diagnostics_log");
-    } catch {
+    try { await invoke("reveal_diagnostics_log"); }
+    catch {
       setState("error");
       setTimeout(() => setState("idle"), 2500);
     }
   };
+  const subtitle =
+    state === "copied" ? "Copied to clipboard"
+    : state === "error" ? "Operation failed"
+    : "Operation log — bundled with bug reports";
   return (
-    <div className="cache-row">
-      <span className="cache-label">Diagnostics</span>
-      <span className="cache-size mono" style={{ fontSize: "var(--type-xs)", opacity: 0.6 }}>
-        {state === "copied" ? "Copied to clipboard" : state === "error" ? "Operation failed" : "operation log"}
-      </span>
-      <button className="cache-clear" onClick={reveal} title="Open the folder containing diagnostics.log — useful for attaching prior-session logs to a bug report" style={{ marginRight: 8 }}>
+    <SettingsRow title="Diagnostics log" subtitle={subtitle}>
+      <button
+        className="settings-secondary-btn"
+        onClick={reveal}
+        title="Open the folder containing diagnostics.log"
+      >
         Reveal file
       </button>
-      <button className="cache-clear" onClick={copy} title="Copy the in-memory diagnostic log to clipboard — paste it when reporting a bug">
+      <button
+        className="settings-secondary-btn"
+        onClick={copy}
+        title="Copy the in-memory diagnostic log to clipboard"
+      >
         Copy log
       </button>
-    </div>
+    </SettingsRow>
   );
 }
 

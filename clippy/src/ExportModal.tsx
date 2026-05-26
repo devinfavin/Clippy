@@ -12,6 +12,7 @@ import {
   type GifResolution,
   type SizeLimit,
 } from "./types";
+import { SettingsLabel, Toggle } from "./settings/primitives";
 
 /**
  * Segmented-button row used for Format / Mode / Size pickers. Replaces the
@@ -34,7 +35,7 @@ function Segmented<T>(props: {
   const eq = props.isEqual ?? ((a: T, b: T) => a === b);
   return (
     <div className="export-section">
-      <div className="export-section-label">{props.label}</div>
+      <SettingsLabel>{props.label}</SettingsLabel>
       <div className="seg" role="radiogroup" aria-label={props.label}>
         {props.options.map((opt, i) => {
           const active = eq(opt.value, props.value);
@@ -267,17 +268,15 @@ export function ExportModal(props: {
           )}
 
           {!isGif && (
-            <label className="export-toggle">
-              <input
-                type="checkbox"
-                checked={props.normalize}
-                onChange={(e) => props.setNormalize(e.target.checked)}
-              />
-              <span className="export-toggle-label">Normalize loudness</span>
-              <span className="export-toggle-sub">
-                Boosts quiet game audio to a Discord-friendly level (~-16 LUFS).
-              </span>
-            </label>
+            <div className="export-toggle-row">
+              <div className="export-toggle-text">
+                <div className="export-toggle-label">Normalize loudness</div>
+                <div className="export-toggle-sub">
+                  Boosts quiet game audio to a Discord-friendly level (~-16 LUFS).
+                </div>
+              </div>
+              <Toggle value={props.normalize} onChange={props.setNormalize} />
+            </div>
           )}
 
           <div className="export-estimate">

@@ -7,7 +7,6 @@ import {
   newRegionId,
   SIZE_PRESETS,
   resolveRegionColor,
-  REGION_COLORS,
   trackMixIsDefault,
   trackMixToBackend,
   type Crop,
@@ -37,19 +36,19 @@ import {
 } from "./keybinds";
 import {
   AboutTab,
+  APP_VERSION,
   KeyboardSettingsTab,
   SETTINGS_TABS,
   StorageSettingsTab,
   type SettingsTabId,
 } from "./settings";
+import { SettingsIcon } from "./settings/settings-icon";
 import { ExportModal } from "./ExportModal";
 import { CropOverlay } from "./CropOverlay";
 import { CropIndicator } from "./CropIndicator";
-import { SpeedPicker } from "./SpeedPicker";
-import { TrackMixer } from "./TrackMixer";
+import { AudioPanel } from "./components/AudioPanel";
 import { useAudioTracks } from "./useAudioTracks";
 import { StatusStrip, type StatusContent } from "./StatusStrip";
-import { ColorPicker } from "./ColorPicker";
 import { TipsModal } from "./TipsModal";
 import { OnboardingHint } from "./OnboardingHint";
 import { ReplayStatusPill } from "./ReplayStatusPill";
@@ -68,6 +67,11 @@ import { useReplayHotkeyPush } from "./hooks/use-replay-hotkey-push";
 import { useReplaySavedToast } from "./hooks/use-replay-saved-toast";
 import { useWaveformDraw } from "./hooks/use-waveform-draw";
 import { HintKbd } from "./components/HintKbd";
+import { WindowControls } from "./components/WindowControls";
+import { EditorRail, type RailTab } from "./components/EditorRail";
+import { RegionsPanel } from "./components/RegionsPanel";
+import { CropPanel } from "./components/CropPanel";
+import { EmptyState } from "./components/EmptyState";
 import "./App.css";
 
 import { Showcase } from "./Showcase";
@@ -115,6 +119,21 @@ function Editor() {
   const [regions, setRegions] = useState<Region[]>([]);
   const [draftIn, setDraftIn] = useState<number | null>(null);
   const [draftOut, setDraftOut] = useState<number | null>(null);
+  // Editor rail — which tab is focused and which region is the "active" one
+  // (drives the Crop panel's edits and the Regions panel's expanded row).
+  const [railTab, setRailTab] = useState<RailTab>("regions");
+  const [activeRegionId, setActiveRegionId] = useState<string | null>(null);
+  // Hover state for the timeline tooltip (seconds at the cursor's x). Cleared
+  // on pointer-leave / while dragging.
+  const [hoverTime, setHoverTime] = useState<number | null>(null);
+  const [hoverPct, setHoverPct] = useState<number | null>(null);
+  // Hidden mirror <video> used to render a thumbnail at the hovered timecode.
+  // Mounted whenever we have a proxy src; pulls frames only on seek so it's
+  // ~free when the user isn't moving the cursor. The tooltip's canvas reads
+  // from this video via drawImage on the `seeked` event.
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
+  const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const previewSeekRafRef = useRef<number | null>(null);
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [proxyEncoder, setProxyEncoder] = useState<string | null>(null);
 
@@ -233,6 +252,10 @@ function Editor() {
       setSrcPath(selected);
       setProxyPath(null);
       setInfo(null);
+      // Mark this clip as "kept" so the storage auto-cleanup spares it from
+      // the unkept-replays sweep. Fire-and-forget — the index write is
+      // tolerant to failures and we don't want to block the load path.
+      invoke("storage_mark_opened", { path: selected }).catch(() => {});
       setRegions([]);
       setDraftIn(null);
       setDraftOut(null);
@@ -360,6 +383,19 @@ function Editor() {
   useProxyProgress(setPhase);
   useExportProgress(setPhase);
 
+  // Apply the user's storage cap + unkept-cleanup policy at startup. Reads
+  // the settings the Storage tab persisted to localStorage; fires once with
+  // dry_run: false (no confirmation prompt) because cap changes are
+  // confirmed at the point they're made — startup is just maintenance.
+  useEffect(() => {
+    const capGb = Number(localStorage.getItem("clippy.storage.cap_gb") || 0);
+    const days = Number(localStorage.getItem("clippy.storage.unkept_days") || 0);
+    if (capGb <= 0 && days <= 0) return;
+    const capBytes = capGb > 0 ? Math.round(capGb * 1_073_741_824) : null;
+    const unkeptMaxDays = days > 0 ? days : null;
+    invoke("storage_prune", { capBytes, unkeptMaxDays, dryRun: false }).catch(() => {});
+  }, []);
+
   // ---- transport controls ----
   const playPause = useCallback(() => {
     const v = videoRef.current;
@@ -460,11 +496,12 @@ function Editor() {
   const setIn = useCallback(() => {
     const t = videoRef.current?.currentTime ?? 0;
     if (draftOut != null && t < draftOut) {
+      const id = newRegionId();
       setRegions((r) =>
         [
           ...r,
           {
-            id: newRegionId(),
+            id,
             inSecs: t,
             outSecs: draftOut,
             crop: inheritedCrop(r),
@@ -472,6 +509,7 @@ function Editor() {
           },
         ].sort((a, b) => a.inSecs - b.inSecs)
       );
+      setActiveRegionId(id);
       setDraftIn(null);
       setDraftOut(null);
     } else {
@@ -485,11 +523,12 @@ function Editor() {
   const setOut = useCallback(() => {
     const t = videoRef.current?.currentTime ?? 0;
     if (draftIn != null && t > draftIn) {
+      const id = newRegionId();
       setRegions((r) =>
         [
           ...r,
           {
-            id: newRegionId(),
+            id,
             inSecs: draftIn,
             outSecs: t,
             crop: inheritedCrop(r),
@@ -497,6 +536,7 @@ function Editor() {
           },
         ].sort((a, b) => a.inSecs - b.inSecs)
       );
+      setActiveRegionId(id);
       setDraftIn(null);
       setDraftOut(null);
     } else {
@@ -507,6 +547,45 @@ function Editor() {
 
   const deleteRegion = useCallback((id: string) => {
     setRegions((r) => r.filter((x) => x.id !== id));
+    setActiveRegionId((cur) => (cur === id ? null : cur));
+  }, []);
+
+  // Create a new region anchored at the playhead. Default span is 5s, capped
+  // at the source duration. Sets the new region as active so the rail's
+  // expanded row and Crop panel immediately reflect the new context. Avoids
+  // creating duplicate regions at the exact same in-point.
+  const addRegionFromPlayhead = useCallback(() => {
+    const v = videoRef.current;
+    const total = info?.duration_secs ?? 0;
+    if (!v || total <= 0) return;
+    const t = v.currentTime;
+    const span = 5;
+    const inSecs = Math.max(0, Math.min(t, Math.max(0, total - 0.5)));
+    const outSecs = Math.max(inSecs + 0.5, Math.min(total, inSecs + span));
+    const newId = newRegionId();
+    setRegions((r) => {
+      // Skip when an existing region already starts within 0.05s of here —
+      // double-tap protection against fast accidental clicks.
+      if (r.some((x) => Math.abs(x.inSecs - inSecs) < 0.05)) return r;
+      return [
+        ...r,
+        { id: newId, inSecs, outSecs },
+      ].sort((a, b) => a.inSecs - b.inSecs);
+    });
+    setActiveRegionId(newId);
+  }, [info]);
+
+  const setRegionSpeed = useCallback((id: string, speed: number | undefined) => {
+    setRegions((rs) => rs.map((r) => (r.id === id ? { ...r, speed } : r)));
+  }, []);
+  const setRegionColorIndex = useCallback((id: string, colorIndex: number) => {
+    setRegions((rs) => rs.map((r) => (r.id === id ? { ...r, colorIndex } : r)));
+  }, []);
+  /** Direct crop assignment used by the Crop panel's preset chips. Skips the
+   *  full overlay editor — preset crops are deterministic so we just write
+   *  the result. `undefined` clears the crop. */
+  const setRegionCropDirect = useCallback((id: string, crop: Crop | undefined) => {
+    setRegions((rs) => rs.map((r) => (r.id === id ? { ...r, crop } : r)));
   }, []);
 
   // Crop edit mode: which region's crop are we editing? null = not editing.
@@ -1105,6 +1184,17 @@ function Editor() {
     scrubTo(t);
   };
   const onTimelinePointerMove = (e: React.PointerEvent) => {
+    // Hover tooltip — only when not scrubbing or edge-resizing. Updates each
+    // pointer tick, which is cheap (two number setters) and React batches.
+    if (!(e.buttons & 1) && !resizingEdge && duration > 0) {
+      const el = timelineRef.current;
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+        setHoverTime(timeFromPointer(e.clientX));
+        setHoverPct((x / rect.width) * 100);
+      }
+    }
     if (!(e.buttons & 1)) return;
     if (!isScrubbing) return;
     scrubXRef.current = e.clientX;
@@ -1112,6 +1202,49 @@ function Editor() {
       scrubRafRef.current = requestAnimationFrame(flushScrub);
     }
   };
+  const onTimelinePointerLeave = () => {
+    setHoverTime(null);
+    setHoverPct(null);
+  };
+
+  // Drive the hidden preview-video element from hover state. Coalesced via
+  // rAF so a fast-moving cursor doesn't fire a seek per pointer tick — one
+  // seek per frame is the natural ceiling on what the decoder can satisfy.
+  useEffect(() => {
+    if (hoverTime == null) return;
+    const v = previewVideoRef.current;
+    if (!v) return;
+    if (previewSeekRafRef.current != null) cancelAnimationFrame(previewSeekRafRef.current);
+    previewSeekRafRef.current = requestAnimationFrame(() => {
+      previewSeekRafRef.current = null;
+      try {
+        // Clamp; some demuxers reject seeks past duration by a hair.
+        const dur = v.duration;
+        const t = Number.isFinite(dur) && dur > 0
+          ? Math.min(hoverTime, dur - 0.05)
+          : hoverTime;
+        v.currentTime = Math.max(0, t);
+      } catch {}
+    });
+    return () => {
+      if (previewSeekRafRef.current != null) {
+        cancelAnimationFrame(previewSeekRafRef.current);
+        previewSeekRafRef.current = null;
+      }
+    };
+  }, [hoverTime]);
+
+  /** When the hidden video lands on the requested frame, copy it onto the
+   *  tooltip canvas. Both refs may be null (tooltip hidden, video unmounted)
+   *  so guard accordingly. */
+  const onPreviewSeeked = useCallback(() => {
+    const v = previewVideoRef.current;
+    const c = previewCanvasRef.current;
+    if (!v || !c) return;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    try { ctx.drawImage(v, 0, 0, c.width, c.height); } catch {}
+  }, []);
   const onTimelinePointerUp = (e: React.PointerEvent) => {
     if (!isScrubbing) return;
     (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
@@ -1140,6 +1273,10 @@ function Editor() {
     trackMix,
     trackColors,
     duration,
+    // Timeline shows a single neutral mixed envelope; per-track detail
+    // lives in the rail's Audio panel where each row has its own inline
+    // mini-waveform.
+    mode: "mixed",
   });
   useKeyframeDraw({
     canvasRef: keyframeCanvasRef,
@@ -1246,8 +1383,23 @@ function Editor() {
   return (
     <div className="app">
       <OnboardingHint keybinds={keybinds} />
-      <header className="topbar">
-        <div className="brand" title="Clippy">
+      {/* Hidden mirror of the source for hover-frame thumbnails. Lives at the
+          app root so it persists across timeline / tooltip remounts. preload
+          is critical — without it Chrome won't keep enough frames around to
+          serve fast scrub seeks. */}
+      {proxySrc && (
+        <video
+          ref={previewVideoRef}
+          src={proxySrc}
+          className="hover-preview-video"
+          muted
+          preload="auto"
+          onSeeked={onPreviewSeeked}
+          aria-hidden
+        />
+      )}
+      <header className="topbar" data-tauri-drag-region>
+        <div className="brand" title="Clippy" data-tauri-drag-region>
           <div className="brand-mark" aria-hidden />
           <span className="brand-name">Clippy</span>
         </div>
@@ -1322,9 +1474,19 @@ function Editor() {
         >
           {exportableCount > 1 ? `Export ${exportableCount} regions…` : "Export…"}
         </button>
+        <WindowControls />
       </header>
 
+      {srcPath == null && phase.kind === "idle" ? (
+        <EmptyState
+          onOpenDialog={handleOpen}
+          onLoadPath={(p) => { void loadFile(p).catch((e) => logErr("recent clip open", e)); }}
+        />
+      ) : (
+      <>
+      <div className="stage-wrap">
       <main className="stage">
+        <div className="video-card">
         {proxySrc ? (
           <video
             ref={videoRef}
@@ -1351,22 +1513,7 @@ function Editor() {
           />
         ) : (
           <div className="placeholder">
-            {phase.kind === "idle" ? (
-              <>
-                {/* Pass-2 empty state: centered primary as the main affordance,
-                    soft secondary hint below. No permanent dashed border — the
-                    `isDraggingFile` overlay handles the drop-target visual only
-                    while the user is actually dragging. */}
-                <button
-                  className="btn primary placeholder-cta"
-                  onClick={handleOpen}
-                  type="button"
-                >
-                  Open video…
-                </button>
-                <div className="placeholder-hint">or drag a video here</div>
-              </>
-            ) : phase.kind === "error" ? (
+            {phase.kind === "error" ? (
               <>
                 <div className="placeholder-title">Couldn't load that file.</div>
                 <button className="btn ghost placeholder-cta" onClick={handleOpen} type="button">
@@ -1378,7 +1525,120 @@ function Editor() {
             )}
           </div>
         )}
+        {/* On-preview overlays — 1-9 region key hints, speed badge for the
+            active region. Crop indicator stays driven by playhead position
+            via the separate CropIndicator element below the modal. */}
+        {proxySrc && regions.length > 0 && (
+          <div className="preview-keys" aria-hidden>
+            {regions.slice(0, 9).map((r, i) => (
+              <button
+                key={r.id}
+                type="button"
+                className={`preview-key${activeRegionId === r.id ? " active" : ""}`}
+                onClick={() => { setActiveRegionId(r.id); seek(r.inSecs); }}
+                title={`Jump to region ${i + 1}`}
+              >
+                {i + 1}
+              </button>
+            ))}
+          </div>
+        )}
+        {(() => {
+          const activeR = regions.find((x) => x.id === activeRegionId) ?? null;
+          const speed = activeR?.speed;
+          if (!proxySrc || !activeR || !speed || speed === 1) return null;
+          const color = resolveRegionColor(activeR, regions.indexOf(activeR));
+          return (
+            <div className="preview-speed-badge mono" style={{ ["--badge-color" as never]: color }}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                <path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2 2-5z" />
+              </svg>
+              {speed < 1 ? "Slow-mo" : "Speed up"} · {speed}×
+            </div>
+          );
+        })()}
+        </div>
       </main>
+      <EditorRail
+        tab={railTab}
+        onTabChange={setRailTab}
+        regionCount={regions.length}
+        hasAudio={!!info && info.audio_tracks.length >= 1}
+        activeRegion={(() => {
+          const r = regions.find((x) => x.id === activeRegionId) ?? playheadRegion ?? null;
+          if (!r) return null;
+          const idx = regions.indexOf(r);
+          return {
+            name: `Region ${idx + 1}`,
+            color: resolveRegionColor(r, idx),
+            number: idx + 1,
+          };
+        })()}
+        audio={
+          info && info.audio_tracks.length >= 1 ? (
+            <AudioPanel
+              tracks={info.audio_tracks}
+              mix={effectiveMix}
+              onChange={setEffectiveMix}
+              trackColors={trackColors}
+              onTrackColorsChange={setTrackColors}
+              trackNames={trackNames}
+              onTrackNamesChange={setTrackNames}
+              contextLabel={
+                playheadRegion ? `Region ${playheadRegionIndex + 1}` : "Default"
+              }
+              contextColor={
+                playheadRegion
+                  ? resolveRegionColor(playheadRegion, playheadRegionIndex)
+                  : null
+              }
+              waveforms={waveforms}
+            />
+          ) : null
+        }
+        regions={
+          <RegionsPanel
+            regions={regions}
+            activeId={activeRegionId}
+            playheadSecs={currentTime}
+            hasSource={!!srcPath && phase.kind === "ready"}
+            loopingRegionId={loopingRegionId}
+            onFocus={(id) => {
+              setActiveRegionId(id);
+              const r = regions.find((x) => x.id === id);
+              if (r) seek(r.inSecs);
+            }}
+            onAddFromPlayhead={addRegionFromPlayhead}
+            onRename={() => { /* TODO: persist region.name when added to the Region type */ }}
+            onDelete={deleteRegion}
+            onSetSpeed={setRegionSpeed}
+            onSetColor={setRegionColorIndex}
+            onToggleLoop={toggleLoopRegion}
+            onStartCropEdit={startCropEdit}
+          />
+        }
+        crop={
+          <CropPanel
+            activeRegion={
+              regions.find((r) => r.id === activeRegionId) ??
+              (playheadRegion ?? null)
+            }
+            activeRegionIndex={(() => {
+              const r = regions.find((x) => x.id === activeRegionId) ?? playheadRegion;
+              return r ? regions.indexOf(r) : null;
+            })()}
+            sourceWidth={info?.width ?? 0}
+            sourceHeight={info?.height ?? 0}
+            hasSource={!!srcPath && phase.kind === "ready"}
+            onLaunchEditor={(id) => startCropEdit(id)}
+            onSetPresetForActive={(crop) => {
+              const r = regions.find((x) => x.id === activeRegionId) ?? playheadRegion;
+              if (r) setRegionCropDirect(r.id, crop);
+            }}
+          />
+        }
+      />
+      </div>
 
       {/* Bottom zone — status strip (consolidated) + transport (always) +
           tool slots (conditional, in fixed-height containers so adding the
@@ -1386,7 +1646,7 @@ function Editor() {
           layout). */}
       <section className="shell-bottom">
       <StatusStrip content={statusContent} />
-      <section className="transport">
+      <section className="transport-row">
         <div className="time-readout">
           <span className="mono">{fmtTime(currentTime)}</span>
           <span className="dim mono"> / {fmtTime(duration)}</span>
@@ -1402,153 +1662,6 @@ function Editor() {
           <button onClick={() => seek(duration)} title={formatKeybind(keybinds.jumpEnd)}>⏭</button>
         </div>
 
-        <div className="mark-buttons">
-          {/* Primary marks — subtly accented so the eye lands here first.
-              Set In/Out are by far the most-used buttons in this row. */}
-          <button className="mark-primary" onClick={setIn} title={formatKeybind(keybinds.setIn)}>
-            Set In
-          </button>
-          <button className="mark-primary" onClick={setOut} title={formatKeybind(keybinds.setOut)}>
-            Set Out
-          </button>
-
-          {/* Draft chip — only rendered while there's actually a draft in
-              progress. Empty `DRAFT -- → --` was visual noise; once the user
-              marks an in or out, the chip appears with the value visible. */}
-          {(draftIn != null || draftOut != null) && (
-            <span
-              className="draft-chip is-active"
-              title="In-progress region; commits when in < out"
-            >
-              <span className="draft-chip-label">draft</span>
-              <span className="draft-chip-value mono">
-                {draftIn != null ? fmtTime(draftIn) : "--"} → {draftOut != null ? fmtTime(draftOut) : "--"}
-              </span>
-            </span>
-          )}
-
-          {/* Secondary marks — ghost, smaller hit-feel; utility actions. */}
-          <button className="mark-secondary" onClick={clearAllRegions} title="Remove all regions and the current draft">
-            Clear all
-          </button>
-          <button
-            onClick={saveCurrentFrame}
-            disabled={!srcPath || phase.kind !== "ready"}
-            className={`mark-secondary${frameAction === "save" ? " btn-armed" : ""}`}
-            title={
-              frameAction === "save"
-                ? "Frame copied to clipboard — click again to save as PNG"
-                : `Copy current frame to clipboard (${formatKeybind(keybinds.saveFrame)}). Click again to save as PNG.`
-            }
-          >
-            {frameAction === "save" ? "Save as PNG…" : "Copy frame"}
-          </button>
-        </div>
-      </section>
-
-      {info && info.audio_tracks.length >= 1 && (
-        <TrackMixer
-          tracks={info.audio_tracks}
-          mix={effectiveMix}
-          onChange={setEffectiveMix}
-          trackColors={trackColors}
-          onTrackColorsChange={setTrackColors}
-          trackNames={trackNames}
-          onTrackNamesChange={setTrackNames}
-          contextLabel={
-            playheadRegion ? `Region ${playheadRegionIndex + 1}` : "Default"
-          }
-          contextColor={
-            playheadRegion
-              ? resolveRegionColor(playheadRegion, playheadRegionIndex)
-              : null
-          }
-        />
-      )}
-
-      {/* Reserved chips slot — empty until the first region is created so
-          the timeline below doesn't shift when chips appear. */}
-      <div className="shell-slot-chips">
-      {regions.length > 0 && (
-        <section className="region-list">
-          {regions.map((r, i) => {
-            const colorSlot = r.colorIndex ?? (i % REGION_COLORS.length);
-            const color = resolveRegionColor(r, i);
-            return (
-            <span
-              key={r.id}
-              className="region-chip"
-              onClick={() => seek(r.inSecs)}
-              title="Click to jump playhead to this region's in-point"
-              style={{ ["--region-color" as never]: color }}
-            >
-              <ColorPicker
-                className="region-chip-dot"
-                colors={REGION_COLORS}
-                selectedSlot={colorSlot}
-                title="Change this region's color"
-                onChange={(newSlot) => {
-                  setRegions((rs) =>
-                    rs.map((x) => (x.id === r.id ? { ...x, colorIndex: newSlot } : x))
-                  );
-                }}
-              />
-              <span className="region-chip-num">{i + 1}</span>
-              <span className="region-chip-times mono">
-                {fmtTime(r.inSecs)} → {fmtTime(r.outSecs)}
-              </span>
-              <span className="region-chip-len mono dim">
-                {fmtTime(r.outSecs - r.inSecs)}
-              </span>
-              {r.crop && (
-                <span className="region-chip-crop mono" title={`Crop ${r.crop.w}×${r.crop.h} at ${r.crop.x},${r.crop.y}`}>
-                  ✂ {r.crop.w}×{r.crop.h}
-                </span>
-              )}
-              {r.speed != null && r.speed !== 1 && (
-                <span className="region-chip-speed-badge mono" title={`Playback speed: ${r.speed}×`}>
-                  {r.speed}×
-                </span>
-              )}
-              <span className="region-chip-divider" aria-hidden />
-              <span className="region-chip-actions">
-                <button
-                  className={`region-chip-action${r.crop ? " active" : ""}`}
-                  onClick={(e) => { e.stopPropagation(); startCropEdit(r.id); }}
-                  title={r.crop ? "Edit crop" : "Add a crop to this region"}
-                >
-                  ✂
-                </button>
-                <span onClick={(e) => e.stopPropagation()}>
-                  <SpeedPicker
-                    value={r.speed}
-                    onChange={(v) =>
-                      setRegions((rs) => rs.map((x) => x.id === r.id ? { ...x, speed: v } : x))
-                    }
-                  />
-                </span>
-                <button
-                  className={`region-chip-action${loopingRegionId === r.id ? " active-loop" : ""}`}
-                  onClick={(e) => { e.stopPropagation(); toggleLoopRegion(r.id); }}
-                  title={loopingRegionId === r.id ? "Stop looping" : "Loop this region"}
-                >
-                  ↻
-                </button>
-                <button
-                  className="region-chip-action region-chip-delete"
-                  onClick={(e) => { e.stopPropagation(); deleteRegion(r.id); }}
-                  title="Delete region"
-                >
-                  ×
-                </button>
-              </span>
-            </span>
-            );
-          })}
-        </section>
-      )}
-      </div>
-
       <section
         className="timeline"
         ref={timelineRef}
@@ -1556,7 +1669,9 @@ function Editor() {
         onPointerMove={onTimelinePointerMove}
         onPointerUp={onTimelinePointerUp}
         onPointerCancel={onTimelinePointerUp}
+        onPointerLeave={onTimelinePointerLeave}
       >
+        <div className="timeline-inner">
         <canvas ref={keyframeCanvasRef} className="keyframes" />
         <canvas ref={waveCanvasRef} className="waveform" />
         {/* committed regions (one band per region; edges are draggable) */}
@@ -1606,6 +1721,66 @@ function Editor() {
         {draftInPct != null && <div className="marker mark-in" style={{ left: `${draftInPct}%` }} />}
         {draftOutPct != null && <div className="marker mark-out" style={{ left: `${draftOutPct}%` }} />}
         <div className="playhead" style={{ left: `${playheadPct}%` }} />
+        </div>
+        {/* Hover tooltip — frame thumbnail + timecode at the cursor position.
+            Lives OUTSIDE the .timeline-inner clip box so it can escape the
+            rounded-corner mask and float above the row. */}
+        {hoverTime != null && hoverPct != null && !isScrubbing && phase.kind === "ready" && (
+          <div
+            className="timeline-hover-frame"
+            style={{ left: `${hoverPct}%` }}
+            aria-hidden
+          >
+            <div className="timeline-hover-frame-thumb">
+              <canvas ref={previewCanvasRef} width={160} height={90} />
+            </div>
+            <div className="timeline-hover-frame-time">{fmtTime(hoverTime)}</div>
+          </div>
+        )}
+      </section>
+
+        <div className="mark-buttons">
+          {/* Primary marks — subtly accented so the eye lands here first.
+              Set In/Out are by far the most-used buttons in this row. */}
+          <button className="mark-primary" onClick={setIn} title={formatKeybind(keybinds.setIn)}>
+            Set In
+          </button>
+          <button className="mark-primary" onClick={setOut} title={formatKeybind(keybinds.setOut)}>
+            Set Out
+          </button>
+
+          {/* Draft chip — only rendered while there's actually a draft in
+              progress. Empty `DRAFT -- → --` was visual noise; once the user
+              marks an in or out, the chip appears with the value visible. */}
+          {(draftIn != null || draftOut != null) && (
+            <span
+              className="draft-chip is-active"
+              title="In-progress region; commits when in < out"
+            >
+              <span className="draft-chip-label">draft</span>
+              <span className="draft-chip-value mono">
+                {draftIn != null ? fmtTime(draftIn) : "--"} → {draftOut != null ? fmtTime(draftOut) : "--"}
+              </span>
+            </span>
+          )}
+
+          {/* Secondary marks — ghost, smaller hit-feel; utility actions. */}
+          <button className="mark-secondary" onClick={clearAllRegions} title="Remove all regions and the current draft">
+            Clear all
+          </button>
+          <button
+            onClick={saveCurrentFrame}
+            disabled={!srcPath || phase.kind !== "ready"}
+            className={`mark-secondary${frameAction === "save" ? " btn-armed" : ""}`}
+            title={
+              frameAction === "save"
+                ? "Frame copied to clipboard — click again to save as PNG"
+                : `Copy current frame to clipboard (${formatKeybind(keybinds.saveFrame)}). Click again to save as PNG.`
+            }
+          >
+            {frameAction === "save" ? "Save as PNG…" : "Copy frame"}
+          </button>
+        </div>
       </section>
 
       <footer className="hints" title="Click any shortcut to edit">
@@ -1628,6 +1803,8 @@ function Editor() {
         </button>
       </footer>
       </section>{/* /.shell-bottom */}
+      </>
+      )}
 
       {exportOpen && (
         <ExportModal
@@ -1702,9 +1879,14 @@ function Editor() {
                     onClick={() => setSettingsTab(t.id)}
                     aria-current={settingsTab === t.id ? "page" : undefined}
                   >
-                    {t.label}
+                    <SettingsIcon meta={t} />
+                    <span>{t.label}</span>
                   </button>
                 ))}
+                <span className="modal-tab-rail-spacer" />
+                <span className="modal-tab-rail-version mono" aria-hidden>
+                  v{APP_VERSION}
+                </span>
               </nav>
 
               <div className="modal-tab-content">

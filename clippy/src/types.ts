@@ -182,8 +182,13 @@ export type Region = {
   colorIndex?: number;
 };
 
-// Per-region speed presets shown in the chip popover.
-export const SPEED_PRESETS = [0.25, 0.5, 1, 2, 4] as const;
+// Per-region speed presets shown in the rail's Regions panel.
+// 4× was dropped 2026-05-16: the use case (clipping from OBS recordings)
+// doesn't benefit from very fast playback, and the legacy chip strip's
+// space constraints no longer apply now that the Regions panel hosts the
+// picker. Region.speed remains `number | undefined`, so any persisted 4×
+// value still loads cleanly — just isn't offered as a fresh selection.
+export const SPEED_PRESETS = [0.25, 0.5, 1, 2] as const;
 export type SpeedPreset = (typeof SPEED_PRESETS)[number];
 
 export function speedLabel(s: number | undefined): string {

@@ -13,10 +13,15 @@ function hexWithAlpha(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-/// Draw all per-track waveforms layered onto the canvas (and redraw on
-/// container resize). Each track uses its palette color; additive blend so
-/// simultaneously-loud tracks brighten where they overlap. Drawing centered
-/// on the mid-line — bar heights = max amplitude in that x's bin slice.
+/// Draw waveforms onto a canvas, redrawing on container resize.
+///
+/// `mode: "tracks"` (default): per-track waveforms layered with additive
+/// blend, each track in its palette color. Used by surfaces that benefit
+/// from seeing individual tracks (e.g. the per-track Audio panel rows).
+///
+/// `mode: "mixed"`: one neutral-toned waveform that's the max-envelope of
+/// all unmuted tracks. Used by the main timeline so the colored per-track
+/// stripes don't fight the region bands / playhead for visual attention.
 export function useWaveformDraw(args: {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   containerRef: React.RefObject<HTMLElement | null>;
@@ -25,8 +30,10 @@ export function useWaveformDraw(args: {
   trackMix: TrackMix;
   trackColors: TrackColorOverrides;
   duration: number;
+  mode?: "tracks" | "mixed";
 }): void {
   const { canvasRef, containerRef, waveforms, regions, trackMix, trackColors, duration } = args;
+  const mode = args.mode ?? "tracks";
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
@@ -49,6 +56,46 @@ export function useWaveformDraw(args: {
       if (waveforms.size === 0) return;
 
       const mid = cssH / 2;
+
+      // Mixed-mode: render a single neutral envelope = max over all unmuted
+      // tracks at each x, weighted by their volume. Skipping the per-region
+      // override scan keeps it cheap; the rail's Audio panel still shows the
+      // per-track detail. Used by the main timeline.
+      if (mode === "mixed") {
+        const maxBar = cssH * 0.92;
+        const unityBar = cssH * 0.55;
+        // Lift the longest track so envelope bin counts are consistent.
+        let longest = 0;
+        for (const bins of waveforms.values()) {
+          if (bins.length > longest) longest = bins.length;
+        }
+        if (longest === 0) return;
+        ctx.fillStyle = "rgba(170, 174, 184, 0.32)";
+        for (let x = 0; x < cssW; x++) {
+          let envelope = 0;
+          for (const [idx, bins] of waveforms.entries()) {
+            const m = trackMix[idx];
+            if (m?.muted) continue;
+            const vol = m?.volume ?? 1;
+            if (vol <= 0) continue;
+            const N = bins.length;
+            if (N === 0) continue;
+            const binStart = Math.floor((x / cssW) * N);
+            const binEnd = Math.max(binStart + 1, Math.floor(((x + 1) / cssW) * N));
+            let max = 0;
+            for (let i = binStart; i < binEnd && i < N; i++) {
+              const v = bins[i];
+              if (v > max) max = v;
+            }
+            const scaled = max * vol;
+            if (scaled > envelope) envelope = scaled;
+          }
+          const h = Math.min(envelope * unityBar, maxBar);
+          if (h < 1) continue;
+          ctx.fillRect(x, mid - h / 2, 1, h);
+        }
+        return;
+      }
       // Sort by index so colors are deterministic and the layering doesn't
       // depend on Map insertion order (extraction parallelism).
       const entries = [...waveforms.entries()].sort((a, b) => a[0] - b[0]);
@@ -136,5 +183,5 @@ export function useWaveformDraw(args: {
     const ro = new ResizeObserver(draw);
     ro.observe(container);
     return () => ro.disconnect();
-  }, [waveforms, trackMix, regions, duration, trackColors, canvasRef, containerRef]);
+  }, [waveforms, trackMix, regions, duration, trackColors, canvasRef, containerRef, mode]);
 }

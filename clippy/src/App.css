@@ -106,9 +106,24 @@
   --ease:        cubic-bezier(0.4, 0, 0.2, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
 
-  /* ----- Type families ----- */
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  --font-mono: "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  /* ----- Type families ----- *
+   *  Geist + Geist Mono are bundled via @fontsource (see main.tsx).
+   *  System-stack remains the fallback for first paint while font files
+   *  decode, and for any surface that ignores the var (e.g. native menus). */
+  --font-sans: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Geist Mono", "SF Mono", Menlo, Consolas, "Courier New", monospace;
+
+  /* ----- OKLCH tint mixers (targeted use only) ----- *
+   *  Consumer pattern: set `--tint-color` on the element, then read one of
+   *  the three mixers as the background. Used for region rows, track chips,
+   *  and timeline region blocks where a user-picked color blends with a
+   *  surface — sRGB mixing reads muddy at these saturations. The base
+   *  palette stays hex/HSLA; this is only the blend rule. */
+  --tint-on-surface-weak:    color-mix(in oklch, var(--tint-color, var(--accent))  8%, var(--bg-surface));
+  --tint-on-surface-medium:  color-mix(in oklch, var(--tint-color, var(--accent)) 14%, var(--bg-surface));
+  --tint-on-surface-strong:  color-mix(in oklch, var(--tint-color, var(--accent)) 24%, var(--bg-surface));
+  --tint-on-base-weak:       color-mix(in oklch, var(--tint-color, var(--accent))  8%, var(--bg-base));
+  --tint-on-base-medium:     color-mix(in oklch, var(--tint-color, var(--accent)) 14%, var(--bg-base));
 
   /* ============================================================
    *  Legacy aliases — point at the Pass-2 canonical tokens.
@@ -372,38 +387,9 @@ button.destructive:active:not(:disabled) {
   letter-spacing: 0;
 }
 
-/* ---------------------------------------------------------- *
- *  Color picker popover                                        *
- *  Portaled to body with fixed positioning so it never gets    *
- *  clipped (chip overflow, mixer panel bounds, etc).           *
- * ---------------------------------------------------------- */
-.color-popover {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-2);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
-  z-index: 1000;
-}
-.color-swatch {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  border: 2px solid transparent;
-  cursor: pointer;
-  padding: 0;
-  transition: transform var(--motion-quick) var(--ease-out),
-              border-color var(--motion-quick) var(--ease-out);
-}
-.color-swatch:hover {
-  transform: scale(1.12);
-}
-.color-swatch.active {
-  border-color: var(--text);
-}
+/* ColorPicker portal popover (legacy) and SpeedPicker pill+popover were
+   superseded by the inline region/track color swatches and the rail's
+   speed-pill row. Components + styles removed 2026-05-17. */
 
 kbd {
   font-family: var(--font-mono);
@@ -449,15 +435,6 @@ kbd {
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
-}
-
-/* Region-chips slot: structural wrapper only. Per Pass-2, chips are
-   progressive disclosure — they push the timeline downward when they
-   appear because they're "growth" UI, not chrome. Only the status strip
-   above gets a fixed reservation. */
-.shell-slot-chips {
-  display: flex;
-  flex-direction: column;
 }
 
 /* ---------------------------------------------------------- *
@@ -605,14 +582,54 @@ kbd {
 
 /* ---------------------------------------------------------- *
  *  Top bar                                                     *
+ *  Custom-chrome strip; the bar surface is a Tauri drag region *
+ *  (data-tauri-drag-region on the <header>). Interactive       *
+ *  children (button, input, a) inherently opt out of dragging. *
+ *  Window controls sit flush to the right edge with no padding *
+ *  so they hit the screen corner when maximized — Fitts' Law.  *
  * ---------------------------------------------------------- */
 .topbar {
   display: flex;
   align-items: center;
   gap: var(--s-4);
-  padding: var(--s-3) var(--s-4);
+  padding: var(--s-3) 0 var(--s-3) var(--s-4);
   background: var(--panel);
   border-bottom: 1px solid var(--border);
+}
+
+/* Window controls — Min / Max-Restore / Close. The close hover turns
+   red because that's the universal Windows / macOS convention; min and
+   max use the surface-elevated hover tone. */
+.window-controls {
+  display: flex;
+  align-items: stretch;
+  align-self: stretch;
+  margin-left: var(--s-2);
+  flex-shrink: 0;
+}
+.window-control {
+  width: 46px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  padding: 0;
+  cursor: default;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.window-control:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+.window-control:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.window-control-close:hover {
+  background: #e81123;  /* Windows-canon close-button red */
+  color: #ffffff;
 }
 /* Brand sits left, present but recedes when a file is loaded so the
    filename can be the answer to "what am I working on". */
@@ -810,28 +827,124 @@ kbd {
 }
 
 /* ---------------------------------------------------------- *
- *  Video stage                                                 *
+ *  Stage row — preview + editor rail laid out horizontally.    *
+ *  The stage itself keeps its old flex behaviour; the wrapper  *
+ *  just adds a right-side rail so the bottom transport / time- *
+ *  line spans full width below.                                *
+ * ---------------------------------------------------------- */
+.stage-wrap {
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+  /* Padding so the rounded video card and rail card don't bleed to the
+     window edge — the cards float inside the body region instead of acting
+     as full-bleed panels. Mirrors the design's PAD spacing. */
+  padding: var(--s-4) var(--s-2) var(--s-3) var(--s-4);
+  gap: var(--s-2);
+  background: var(--bg);
+}
+
+/* ---------------------------------------------------------- *
+ *  Video stage + preview card                                  *
+ *  The stage centers the rounded preview card inside its flex *
+ *  area; .video-card is the rounded surface that contains the *
+ *  video element and any on-preview overlays (region keys,    *
+ *  speed badge, crop indicator).                              *
  * ---------------------------------------------------------- */
 .stage {
   flex: 1 1 0;
   min-height: 0;
-  background: #06080a;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: stretch;
   overflow: hidden;
   position: relative;
 }
+.video-card {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #000;
+  /* Inset hairline + a soft drop shadow lift the preview off the canvas. */
+  box-shadow:
+    inset 0 0 0 1px var(--border-subtle),
+    0 30px 60px -30px rgba(0, 0, 0, 0.6);
+}
 .video {
-  max-width: 100%;
-  max-height: 100%;
+  width: 100%;
+  height: 100%;
+  display: block;
   outline: none;
+  object-fit: contain;
 }
 
+/* On-preview overlays — anchored relative to .video-card so they follow
+   the preview's bounds rather than the surrounding stage. */
+.preview-keys {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  gap: 3px;
+  pointer-events: none;
+}
+.preview-key {
+  width: 28px;
+  height: 28px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.55);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: var(--w-medium);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  cursor: default;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.preview-key:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+}
+.preview-key.active {
+  background: rgba(255, 255, 255, 0.10);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: var(--text-primary);
+}
+
+.preview-speed-badge {
+  --badge-color: var(--accent);
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: var(--w-semibold);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  pointer-events: none;
+}
+.preview-speed-badge svg { color: var(--badge-color); }
+
 .placeholder {
-  /* Pass-2 empty state. No click-anywhere, no permanent dashed border — the
-     button is the affordance, the active-drag overlay handles the
-     drop-target visual when the user is actually dragging. */
+  /* Loading / error placeholder rendered inside the video card while a file
+     is probing or has failed to load. Idle/no-file state is handled by
+     <EmptyState/> outside the editor scaffold. */
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -860,13 +973,16 @@ kbd {
 }
 
 /* ---------------------------------------------------------- *
- *  Transport row                                               *
+ *  Transport row (transport + timeline merged)                 *
+ *  Single row: timecode | transport buttons | timeline | mark *
+ *  buttons. Timeline gets the flex remainder; everything else *
+ *  is fixed-width. Mirrors the design's combined row.         *
  * ---------------------------------------------------------- */
-.transport {
+.transport-row {
   display: flex;
   align-items: center;
-  gap: var(--s-4);
-  padding: var(--s-2) var(--s-4);
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
   background: var(--panel);
   border-top: 1px solid var(--border);
 }
@@ -875,7 +991,8 @@ kbd {
 .time-readout {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  min-width: 200px;
+  min-width: 145px;
+  flex-shrink: 0;
   font-size: var(--type-display);     /* 22px — the live position */
   font-weight: var(--weight-medium);
   color: var(--text);
@@ -928,7 +1045,7 @@ kbd {
   display: flex;
   align-items: center;
   gap: var(--s-2);
-  margin-left: auto;
+  flex-shrink: 0;
 }
 
 /* Primary marks (Set In / Set Out) — by far the most-used buttons in this
@@ -996,17 +1113,29 @@ kbd {
 
 /* ---------------------------------------------------------- *
  *  Timeline + waveform                                         *
+ *  Sits inside .transport-row as the flex-1 middle column;    *
+ *  no top/bottom borders since the row's border + the inset   *
+ *  surface already frame it.                                  *
  * ---------------------------------------------------------- */
 .timeline {
   position: relative;
-  height: 76px;
-  background: var(--panel-2);
+  flex: 1;
+  min-width: 0;
+  height: 56px;
   cursor: pointer;
-  overflow: hidden;
-  border-top: 1px solid var(--border-2);
-  border-bottom: 1px solid var(--border-2);
+  /* overflow visible so the hover tooltip can float above this box. The
+     inner container handles clipping for the canvases / region bands. */
+  overflow: visible;
 }
-.timeline::before {
+.timeline-inner {
+  position: absolute;
+  inset: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.timeline-inner::before {
   content: "";
   position: absolute;
   left: 0; right: 0;
@@ -1198,218 +1327,8 @@ kbd {
   border-bottom: 5px solid var(--playhead);
 }
 
-/* ---------------------------------------------------------- *
- *  Region chip list                                            *
- * ---------------------------------------------------------- */
-.region-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s-2);
-  padding: var(--s-2) var(--s-4);
-  background: transparent;
-  /* No top border — the mixer card above already establishes the visual
-     boundary, and the timeline below has its own border. Reduces the
-     "everything is a horizontal strip" feel of the bottom zone. */
-  max-height: 120px;
-  overflow-y: auto;
-}
-
-/* Region chip — showcase pattern.
-   Identity carried by a small color dot at the leading edge (NOT a heavy
-   filled badge with the number, NOT a colored border). Number is plain text.
-   A hairline divider separates the data from the action tray. */
-.region-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 6px 6px 12px;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: var(--fs-body);
-  cursor: pointer;
-  transition: background var(--motion-quick) var(--ease-out);
-  animation: chip-fade-in var(--motion-base) var(--ease-out);
-}
-@keyframes chip-fade-in {
-  from { opacity: 0; transform: translateY(-2px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-.region-chip:hover {
-  background: var(--panel-3);
-  border-color: color-mix(in srgb, var(--region-color, var(--accent)) 45%, var(--border-2));
-}
-
-/* Region chip dot — now clickable (opens ColorPicker). Slightly larger
-   than a non-clickable indicator for an easy hit area. */
-.region-chip-dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--region-color, var(--accent));
-  flex-shrink: 0;
-  border: 0;
-  padding: 0;
-  cursor: pointer;
-  box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.35),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
-  transition: transform var(--motion-quick) var(--ease-out);
-}
-.region-chip-dot:hover {
-  transform: scale(1.2);
-}
-.region-chip-num {
-  font-weight: var(--w-semi);
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-  min-width: 10px;
-  letter-spacing: -0.1px;
-}
-.region-chip-times {
-  font-size: var(--fs-body);
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
-}
-.region-chip-len {
-  font-size: var(--fs-small);
-  color: var(--dim);
-  font-variant-numeric: tabular-nums;
-  padding-left: 2px;
-}
-.region-chip-crop,
-.region-chip-speed-badge {
-  font-size: var(--fs-small);
-  color: var(--text-2);
-  padding: 2px 8px;
-  border-radius: var(--r-1);
-  background: var(--panel-3);
-  border: 1px solid var(--border);
-  font-family: var(--font-mono);
-  font-weight: var(--w-medium);
-}
-
-/* Progressive disclosure
-   The action tray (crop edit / loop / delete) and its divider are hidden
-   at rest. Hover reveals them via a max-width + opacity transition so the
-   chip grows in place rather than reflowing siblings. Status badges
-   (crop dimensions, looping spinner via .active-loop) stay visible at
-   rest because they're INFORMATION about the region, not actions. */
-.region-chip-divider {
-  width: 1px;
-  height: 16px;
-  background: var(--border-2);
-  flex-shrink: 0;
-  margin: 0 2px;
-  opacity: 0;
-  max-width: 0;
-  overflow: hidden;
-  transition: opacity var(--motion-quick) var(--ease-out),
-              max-width var(--motion-base) var(--ease-out),
-              margin var(--motion-base) var(--ease-out);
-}
-.region-chip:hover .region-chip-divider,
-.region-chip:focus-within .region-chip-divider {
-  opacity: 1;
-  max-width: 1px;
-}
-
-.region-chip-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  opacity: 0;
-  max-width: 0;
-  overflow: hidden;
-  pointer-events: none;
-  transition: opacity var(--motion-quick) var(--ease-out),
-              max-width var(--motion-base) var(--ease-out);
-}
-.region-chip:hover .region-chip-actions,
-.region-chip:focus-within .region-chip-actions {
-  opacity: 1;
-  max-width: 240px;
-  pointer-events: auto;
-}
-.region-chip-action {
-  background: transparent;
-  border: 0;
-  color: var(--text-2);
-  width: 26px;
-  height: 26px;
-  border-radius: var(--r-1);
-  font-size: 13px;
-  line-height: 1;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  transition: background var(--motion-quick) var(--ease-out),
-              color var(--motion-quick) var(--ease-out);
-}
-.region-chip-action:hover { background: var(--panel-3); color: var(--text); }
-.region-chip-action.active { color: var(--accent); }
-.region-chip-action.active-loop {
-  color: var(--good);
-  animation: spin 2s linear infinite;
-}
-.region-chip-action.region-chip-delete:hover { color: var(--bad); }
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(360deg); }
-}
-
-/* Speed picker pill on the region chip + popover */
-.speed-picker { position: relative; display: inline-flex; align-items: center; }
-.speed-pill {
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--dim);
-  padding: 2px 7px;
-  font-size: var(--fs-micro);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  border-radius: 999px;
-  cursor: pointer;
-  letter-spacing: 0.02em;
-  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
-}
-.speed-pill:hover { color: var(--text); background: var(--panel-3); }
-.speed-pill.active {
-  color: #0e1216;
-  background: var(--accent);
-  border-color: var(--accent);
-}
-.speed-popover {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--r-2);
-  padding: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  z-index: 1000;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
-  min-width: 72px;
-  /* Portaled to body — stacks above everything (modal is z 100, overlay 30). */
-}
-.speed-popover-item {
-  background: transparent;
-  border: 0;
-  color: var(--text);
-  padding: 5px 10px;
-  font-size: var(--fs-small);
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-  cursor: pointer;
-  border-radius: var(--r-1);
-}
-.speed-popover-item:hover { background: var(--panel-3); }
-.speed-popover-item.active {
-  background: rgba(79, 157, 255, 0.18);
-  color: var(--accent);
-}
+/* Region chip strip (legacy .region-chip / .region-list) — replaced by
+   the rail's Regions panel. Old styles removed 2026-05-17. */
 
 /* "Click again to confirm" state for the Save Frame button. */
 .btn-armed,
@@ -1420,332 +1339,23 @@ button.btn-armed {
   box-shadow: inset 0 0 0 1px rgba(79, 157, 255, 0.4);
 }
 
-/* ---------------------------------------------------------- *
- *  Track mixer (multi-audio sources)                           *
- *  Each row carries the track's palette color via              *
- *  --track-color (set inline). Same color shows on the         *
- *  layered timeline waveform overlay.                          *
- * ---------------------------------------------------------- */
-.track-mixer {
-  /* Card surface — sits between the transport bar and the timeline.
-     Distinct rounded panel with side-margin gutters, not a flush strip,
-     so the mixer reads as a self-contained UI section. */
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--r-3);
-  margin: var(--s-2) var(--s-4) var(--s-2);
-  padding: var(--s-3) var(--s-3) var(--s-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.track-mixer-header {
-  display: flex;
-  align-items: center;
-  gap: var(--s-3);
-}
-.track-mixer-title {
-  font-size: var(--fs-h);
-  font-weight: var(--w-semi);
-  color: var(--text);
-  letter-spacing: -0.2px;
-}
-/* Region-context badge — the unique Clippy bit ("you're editing region N's
-   mix, automatically because the playhead is inside it"). Made prominent so
-   the user clocks the context shift the moment the playhead crosses a
-   region boundary. */
-.track-mixer-context {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 12px;
-  border-radius: 999px;
-  font-size: var(--fs-small);
-  font-weight: var(--w-semi);
-  letter-spacing: 0;
-  color: var(--text);
-  background: var(--panel-3);
-  border: 1px solid var(--border-2);
-  /* When a region's mix is in scope, --ctx-color tints both border + bg. */
-  border-color: var(--ctx-color, var(--border));
-  background:
-    linear-gradient(var(--panel-3), var(--panel-3)) padding-box,
-    var(--ctx-color, transparent) border-box;
-  cursor: help;
-  transition: background var(--t-fast) var(--ease);
-}
-.track-mixer-context::before {
-  content: "";
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--ctx-color, var(--dim));
-  box-shadow: 0 0 6px color-mix(in srgb, var(--ctx-color, transparent) 60%, transparent);
-  margin-right: 8px;
-  vertical-align: middle;
-  position: relative;
-  top: -1px;
-}
-.track-mixer-count {
-  font-size: var(--fs-small);
-  color: var(--dim);
-}
-.track-mixer-reset {
-  margin-left: auto;
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-2);
-  padding: 4px 12px;
-  font-size: var(--fs-small);
-  font-weight: var(--w-medium);
-  border-radius: var(--r-2);
-  cursor: pointer;
-  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
-}
-.track-mixer-reset:hover {
-  color: var(--text);
-  background: var(--panel-2);
-  border-color: var(--border-2);
-}
-.track-mixer-rows { display: flex; flex-direction: column; gap: var(--s-1); }
-
-.track-row {
-  display: grid;
-  /* Wider name column (140–200) so renamed tracks aren't truncated mid-word.
-     Stripe slightly thicker (5px) to register at a glance. */
-  grid-template-columns: 5px 34px minmax(140px, 200px) 1fr 72px;
-  gap: var(--s-3);
-  align-items: center;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-2);
-  padding: 7px var(--s-3) 7px 0;
-  font-size: var(--fs-body);
-  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
-}
-.track-row:hover { background: var(--panel-3); }
-.track-row.muted { opacity: 0.55; }
-.track-stripe {
-  align-self: stretch;
-  background: var(--track-color);
-  border-radius: var(--r-2) 0 0 var(--r-2);
-}
-.track-mute {
-  /* Subtle resting background — the row would otherwise hide a small icon
-     against the panel surface. Gives the speaker a tactile "this is a
-     button" feel without competing with the slider for attention. */
-  background: var(--panel-3);
-  border: 1px solid var(--border);
-  color: var(--text);
-  padding: 0;
-  width: 32px;
-  height: 32px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  cursor: pointer;
-  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
-  cursor: pointer;
-  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
-}
-.track-mute:hover {
-  background: var(--panel-hover);
-  color: var(--text);
-  border-color: var(--border-2);
-}
-.track-mute.active {
-  color: var(--bad);
-  background: rgba(239, 98, 102, 0.10);
-  border-color: rgba(239, 98, 102, 0.35);
-}
-.track-mute.active:hover {
-  background: rgba(239, 98, 102, 0.16);
-  border-color: rgba(239, 98, 102, 0.55);
-}
-.track-name {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--text);
-}
-/* Resolved name as plain text — clicking switches to the input below. */
-.track-name-text {
-  cursor: text;
-  padding: 2px 6px;
-  margin: -2px -6px;        /* keep label sitting in same position despite padding */
-  border-radius: var(--radius-1);
-  transition: background var(--motion-quick) var(--ease-out);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.track-name-text:hover {
-  background: var(--panel-3);
-}
-/* Input shown while renaming. Inherits parent typography exactly so the
-   transition click → editing doesn't jolt the layout. */
-.track-name-input {
-  font-family: inherit;
-  font-size: inherit;
-  font-weight: inherit;
-  color: var(--text);
-  background: var(--bg);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-1);
-  padding: 1px 5px;
-  margin: -2px -6px;
-  outline: none;
-  width: 140px;
-  min-width: 0;
-  box-shadow: 0 0 0 2px var(--c-accent-focus);
-}
-/* Track dot — clickable color identity. Click opens the ColorPicker
-   popover. Slightly larger than a non-clickable dot for an easy hit area. */
-.track-dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--track-color);
-  flex-shrink: 0;
-  border: 0;
-  padding: 0;
-  cursor: pointer;
-  /* Outer ring + inner highlight makes the dot punch above the row's flat
-     panel background — same trick as Discord's status indicator dots. */
-  box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.4),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
-  transition: transform var(--motion-quick) var(--ease-out);
-}
-.track-dot:hover {
-  transform: scale(1.2);
-}
-
-/* Volume slider — center-detent. Empty at 100% (unity); fill grows from
-   center outward toward the thumb in either direction. Track color
-   carries identity. A small tick at center marks unity. */
-.track-slider-wrap {
-  position: relative;
-  display: flex;
-  align-items: center;
-  width: 100%;
-}
-.track-slider-tick {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 2px;
-  height: 12px;
-  background: var(--text-2);
-  opacity: 0.5;
-  border-radius: 1px;
-  pointer-events: none;
-  z-index: 0;
-}
-.track-slider {
-  appearance: none;
-  -webkit-appearance: none;
-  width: 100%;
-  /* Bumped from 6 to 8 — the empty track was invisible against panel-2.
-     Now uses --bg (the darkest surface) so the slider lane is clearly inset
-     against the row even with no fill on either side of the center detent. */
-  height: 8px;
-  border-radius: 4px;
-  outline: none;
-  cursor: pointer;
-  position: relative;
-  z-index: 1;
-  background: linear-gradient(
-    to right,
-    var(--bg) 0%,
-    var(--bg) var(--fill-start, 50%),
-    var(--track-color) var(--fill-start, 50%),
-    var(--track-color) var(--fill-end, 50%),
-    var(--bg) var(--fill-end, 50%),
-    var(--bg) 100%
-  );
-  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.35);
-  transition: background var(--motion-quick) var(--ease-out);
-}
-.track-slider::-webkit-slider-thumb {
-  appearance: none;
-  -webkit-appearance: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: #fff;
-  border: 2px solid var(--track-color);
-  cursor: grab;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
-  transition: transform var(--motion-quick) var(--ease-out);
-}
-.track-slider::-webkit-slider-thumb:hover { transform: scale(1.1); }
-.track-slider:active::-webkit-slider-thumb { cursor: grabbing; }
-.track-slider:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-  background: var(--panel-3);
-}
-.track-pct {
-  font-size: var(--fs-small);
-  color: var(--text-2);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
-  font-weight: var(--w-medium);
-  /* The readout sits in the same column as the row's right-edge actions,
-     so it has a deliberate min-width to keep the slider lane stable as the
-     value swings between "muted" / "default" / "150%". */
-  min-width: 60px;
-}
-.track-pct.boost { color: var(--track-color); font-weight: var(--w-semi); }
-/* Muted rows: show "muted" in red so the state is unambiguous. */
-.track-row.muted .track-pct { color: var(--bad); }
-
-/* Cache controls row inside keybinds modal */
-.cache-row {
-  display: flex;
-  align-items: center;
-  gap: var(--s-2);
-  padding: var(--s-2) var(--s-4);
-  border-top: 1px solid var(--border);
-  background: var(--panel-2);
-}
-.cache-label {
-  font-size: var(--type-meta);
-  color: var(--text-2);
-  letter-spacing: 0;
-}
-.cache-size {
-  flex: 1;
-  font-size: var(--fs-small);
-  color: var(--text);
-}
-.cache-clear {
-  background: var(--panel-3);
-  border: 1px solid var(--border);
-  color: var(--text);
-  padding: 4px 12px;
-  border-radius: var(--r-1);
-  font-size: var(--fs-small);
-  cursor: pointer;
-}
-.cache-clear:hover:not(:disabled) { background: var(--bg); }
-.cache-clear:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Track mixer (TrackMixer) — replaced by .audio-track-* under the rail's
+   Audio panel. The old below-stage card was sized for a wide horizontal
+   slot; the rail context needs a vertical layout. Old styles removed
+   2026-05-17 along with the TrackMixer.tsx file. */
 
 /* ---------------------------------------------------------- *
  *  Crop overlay                                                *
  * ---------------------------------------------------------- */
 .crop-overlay { z-index: 30; }
+/* Lilac dashed boundary so the keep-rect reads as "selection" rather than
+   "frame". 0.5px outer shadow + 1px inner shadow stops the dashed line
+   from disappearing into bright video content. */
 .crop-rect {
-  border: 1.5px solid var(--accent);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+  position: absolute;
+  border: 1.5px dashed var(--accent);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55),
+              inset 0 0 0 1px rgba(0, 0, 0, 0.35);
   cursor: default;
 }
 .crop-rect-inner {
@@ -1753,14 +1363,18 @@ button.btn-armed {
   inset: 6px;
   cursor: move;
 }
+/* Corner handles are slightly larger + filled lilac with a white outline
+   for max visibility on any background. Edge handles share the class but
+   the size is tuned via the per-edge rule below. */
 .crop-handle {
   position: absolute;
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
   background: var(--accent);
   border: 1.5px solid #fff;
   border-radius: 2px;
   z-index: 2;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
 }
 .crop-handle-nw { left: -7px; top: -7px;    cursor: nwse-resize; }
 .crop-handle-n  { left: 50%;  top: -7px;    cursor: ns-resize;   transform: translateX(-50%); }
@@ -1773,7 +1387,8 @@ button.btn-armed {
 .crop-grid { position: absolute; inset: 0; pointer-events: none; }
 .crop-grid-line {
   position: absolute;
-  background: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 0 1px rgba(0, 0, 0, 0.4);
 }
 .crop-grid-line.v { top: 0; bottom: 0; width: 1px; }
 .crop-grid-line.h { left: 0; right: 0; height: 1px; }
@@ -2418,55 +2033,8 @@ button.btn-armed {
   border: 1px solid var(--border-subtle);
 }
 
-/* Storage tab grid — rows of (label/sub + value + action), with a divider
-   before the Total row so the eye reads it as a sum. */
-.settings-storage-grid {
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: var(--r-3);
-  overflow: hidden;
-  background: var(--panel);
-}
-.settings-storage-row {
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  gap: var(--s-3);
-  align-items: center;
-  padding: var(--s-3);
-  border-bottom: 1px solid var(--border);
-}
-.settings-storage-row:last-child { border-bottom: 0; }
-.settings-storage-row-total {
-  background: var(--panel-2);
-  font-weight: var(--w-semi);
-  border-top: 1px solid var(--border-2);
-}
-.settings-storage-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.settings-storage-label {
-  font-size: var(--fs-base);
-  font-weight: var(--w-medium);
-  color: var(--text);
-}
-.settings-storage-sub {
-  font-size: var(--fs-small);
-  color: var(--text-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.settings-storage-value {
-  font-size: var(--fs-base);
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
-  min-width: 80px;
-  text-align: right;
-}
+/* Legacy Storage tab grid (.settings-storage-*) replaced by SettingsGroup
+   + SettingsRow primitives in storage.tsx. Removed 2026-05-17. */
 
 /* Accordion sub-section: header is a button, body collapses when closed. */
 .settings-accordion {
@@ -2698,30 +2266,54 @@ button.btn-armed {
   overflow-y: auto;
 }
 .modal-tab-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   background: transparent;
   border: 0;
   text-align: left;
-  padding: var(--s-2) var(--s-3);
+  padding: 7px 9px;
   border-radius: var(--r-2);
-  color: var(--text-2);
+  color: var(--text);
   font: inherit;
   font-size: var(--fs-base);
-  font-weight: var(--w-medium);
+  font-weight: var(--w-regular);
   cursor: pointer;
   transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
   /* Apple Settings-style left-flush text with a generous click target. */
 }
 .modal-tab-btn:hover {
   background: var(--panel-2);
-  color: var(--text);
 }
 .modal-tab-btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 .modal-tab-btn.is-active {
-  background: var(--accent-tint);
-  color: var(--text);
+  background: var(--panel-2);
+  font-weight: var(--w-medium);
+}
+.settings-tab-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  flex-shrink: 0;
+  /* Slight inset shadow gives the colored block a subtle dimension and
+     stops the saturated reds/greens from looking like flat stickers. */
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.15);
+}
+/* Version chip glued to the bottom of the rail — design parity with the
+   "v0.3.6 · build …" tagline. */
+.modal-tab-rail-spacer { flex: 1; }
+.modal-tab-rail-version {
+  padding: 8px 10px 4px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 .modal-tab-content {
   padding: var(--s-4) var(--s-5);
@@ -2761,101 +2353,441 @@ button.btn-armed {
 
 /* About-tab key/value grid — borrows the iOS Settings cell pattern.
    Two columns; alternating row backgrounds keep the eye on the right value. */
-.settings-about-grid {
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: var(--r-3);
-  overflow: hidden;
-  background: var(--panel);
-  margin-bottom: var(--s-3);
-}
-.settings-about-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: var(--s-2) var(--s-3);
-  border-bottom: 1px solid var(--border);
-}
-.settings-about-row:last-child { border-bottom: 0; }
-.settings-about-key {
-  font-size: var(--fs-body);
-  color: var(--text-2);
-}
-.settings-about-value {
-  font-size: var(--fs-body);
-  color: var(--text);
-  font-weight: var(--w-medium);
-  text-align: right;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  margin-left: var(--s-3);
-}
-
-/* About-tab action row — DiagnosticsButton + Report-an-issue button. */
-.settings-about-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--s-2);
-  margin-top: var(--s-3);
-}
-.settings-about-actions .cache-row {
-  flex: 1;
-  padding: 0;
-  border-top: 0;
-}
-
-/* Keybind editor — two-column grid (action + one-line description on the
-   left, key combo button on the right). Groups by category with a small
-   uppercase label per section. */
-.kb-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  padding: var(--s-1) 0;
-  overflow-y: auto;
-}
-.kb-group { display: flex; flex-direction: column; }
-.kb-group-label {
+/* ============================================================
+ *  Settings primitives — SettingsGroup / SettingsRow / Toggle /
+ *  Stepper / SelectField / StatusCard. Prefixed `.s-*` because
+ *  the legacy ReplaySettings tab uses `.settings-row`/`.settings-
+ *  label` for its own ad-hoc form rows; the prefix keeps the two
+ *  vocabularies side by side without cascade fights. Consume the
+ *  React helpers in settings/primitives.tsx — every tab shares
+ *  one visual language that way.
+ * ============================================================ */
+.s-label {
   font-size: var(--fs-micro);
   font-weight: var(--w-semibold);
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
   color: var(--text-tertiary);
-  margin: 0 0 6px;
-  padding: 0 var(--s-4);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin: 0 0 8px 12px;
 }
-.kb-row {
-  display: grid;
-  /* Floor the label column at 220px so a wide right column (e.g. the
-     9-digit jump-to-region row) can't squeeze the description into a
-     character-by-character vertical wrap. */
-  grid-template-columns: minmax(220px, 1fr) auto;
+.s-group {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.s-row {
+  display: flex;
   align-items: center;
   gap: var(--s-3);
-  padding: var(--s-2) var(--s-4);
+  padding: 12px 14px;
   border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  color: var(--text-primary);
+  width: 100%;
 }
-.kb-row:last-child { border-bottom: none; }
-.kb-row.has-conflict { background: color-mix(in srgb, var(--status-warn) 8%, transparent); }
-.kb-row-action {
+.s-row:last-child { border-bottom: none; }
+.s-row-button {
+  border: none;
+  cursor: default;
+  transition: background var(--t-fast) var(--ease);
+}
+.s-row-button:hover { background: var(--bg-elevated); }
+.s-row-text {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 0;
 }
-.kb-row-action-name {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+.s-row-title {
   font-size: var(--fs-body);
+  font-weight: var(--w-medium);
   color: var(--text-primary);
+  line-height: 1.3;
 }
-.kb-row-action-desc {
+.s-row-subtitle {
+  font-size: var(--fs-micro);
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
+.s-row-control {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+/* Mono stat tag — used inside a row's control slot for byte counts etc. */
+.s-row-stat {
   font-size: var(--fs-small);
   color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  min-width: 64px;
+  text-align: right;
 }
+/* Keyboard tab title row — action name + optional Global / conflict tags */
+.kb-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.s-row-chevron {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+/* ---- Toggle (iOS-style pill) ---- */
+.s-toggle {
+  --toggle-on: var(--accent);
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  padding: 0;
+  cursor: default;
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.s-toggle.is-on {
+  background: var(--toggle-on);
+  border-color: var(--toggle-on);
+}
+.s-toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+  transition: left var(--t-fast) var(--ease);
+}
+.s-toggle.is-on .s-toggle-knob { left: 18px; }
+.s-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---- Stepper ---- */
+.s-stepper {
+  display: inline-flex;
+  align-items: stretch;
+  background: var(--bg-base);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.s-stepper-btn {
+  width: 28px;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 16px;
+  font-weight: var(--w-medium);
+  cursor: default;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.s-stepper-btn:hover:not(:disabled) {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+.s-stepper-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.s-stepper-value {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  padding: 4px 12px;
+  border-left: 1px solid var(--border-strong);
+  border-right: 1px solid var(--border-strong);
+  min-width: 68px;
+  justify-content: center;
+  font-size: var(--fs-body);
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.s-stepper-unit {
+  font-size: var(--fs-micro);
+  color: var(--text-tertiary);
+  margin-left: 2px;
+}
+
+/* ---- SelectField ---- */
+.s-select-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.s-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--bg-base);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--fs-small);
+  padding: 5px 28px 5px 10px;
+  cursor: default;
+  outline: none;
+  width: 100%;
+  min-width: 90px;
+}
+.s-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 25%, transparent);
+}
+.s-select-chevron {
+  position: absolute;
+  right: 10px;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+/* ---- Storage tab — usage card + stacked bar + legend ---- */
+.storage-usage-card {
+  padding: 16px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.storage-usage-top {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+}
+.storage-usage-top > :first-child { flex: 1; min-width: 0; }
+.storage-usage-total {
+  font-size: 24px;
+  font-weight: var(--w-semibold);
+  letter-spacing: -0.5px;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.storage-usage-sub {
+  font-size: var(--fs-small);
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+.storage-usage-bar {
+  height: 10px;
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  overflow: hidden;
+  display: flex;
+}
+.storage-bar-seg {
+  height: 100%;
+  border-right: 1px solid var(--bg-surface);
+  transition: width var(--t-base) var(--ease);
+}
+.storage-bar-seg:last-child { border-right: none; }
+.storage-bar-saved { background: var(--accent); }
+.storage-bar-cache { background: var(--status-good); }
+.storage-bar-other { background: var(--status-warn); }
+
+.storage-usage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  font-size: var(--fs-small);
+  color: var(--text-secondary);
+  align-items: center;
+}
+.storage-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.storage-legend-dot.tone-saved  { background: var(--accent); }
+.storage-legend-dot.tone-cache  { background: var(--status-good); }
+.storage-legend-dot.tone-other  { background: var(--status-warn); }
+.storage-legend-val {
+  color: var(--text-tertiary);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+}
+.storage-legend-spacer { flex-basis: 100%; height: 0; }
+
+/* ---- Storage prune confirmation — appears inside the settings dialog
+   when a cap/unkept change would delete files. Modal-like card, anchored
+   bottom of the panel so the destination tab stays in context. ---- */
+.storage-prune-confirm {
+  position: sticky;
+  bottom: 0;
+  margin-top: var(--s-4);
+}
+.storage-prune-confirm-body {
+  padding: 14px;
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--status-bad) 8%, var(--bg-elevated));
+  border: 1px solid color-mix(in oklch, var(--status-bad) 32%, var(--border-strong));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.storage-prune-confirm-title {
+  font-size: var(--fs-body);
+  font-weight: var(--w-semibold);
+  color: var(--text-primary);
+}
+.storage-prune-confirm-sub {
+  font-size: var(--fs-small);
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+.storage-prune-confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.storage-prune-confirm-go {
+  background: var(--status-bad);
+  color: #fff;
+  border: none;
+  padding: 7px 14px;
+  border-radius: var(--radius-md);
+  font-family: var(--font-sans);
+  font-size: var(--fs-small);
+  font-weight: var(--w-semibold);
+  cursor: default;
+  transition: background var(--t-fast);
+}
+.storage-prune-confirm-go:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.storage-prune-confirm-go:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Replay buffer status card — uses the generic StatusCard frame but adds
+   a sized dot + text column + action button layout. */
+.replay-buffer-status-dot {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--status-tint);
+  flex-shrink: 0;
+}
+.replay-buffer-status-dot[data-running="1"]::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: var(--status-tint);
+  opacity: 0.20;
+  animation: buf-pulse 1.8s ease-in-out infinite;
+}
+.replay-buffer-status-text {
+  flex: 1;
+  min-width: 0;
+}
+.replay-buffer-status-title {
+  font-size: var(--fs-body);
+  font-weight: var(--w-semibold);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.replay-buffer-status-sub {
+  font-size: var(--fs-micro);
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+.replay-volume-slider {
+  width: 140px;
+  flex-shrink: 0;
+}
+
+/* ---- StatusCard (tinted tone-* footer card) ---- */
+.s-status-card {
+  --status-tint: var(--accent);
+  padding: 14px;
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--status-tint) 7%, var(--bg-surface));
+  border: 1px solid color-mix(in oklch, var(--status-tint) 25%, var(--border-subtle));
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.s-status-card.tone-good { --status-tint: var(--status-good); }
+.s-status-card.tone-warn { --status-tint: var(--status-warn); }
+.s-status-card.tone-bad  { --status-tint: var(--status-bad);  }
+.s-status-card.tone-info { --status-tint: var(--accent);      }
+
+/* Section spacing inside a tab — title + groups stacked with breathing room */
+.settings-tab-pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-5);
+}
+.settings-tab-pane-title {
+  font-size: 19px;
+  font-weight: var(--w-semibold);
+  letter-spacing: -0.3px;
+  color: var(--text-primary);
+  margin: 0 0 4px;
+}
+.settings-tab-pane-blurb {
+  font-size: var(--fs-small);
+  color: var(--text-secondary);
+  line-height: 1.45;
+  margin: 0 0 var(--s-4);
+}
+
+/* About tab — hero identity block (lilac logo + name + version). Inserts
+   above the existing details grid and replaces the generic h3/blurb header
+   for the About surface specifically. */
+.settings-about-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-4) var(--s-2) var(--s-5);
+  text-align: center;
+}
+.settings-about-hero-logo {
+  width: 72px;
+  height: 72px;
+  border-radius: 20px;
+  background: var(--accent);
+  color: var(--bg-base);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 20px 50px -10px color-mix(in oklch, var(--accent) 60%, transparent);
+  margin-bottom: var(--s-2);
+}
+.settings-about-hero-name {
+  font-size: 24px;
+  font-weight: var(--w-semibold);
+  letter-spacing: -0.4px;
+  color: var(--text-primary);
+}
+.settings-about-hero-version {
+  font-size: var(--fs-micro);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.settings-about-hero-blurb {
+  margin: var(--s-2) 0 0;
+  max-width: 380px;
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+}
+
+/* Legacy About-tab grid (.settings-about-grid / -row / -key / -value /
+   -actions) and Keyboard-tab grid (.kb-grid / -group / -row / -row-action*)
+   replaced by SettingsGroup + SettingsRow primitives. Removed 2026-05-17. */
 .kb-binding {
   min-width: 130px;
   font-family: var(--font-mono);
@@ -2895,13 +2827,36 @@ button.btn-armed {
   gap: var(--s-4);
 }
 .export-section { display: flex; flex-direction: column; gap: var(--s-2); }
-.export-section-label {
-  /* Sub-section label inside the Export body — same scale + weight as
-     Tips's .section-title so the two modals' sub-headers feel identical. */
-  font-size: var(--fs-section);
-  font-weight: var(--w-semi);
-  color: var(--text);
-  letter-spacing: -0.1px;
+/* Legacy .export-section-label was an h3-ish sub-header; the retrofit uses
+   SettingsLabel (.s-label) instead for visual parity with the settings
+   tabs. Rule preserved as a no-op so any pre-cached HTML doesn't break. */
+.export-section-label { display: none; }
+
+/* Toggle-row layout that mirrors the SettingsRow shape (title+sub on left,
+   control on right). Replaces the previous .export-toggle <label> wrap. */
+.export-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: 12px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+.export-toggle-text {
+  flex: 1;
+  min-width: 0;
+}
+.export-toggle-text .export-toggle-label {
+  font-size: var(--fs-body);
+  font-weight: var(--w-medium);
+  color: var(--text-primary);
+}
+.export-toggle-text .export-toggle-sub {
+  font-size: var(--fs-micro);
+  color: var(--text-tertiary);
+  margin-top: 2px;
+  line-height: 1.4;
 }
 
 /* Segmented button group: replaces fieldsets of radios with a row of cards. */
@@ -3276,4 +3231,1078 @@ button.btn-armed {
 .drop-icon {
   font-size: 56px;
   line-height: 1;
+}
+
+/* ============================================================
+ *  Empty state — full-window surface when no file is loaded.
+ *  Two variants: Hero (no recents) and Recent (folder has clips).
+ *  Hosts the topbar above and nothing below; transport / timeline
+ *  / rail are all hidden until a clip loads.
+ * ============================================================ */
+.empty-hero {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--s-6);
+  background:
+    radial-gradient(ellipse at 50% 30%, color-mix(in oklch, var(--accent) 18%, transparent) 0%, transparent 60%),
+    var(--bg);
+}
+.empty-hero-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  text-align: center;
+  max-width: 540px;
+}
+.empty-hero-logo {
+  width: 96px;
+  height: 96px;
+  border-radius: 28px;
+  background: var(--accent);
+  color: var(--bg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 30px 80px -20px color-mix(in oklch, var(--accent) 50%, transparent);
+}
+.empty-hero-title {
+  font-size: 44px;
+  font-weight: var(--w-semibold);
+  letter-spacing: -1.2px;
+  color: var(--text-primary);
+  line-height: 1.05;
+}
+.empty-hero-title-dim { color: var(--text-tertiary); }
+.empty-hero-blurb {
+  margin: 0;
+  font-size: var(--fs-body);
+  color: var(--text-secondary);
+  max-width: 420px;
+  line-height: 1.5;
+}
+.empty-hero-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 6px;
+}
+.empty-hero-cta {
+  height: 40px;
+  padding: 0 22px;
+  font-size: var(--fs-body);
+}
+.empty-hero-hint {
+  color: var(--text-tertiary);
+  font-size: var(--fs-small);
+}
+
+/* Recent variant — two-column layout. Left = open CTA + open-folder hint;
+   right = scrollable list of saved replays. The two halves share a
+   center divider. */
+.empty-recent {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  overflow: hidden;
+}
+.empty-recent-left {
+  padding: 48px 40px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  border-right: 1px solid var(--border);
+  min-height: 0;
+}
+.empty-recent-h1 {
+  font-size: 28px;
+  font-weight: var(--w-semibold);
+  letter-spacing: -0.5px;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+.empty-recent-blurb {
+  margin: 0;
+  font-size: var(--fs-body);
+  color: var(--text-secondary);
+  max-width: 380px;
+  line-height: 1.45;
+}
+.empty-recent-actions {
+  display: flex;
+  gap: 10px;
+}
+/* Replay-buffer status card on the left column of the Recent empty state.
+   Mirrors the design's "Replay buffer is running" indicator — colored dot
+   with a pulsing halo, primary line + monospaced sub-line. */
+.empty-recent-buffer {
+  --buf-tint: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+}
+.empty-recent-buffer.is-active,
+.empty-recent-buffer.is-watching,
+.empty-recent-buffer.is-saving {
+  --buf-tint: var(--status-good);
+}
+.empty-recent-buffer.is-saving { --buf-tint: var(--accent); }
+.empty-recent-buffer.is-idle   { --buf-tint: var(--text-tertiary); }
+.empty-recent-buffer-dot {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--buf-tint);
+  flex-shrink: 0;
+}
+.empty-recent-buffer:not(.is-idle) .empty-recent-buffer-dot::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: var(--buf-tint);
+  opacity: 0.18;
+  animation: buf-pulse 1.8s ease-in-out infinite;
+}
+@keyframes buf-pulse {
+  0%, 100% { transform: scale(1);   opacity: 0.20; }
+  50%      { transform: scale(1.6); opacity: 0;    }
+}
+.empty-recent-buffer-text {
+  flex: 1;
+  min-width: 0;
+}
+.empty-recent-buffer-title {
+  font-size: var(--fs-body);
+  font-weight: var(--w-semibold);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.empty-recent-buffer-sub {
+  font-size: var(--fs-micro);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  margin-top: 2px;
+}
+
+.empty-recent-right {
+  padding: 48px 40px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+.empty-recent-list-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.empty-recent-list-title {
+  font-size: 17px;
+  font-weight: var(--w-semibold);
+  color: var(--text-primary);
+  letter-spacing: -0.2px;
+}
+.empty-recent-list-count {
+  font-size: var(--fs-small);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.empty-recent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.empty-recent-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 10px 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: default;
+  font: inherit;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.empty-recent-row:hover {
+  background: var(--bg-surface);
+  border-color: var(--border-subtle);
+}
+.empty-recent-row-thumb {
+  width: 64px;
+  height: 38px;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.empty-recent-row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.empty-recent-row-name {
+  font-size: var(--fs-body);
+  font-weight: var(--w-medium);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.empty-recent-row-meta {
+  display: flex;
+  gap: 8px;
+  font-size: var(--fs-micro);
+  color: var(--text-tertiary);
+}
+.empty-recent-row-meta .dim { opacity: 0.6; }
+.empty-recent-row-chevron {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+/* ============================================================
+ *  Editor rail (Audio / Regions / Crop)
+ *  Right-side companion to the video preview. Three tabs share
+ *  the same scaffold; the segmented control's indicator slides
+ *  between them. Collapsed mode trades the panel for an icon
+ *  strip so the preview can grow.
+ * ============================================================ */
+.editor-rail {
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  transition: width var(--t-base) var(--ease-out);
+}
+.editor-rail.collapsed {
+  width: 64px;
+  align-items: stretch;
+}
+.editor-rail-card {
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.editor-rail.collapsed .editor-rail-card {
+  align-items: center;
+  padding: var(--s-3) 0;
+  gap: var(--s-1);
+}
+
+/* Active region header — colored dot + name + #N + collapse chevron.
+   Sits above the segmented tabs. */
+.rail-active-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 12px 0;
+  min-height: 32px;
+}
+.rail-active-header.is-empty .rail-active-empty {
+  color: var(--text-tertiary);
+  font-size: var(--fs-small);
+  font-weight: var(--w-medium);
+}
+.rail-active-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.rail-active-name {
+  font-size: var(--fs-body);
+  font-weight: var(--w-semibold);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-active-id {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.rail-active-spacer { flex: 1; }
+
+.rail-tabs-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) 12px 0;
+}
+
+.rail-tabs {
+  position: relative;
+  flex: 1;
+  display: flex;
+  padding: 3px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  min-width: 0;
+}
+.rail-tab-indicator {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: calc(var(--radius-md) - 2px);
+  transition: left var(--t-base) var(--ease-out), width var(--t-base) var(--ease-out);
+  pointer-events: none;
+}
+.rail-tab {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 6px;
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-small);
+  font-weight: var(--w-medium);
+  cursor: default;
+  white-space: nowrap;
+  transition: color var(--t-fast) var(--ease);
+}
+.rail-tab.active {
+  color: var(--text-primary);
+  font-weight: var(--w-semibold);
+}
+.rail-tab:hover:not(.active) { color: var(--text-secondary); }
+.rail-tab-icon { display: inline-flex; align-items: center; }
+.rail-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text-tertiary);
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: var(--w-semibold);
+  font-variant-numeric: tabular-nums;
+  margin-left: 2px;
+}
+.rail-tab.active .rail-tab-badge {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.rail-collapse-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  border-radius: var(--radius-sm);
+  cursor: default;
+  flex-shrink: 0;
+}
+.rail-collapse-btn:hover { background: var(--bg-elevated); color: var(--text-secondary); }
+
+.rail-divider {
+  display: block;
+  width: 60%;
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 2px 0 4px;
+}
+
+.rail-icon-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-tertiary);
+  cursor: default;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.rail-icon-btn:hover { background: var(--bg-elevated); color: var(--text-secondary); }
+.rail-icon-btn.active {
+  background: var(--accent-tint);
+  border-color: var(--accent-muted);
+  color: var(--accent);
+}
+.rail-icon-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-family: var(--font-sans);
+  font-size: 9px;
+  font-weight: var(--w-semibold);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rail-panel {
+  flex: 1;
+  min-height: 0;
+  padding: var(--s-3);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------- Audio panel (rail) ---------- *
+ *  Replaces TrackMixer in the rail context. Compact vertical rows; each
+ *  row carries its own color, mini-waveform, and slider. Per-region mix
+ *  state is preserved via the parent's effectiveMix/setEffectiveMix.       */
+.audio-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  min-height: 0;
+}
+.audio-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.audio-panel-title {
+  font-size: var(--fs-body);
+  font-weight: var(--w-semibold);
+  color: var(--text-primary);
+}
+.audio-panel-ctx {
+  --ctx-color: var(--text-tertiary);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--ctx-color) 16%, var(--bg-elevated));
+  color: var(--text-primary);
+  border: 1px solid color-mix(in oklch, var(--ctx-color) 32%, var(--border-subtle));
+  font-size: var(--fs-micro);
+  font-weight: var(--w-medium);
+}
+.audio-panel-ctx::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ctx-color);
+}
+.audio-panel-spacer { flex: 1; }
+.audio-panel-reset {
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-micro);
+  font-weight: var(--w-medium);
+  cursor: default;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.audio-panel-reset:hover:not(:disabled) {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+}
+.audio-panel-reset:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.audio-panel-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.audio-track-row {
+  --track-color: var(--accent);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.audio-track-row.is-muted { opacity: 0.55; }
+.audio-track-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.audio-track-mute {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  padding: 0;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+  flex-shrink: 0;
+}
+.audio-track-mute:hover { background: var(--bg-base); color: var(--text-primary); }
+.audio-track-row.is-muted .audio-track-mute {
+  background: var(--bg-base);
+  color: var(--status-bad);
+}
+.audio-track-dot-wrap { position: relative; flex-shrink: 0; }
+.audio-track-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  cursor: default;
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--track-color) 18%, transparent);
+}
+.audio-track-color-pop {
+  position: absolute;
+  top: 16px;
+  left: -4px;
+  display: grid;
+  grid-template-columns: repeat(5, 14px);
+  gap: 4px;
+  padding: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--sh-2);
+  z-index: 5;
+}
+.audio-track-color-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.10);
+  padding: 0;
+  cursor: default;
+}
+.audio-track-color-swatch.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.audio-track-name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-small);
+  color: var(--text-primary);
+  font-weight: var(--w-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+.audio-track-name-input {
+  flex: 1;
+  background: var(--bg-base);
+  border: 1px solid var(--track-color);
+  color: var(--text-primary);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-size: var(--fs-small);
+  font-weight: var(--w-medium);
+  outline: none;
+}
+.audio-track-pct {
+  font-size: var(--fs-micro);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  min-width: 36px;
+  text-align: right;
+}
+.audio-track-wave {
+  width: 100%;
+  height: 18px;
+  display: block;
+}
+/* Native range slider — track is a colored / surface split via background
+   gradient on the input itself; thumb is a white pill with a colored halo. */
+.audio-track-slider {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  outline: none;
+  cursor: default;
+}
+.audio-track-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 7px;
+  background: #fff;
+  border: none;
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--track-color) 22%, transparent),
+              0 1px 3px rgba(0,0,0,0.4);
+  cursor: default;
+}
+.audio-track-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 7px;
+  background: #fff;
+  border: none;
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--track-color) 22%, transparent),
+              0 1px 3px rgba(0,0,0,0.4);
+  cursor: default;
+}
+
+/* ---------- Regions panel ---------- */
+.regions-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  min-height: 0;
+}
+.regions-add-cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: var(--accent-tint);
+  border: 1px dashed var(--accent-muted);
+  color: var(--accent);
+  font-family: var(--font-sans);
+  font-size: var(--fs-small);
+  font-weight: var(--w-medium);
+  cursor: default;
+  transition: background var(--t-fast), border-color var(--t-fast), opacity var(--t-fast);
+}
+.regions-add-cta:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--accent) 20%, var(--bg-surface));
+}
+.regions-add-cta:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.regions-add-cta-time {
+  color: var(--text-tertiary);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+}
+.regions-empty {
+  padding: var(--s-4) var(--s-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  text-align: center;
+}
+.regions-empty .dim { color: var(--text-tertiary); font-size: var(--fs-micro); }
+
+.regions-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+.region-row {
+  --tint-color: var(--accent);
+  padding: 10px 10px 10px 11px;
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: default;
+  transition: background var(--t-base) var(--ease), border-color var(--t-base) var(--ease);
+}
+.region-row:hover { border-color: var(--border-strong); }
+.region-row.active {
+  background: var(--tint-on-surface-medium);
+  border-color: var(--tint-color);
+}
+.region-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.region-row-id {
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--tint-color);
+  color: #1a1a1a;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--w-semibold);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.region-row-name {
+  flex: 1;
+  font-size: var(--fs-body);
+  font-weight: var(--w-semibold);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.region-row-rename {
+  flex: 1;
+  background: var(--bg-base);
+  border: 1px solid var(--tint-color);
+  color: var(--text-primary);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  font-weight: var(--w-semibold);
+  outline: none;
+}
+.region-row-dur {
+  color: var(--text-tertiary);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+}
+.region-row-times {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-micro);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.region-row-arrow { color: var(--text-tertiary); opacity: 0.6; }
+
+.region-row-active-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+.region-speed-pills {
+  display: flex;
+  align-items: stretch;
+  padding: 2px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.region-speed-pill {
+  flex: 1;
+  padding: 3px 0;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: var(--w-semibold);
+  border-radius: 3px;
+  cursor: default;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.region-speed-pill:hover:not(.active) { color: var(--text-primary); }
+.region-speed-pill.active {
+  background: var(--tint-color);
+  color: #1a1a1a;
+}
+.region-row-bottom {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.region-row-spacer { flex: 1; }
+.region-row-crop-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-micro);
+  font-weight: var(--w-semibold);
+  cursor: default;
+  transition: border-color var(--t-fast), color var(--t-fast);
+}
+.region-row-crop-badge:hover { border-color: var(--border-strong); color: var(--text-secondary); }
+.region-row-crop-badge.has-crop {
+  color: var(--accent);
+  border-color: var(--accent-muted);
+}
+.region-row-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  border-radius: var(--radius-sm);
+  cursor: default;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.region-row-icon-btn:hover { background: var(--bg-base); color: var(--text-secondary); }
+.region-row-icon-btn.active { color: var(--accent); }
+.region-row-delete:hover { color: var(--status-bad); }
+
+.region-row-color-wrap { position: relative; }
+.region-row-color-btn {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.18);
+  padding: 0;
+  cursor: default;
+  margin: 0 2px;
+}
+.region-row-color-pop {
+  position: absolute;
+  bottom: 22px;
+  right: -4px;
+  display: grid;
+  grid-template-columns: repeat(5, 16px);
+  gap: 4px;
+  padding: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--sh-2);
+  z-index: 5;
+}
+.region-row-color-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.10);
+  padding: 0;
+  cursor: default;
+}
+.region-row-color-swatch.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---------- Crop panel ---------- */
+.crop-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  min-height: 0;
+}
+.crop-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: var(--fs-body);
+  font-weight: var(--w-semibold);
+}
+.crop-panel-region {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-tertiary);
+  font-weight: var(--w-regular);
+}
+.crop-panel-presets {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.crop-preset-btn {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  cursor: default;
+  text-align: left;
+  transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast);
+}
+.crop-preset-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.crop-preset-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.crop-preset-btn.active {
+  background: color-mix(in oklch, var(--accent) 14%, var(--bg-elevated));
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+.crop-preset-thumb {
+  flex-shrink: 0;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
+  opacity: 0.6;
+}
+.crop-preset-btn.active .crop-preset-thumb {
+  border-color: var(--accent);
+  opacity: 1;
+}
+.crop-preset-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.crop-preset-label {
+  font-size: var(--fs-body);
+  font-weight: var(--w-semibold);
+}
+.crop-preset-sub {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+.crop-preset-clear { grid-column: span 2; }
+
+.crop-panel-output {
+  padding: 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.crop-panel-output-label {
+  font-size: var(--fs-micro);
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: var(--w-semibold);
+}
+.crop-panel-output-value {
+  font-size: var(--fs-body);
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.crop-panel-output-hint {
+  font-size: var(--fs-small);
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
+.crop-panel-footer {
+  margin-top: auto;
+  padding-top: var(--s-2);
+  display: flex;
+}
+.crop-panel-footer > .btn { flex: 1; }
+
+/* ---------- Hover-frame tooltip on the timeline ---------- */
+/* Hidden mirror <video> that feeds the tooltip thumbnail. Off-screen rather
+   than display:none so the browser keeps a decoder alive and seeks land
+   fast — display:none would tear down media-element state. */
+.hover-preview-video {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  left: -9999px;
+  top: -9999px;
+}
+.timeline-hover-frame {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+  z-index: 4;
+}
+.timeline-hover-frame-thumb {
+  width: 100px;
+  height: 56px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #000;
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  position: relative;
+}
+.timeline-hover-frame-thumb video,
+.timeline-hover-frame-thumb canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.timeline-hover-frame-time {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: var(--w-medium);
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--border-subtle);
 }

@@ -96,8 +96,17 @@ pub fn run() {
         // at runtime (per-monitor corner + fixed inner_size), and persisting
         // them across sessions would clobber the builder's inner_size with
         // whatever the plugin restored.
+        //
+        // StateFlags::all() minus DECORATIONS — the custom title bar means
+        // decorations are a build-time decision (off), not user-mutable. The
+        // plugin's default would otherwise restore a saved `decorations: true`
+        // from before the custom chrome shipped, double-stacking the bars.
         .plugin(
             tauri_plugin_window_state::Builder::new()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        .difference(tauri_plugin_window_state::StateFlags::DECORATIONS),
+                )
                 .with_denylist(&["save-overlay"])
                 .build(),
         )
@@ -399,8 +408,6 @@ pub fn run() {
             storage::file_size,
             storage::reveal_in_folder,
             state::get_initial_path,
-            storage::cache_size,
-            storage::clear_cache,
             export::export_clip_gif,
             export::export_concat_gif,
             clipboard::export_frame_png,
@@ -428,7 +435,10 @@ pub fn run() {
             replay::commands::replay_get_save_dir,
             replay::commands::replay_set_save_dir,
             replay::commands::replay_reset_save_dir,
-            storage::storage_summary,
+            storage::storage_usage,
+            storage::storage_list_replays,
+            storage::storage_mark_opened,
+            storage::storage_prune,
             diag::clear_diagnostics_log,
             diag::reveal_diagnostics_log,
             replay_set_save_hotkey,

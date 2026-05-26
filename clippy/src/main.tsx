@@ -1,5 +1,14 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+// Bundled fonts — never fetched at runtime. Latin only; Cyrillic subset
+// stays out of the bundle since the UI is English-only today.
+import "@fontsource/geist/latin-400.css";
+import "@fontsource/geist/latin-500.css";
+import "@fontsource/geist/latin-600.css";
+import "@fontsource/geist/latin-700.css";
+import "@fontsource/geist-mono/latin-400.css";
+import "@fontsource/geist-mono/latin-500.css";
+import "@fontsource/geist-mono/latin-600.css";
 import App from "./App";
 import { OverlayApp } from "./OverlayApp";
 

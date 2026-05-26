@@ -205,6 +205,77 @@ async function openInEditor(path: string) {
   }
 }
 
+// ----- inline icons -----
+//
+// Kept tiny + inline: the overlay's bundle is its own surface and we don't
+// want to pull in the editor's icon set. Each icon is rendered inside a
+// 28x28 lilac block so they read at-a-glance from the corner of the screen.
+function OverlayIconCheck() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M5 12l5 5L20 7" />
+    </svg>
+  );
+}
+function OverlayIconDot() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="12" cy="12" r="9" />
+      <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+function OverlayIconBang() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 9v4M12 17h.01" />
+      <circle cx="12" cy="12" r="9" />
+    </svg>
+  );
+}
+function OverlayIconFolder() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+    </svg>
+  );
+}
+function OverlayIconExport() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 3v12M7 8l5-5 5 5M5 21h14" />
+    </svg>
+  );
+}
+
+/** Read the user-customized "Save replay" hotkey from the keybinds index in
+ *  localStorage and format it as a chip-friendly string. Best-effort —
+ *  returns the default ("Alt+F10") if no override is set or parsing fails. */
+function readSaveReplayHotkey(): string {
+  try {
+    const raw = localStorage.getItem("clippy.keybinds.v1");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const sr = parsed?.saveReplay;
+      if (sr && typeof sr === "object") {
+        const parts: string[] = [];
+        if (sr.ctrl) parts.push("Ctrl");
+        if (sr.alt) parts.push("Alt");
+        if (sr.shift) parts.push("Shift");
+        if (sr.meta) parts.push("Meta");
+        if (sr.key) parts.push(String(sr.key));
+        if (parts.length > 0) return parts.join("+");
+      }
+    }
+  } catch {}
+  return "Alt+F10";
+}
+
 // ----- component -----
 
 export function OverlayApp() {
@@ -472,15 +543,19 @@ export function OverlayApp() {
     return null;
   }
 
+  // Resolve the saved-replay hotkey from the persisted keybinds so the chip
+  // reflects what the user actually pressed. Falls back to the default if no
+  // override is set. Computed per render; cheap (one localStorage read).
+  const hotkeyText = readSaveReplayHotkey();
+
   return (
     <div className={`overlay-card overlay-${phase.kind}`}>
       <div className="overlay-row">
-        {(phase.kind === "started" || phase.kind === "progress") && (
-          <div className="overlay-spinner" />
-        )}
-        {phase.kind === "done" && <div className="overlay-icon overlay-icon-good">✓</div>}
-        {phase.kind === "error" && <div className="overlay-icon overlay-icon-bad">!</div>}
-        {phase.kind === "spawn-error" && <div className="overlay-icon overlay-icon-bad">!</div>}
+        <div className={`overlay-iconbox overlay-iconbox-${phase.kind}`}>
+          {(phase.kind === "started" || phase.kind === "progress") && <OverlayIconDot />}
+          {phase.kind === "done" && <OverlayIconCheck />}
+          {(phase.kind === "error" || phase.kind === "spawn-error") && <OverlayIconBang />}
+        </div>
 
         <div className="overlay-text">
           {phase.kind === "started" && (
@@ -532,24 +607,32 @@ export function OverlayApp() {
             </>
           )}
         </div>
+
+        {hotkeyText && (
+          <span className="overlay-hotkey-chip mono" aria-hidden>{hotkeyText}</span>
+        )}
       </div>
+
+      {(phase.kind === "started" || phase.kind === "progress") && (
+        <div className="overlay-progress" aria-hidden>
+          <div className="overlay-progress-bar" />
+        </div>
+      )}
 
       {phase.kind === "done" && (
         <div className="overlay-actions" ref={actionsRef}>
+          <button className="overlay-btn" onClick={() => reveal(phase.path)} title="Open the save folder">
+            <OverlayIconFolder /> Open
+          </button>
           <button
             className="overlay-btn-primary"
             onClick={() => {
               openInEditor(phase.path).catch(() => {});
               dismiss();
             }}
+            title="Load this clip into the editor"
           >
-            Open
-          </button>
-          <button className="overlay-btn" onClick={() => reveal(phase.path)}>
-            Reveal
-          </button>
-          <button className="overlay-btn" onClick={dismiss}>
-            Dismiss
+            <OverlayIconExport /> Edit
           </button>
         </div>
       )}

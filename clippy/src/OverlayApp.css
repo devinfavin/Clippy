@@ -11,20 +11,36 @@ html, body, #root {
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+  font-family: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+}
+
+/* Lilac brand color reused inline so the overlay doesn't import the editor's
+   token sheet. Keep in sync with --accent / --accent-active in App.css. */
+:root {
+  --ov-accent: #c8b6ff;
+  --ov-accent-strong: #b8a3ff;
+  --ov-bg: rgba(15, 12, 22, 0.78);
+  --ov-text-1: hsla(0, 0%, 100%, 0.92);
+  --ov-text-2: hsla(0, 0%, 100%, 0.65);
+  --ov-text-3: hsla(0, 0%, 100%, 0.42);
 }
 
 .overlay-card {
   position: absolute;
-  inset: 8px;
-  padding: 12px 14px;
-  background: rgba(35, 35, 35, 0.95);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 8px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
-  color: hsla(0, 0%, 100%, 0.92);
-  font-size: 13px;
+  inset: 10px;
+  padding: 10px 12px;
+  background: var(--ov-bg);
+  /* Frosted glass — blurs whatever game frame is behind the window. WebView2
+     on Windows 11 honors this; on older Win10 builds it degrades to the
+     solid background, which still reads fine. */
+  backdrop-filter: blur(24px) saturate(170%);
+  -webkit-backdrop-filter: blur(24px) saturate(170%);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  color: var(--ov-text-1);
+  font-size: 12.5px;
   line-height: 1.35;
   display: flex;
   flex-direction: column;
@@ -42,7 +58,7 @@ html, body, #root {
 .overlay-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
 }
 
 .overlay-text {
@@ -52,15 +68,20 @@ html, body, #root {
 
 .overlay-title {
   font-weight: 600;
+  font-size: 12.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.25;
+  color: var(--ov-text-1);
 }
 
 .overlay-sub {
-  margin-top: 2px;
-  color: hsla(0, 0%, 100%, 0.65);
-  font-size: 12px;
+  margin-top: 1px;
+  color: var(--ov-text-2);
+  font-size: 10.5px;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  line-height: 1.3;
   /* Allow up to 2 lines of wrap, ellipsize anything past that. Single-line
    * nowrap clipped the failure messages ("no game has been captured this
    * session — focus a game…") visibly mid-sentence. */
@@ -68,86 +89,127 @@ html, body, #root {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  line-height: 1.35;
 }
 
 .overlay-mono {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 
 .overlay-dim {
-  color: hsla(0, 0%, 100%, 0.42);
+  color: var(--ov-text-3);
 }
 
 .overlay-warn {
   color: #fbbf24;
 }
 
-.overlay-spinner {
-  width: 18px;
-  height: 18px;
-  border: 2px solid rgba(200, 182, 255, 0.18);
-  border-top-color: #c8b6ff;
-  border-radius: 50%;
-  animation: overlay-spin 0.9s linear infinite;
-  flex: 0 0 auto;
-}
-
-@keyframes overlay-spin {
-  to { transform: rotate(360deg); }
-}
-
-.overlay-icon {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  display: flex;
+/* 28×28 colored icon block. State-driven background; child SVG inherits the
+   block's contrast color via `currentColor`. */
+.overlay-iconbox {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-weight: 700;
   flex: 0 0 auto;
+  transition: background 160ms ease;
 }
-
-.overlay-icon-good {
-  background: rgba(74, 222, 128, 0.18);
-  color: #4ade80;
+.overlay-iconbox-done {
+  background: var(--ov-accent);
+  color: #1a1a1a;
 }
-
-.overlay-icon-bad {
+.overlay-iconbox-started,
+.overlay-iconbox-progress {
+  background: color-mix(in oklch, var(--ov-accent) 22%, transparent);
+  color: var(--ov-accent);
+}
+.overlay-iconbox-error,
+.overlay-iconbox-spawn-error {
   background: rgba(248, 113, 113, 0.18);
   color: #f87171;
 }
 
+/* Hotkey chip top-right of the row. Same monospaced micro size as the
+   sub-text but pill-shaped against a slightly brighter scrim so it reads
+   as "here's the shortcut" rather than as content. */
+.overlay-hotkey-chip {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.55);
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* Indeterminate progress bar — slides a 35%-wide lilac wedge across the
+   track. Used during started/progress; replaces the spinner so the saving
+   state feels like work-in-flight rather than "thinking". */
+.overlay-progress {
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  position: relative;
+  overflow: hidden;
+}
+.overlay-progress-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 35%;
+  background: linear-gradient(90deg, var(--ov-accent-strong), var(--ov-accent));
+  border-radius: 2px;
+  animation: overlay-progress-slide 1.6s ease-in-out infinite;
+}
+@keyframes overlay-progress-slide {
+  0%   { left: -36%; }
+  50%  { left: 100%; }
+  100% { left: 100%; }
+}
+
 .overlay-actions {
   display: flex;
-  gap: 6px;
-  justify-content: flex-end;
+  gap: 4px;
 }
 
 .overlay-btn,
 .overlay-btn-primary {
-  padding: 4px 10px;
-  border-radius: 4px;
-  font-size: 12px;
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 11px;
   font-weight: 500;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.04);
-  color: hsla(0, 0%, 100%, 0.92);
+  font-family: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ov-text-1);
   cursor: pointer;
   transition: background 80ms ease;
 }
 
 .overlay-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .overlay-btn-primary {
-  background: #c8b6ff;
+  background: var(--ov-accent);
   color: #1a1a1a;
-  border-color: #c8b6ff;
+  border-color: var(--ov-accent);
+  font-weight: 600;
 }
 
 .overlay-btn-primary:hover {
   background: #d4c5ff;
   border-color: #d4c5ff;
 }
+
+/* Legacy spinner/icon classes are no longer rendered — fully replaced by
+   .overlay-iconbox + .overlay-progress. Kept here as documentation of the
+   removal in case a previously-cached build briefly mismatches. */
