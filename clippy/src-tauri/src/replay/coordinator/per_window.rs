@@ -164,7 +164,9 @@ pub(super) fn run_per_window(
 
                     crate::diag(
                         &app,
-                        format!("[replay] focus → game \"{title}\" (hwnd {hwnd:#x}) — spawning worker"),
+                        format!(
+                            "[replay] focus → game \"{title}\" (hwnd {hwnd:#x}) — spawning worker"
+                        ),
                     );
                     match WorkerHandle::start(
                         CaptureTarget::Window(hwnd),
@@ -244,8 +246,8 @@ pub(super) fn run_per_window(
 
             Ok(CoordEvent::PerfSnapshot(reply)) => {
                 let rows: Vec<WorkerPerfRow> = workers
-                    .iter()
-                    .map(|(_, e)| WorkerPerfRow {
+                    .values()
+                    .map(|e| WorkerPerfRow {
                         label: e.title.clone(),
                         encoder_name: e.handle.encoder_name.clone(),
                         enc_width: e.handle.enc_width,

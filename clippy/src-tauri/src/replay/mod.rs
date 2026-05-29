@@ -1,7 +1,5 @@
 pub mod audio;
 pub mod buffer;
-#[cfg(windows)]
-pub mod process_loopback;
 pub mod capture;
 pub mod commands;
 #[cfg(feature = "poc")]
@@ -12,6 +10,8 @@ pub mod focus;
 pub mod games;
 #[cfg(feature = "poc")]
 pub mod poc;
+#[cfg(windows)]
+pub mod process_loopback;
 pub mod save;
 pub mod sysinfo;
 pub mod vproc;
@@ -28,7 +28,9 @@ use std::sync::{Arc, Mutex};
 /// a friendly-name substring match in `MFTEnumEx`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub enum EncoderPreference {
+    #[default]
     Auto,
     Nvenc,
     Amf,
@@ -36,23 +38,20 @@ pub enum EncoderPreference {
     Software,
 }
 
-impl Default for EncoderPreference {
-    fn default() -> Self { EncoderPreference::Auto }
-}
-
 /// Output resolution selector. Source keeps the captured surface's pixels
 /// (modulo the 16-pixel macroblock alignment). Half halves both axes
 /// (still 16-aligned). Custom takes explicit width/height from the UI.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[derive(Default)]
 pub enum ResolutionMode {
+    #[default]
     Source,
     Half,
-    Custom { width: u32, height: u32 },
-}
-
-impl Default for ResolutionMode {
-    fn default() -> Self { ResolutionMode::Source }
+    Custom {
+        width: u32,
+        height: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +134,12 @@ pub struct ReplayState {
     pub audio_names: Arc<Mutex<std::collections::HashMap<String, String>>>,
 }
 
+impl Default for ReplayState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReplayState {
     pub fn new() -> Self {
         ReplayState {
@@ -198,13 +203,19 @@ fn recent_adds_file(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
 }
 
 pub(super) fn load_recent_adds(app: &tauri::AppHandle) -> Vec<String> {
-    let Ok(path) = recent_adds_file(app) else { return Vec::new() };
-    let Ok(s) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let Ok(path) = recent_adds_file(app) else {
+        return Vec::new();
+    };
+    let Ok(s) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
     serde_json::from_str::<Vec<String>>(&s).unwrap_or_default()
 }
 
 fn save_recent_adds(app: &tauri::AppHandle, entries: &[String]) {
-    let Ok(path) = recent_adds_file(app) else { return };
+    let Ok(path) = recent_adds_file(app) else {
+        return;
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -343,9 +354,15 @@ pub struct SpawnFailedPayload {
 
 fn classify_save_error(msg: &str) -> &'static str {
     let l = msg.to_ascii_lowercase();
-    if l.contains("buffer is empty") { return "buffer_empty"; }
-    if l.contains("not running") { return "not_running"; }
-    if l.contains("ffmpeg") { return "ffmpeg"; }
+    if l.contains("buffer is empty") {
+        return "buffer_empty";
+    }
+    if l.contains("not running") {
+        return "not_running";
+    }
+    if l.contains("ffmpeg") {
+        return "ffmpeg";
+    }
     if l.contains("write h264")
         || l.contains("create save")
         || l.contains("permission denied")
@@ -386,16 +403,22 @@ pub async fn save_active(app: &tauri::AppHandle) -> Result<ReplaySaveResult, Str
     let snap = match take_snapshot(&state) {
         Ok(s) => s,
         Err(e) => {
-            let _ = app.emit("replay://save-started", &SaveStartedPayload {
-                id,
-                window_title: String::new(),
-                duration_secs: 0,
-            });
-            let _ = app.emit("replay://save-error", &SaveErrorPayload {
-                id,
-                kind: classify_save_error(&e).into(),
-                msg: e.clone(),
-            });
+            let _ = app.emit(
+                "replay://save-started",
+                &SaveStartedPayload {
+                    id,
+                    window_title: String::new(),
+                    duration_secs: 0,
+                },
+            );
+            let _ = app.emit(
+                "replay://save-error",
+                &SaveErrorPayload {
+                    id,
+                    kind: classify_save_error(&e).into(),
+                    msg: e.clone(),
+                },
+            );
             crate::diag(app, format!("[save id={id}] END · ERROR (snapshot) · {e}"));
             return Err(e);
         }
@@ -406,11 +429,14 @@ pub async fn save_active(app: &tauri::AppHandle) -> Result<ReplaySaveResult, Str
     // header line "Saving Ns of MyGame…", packets/fps is fine.
     let approx_duration_secs =
         (snap.packets.len() as f64 / (snap.fps.max(1) as f64)).round() as u32;
-    let _ = app.emit("replay://save-started", &SaveStartedPayload {
-        id,
-        window_title: snap.window_title.clone(),
-        duration_secs: approx_duration_secs,
-    });
+    let _ = app.emit(
+        "replay://save-started",
+        &SaveStartedPayload {
+            id,
+            window_title: snap.window_title.clone(),
+            duration_secs: approx_duration_secs,
+        },
+    );
 
     finish_save(app, snap, id).await
 }
@@ -421,7 +447,9 @@ pub(super) fn take_snapshot(state: &ReplayState) -> Result<coordinator::SaveSnap
     let c = guard.as_ref().ok_or("replay buffer is not running")?;
     let snap = c.snapshot()?;
     if snap.packets.is_empty() {
-        return Err("active window's buffer is empty — give it a few seconds of capture first".into());
+        return Err(
+            "active window's buffer is empty — give it a few seconds of capture first".into(),
+        );
     }
     Ok(snap)
 }
@@ -437,11 +465,14 @@ pub(super) async fn finish_save(
     // `save_id` so call sites read as a single `?`-style early return.
     // Also writes the matching END marker so every BEGIN has a partner.
     let emit_error = |msg: &str| {
-        let _ = app.emit("replay://save-error", &SaveErrorPayload {
-            id: save_id,
-            kind: classify_save_error(msg).into(),
-            msg: msg.to_string(),
-        });
+        let _ = app.emit(
+            "replay://save-error",
+            &SaveErrorPayload {
+                id: save_id,
+                kind: classify_save_error(msg).into(),
+                msg: msg.to_string(),
+            },
+        );
         crate::diag(app, format!("[save id={save_id}] END · ERROR · {msg}"));
     };
 
@@ -470,7 +501,10 @@ pub(super) async fn finish_save(
     let dir = match app.try_state::<crate::ReplaySaveDir>() {
         Some(s) => match s.0.lock().map_err(|e| e.to_string()) {
             Ok(g) => g.clone(),
-            Err(e) => { emit_error(&e); return Err(e); }
+            Err(e) => {
+                emit_error(&e);
+                return Err(e);
+            }
         },
         None => default_save_dir(app),
     };
@@ -558,10 +592,13 @@ pub(super) async fn finish_save(
     // Emit the first stage event. By the time we reach write_and_mux, the
     // snapshot + path resolution + audio summary diag have already run; from
     // the user's perspective the save is now "writing to disk".
-    let _ = app.emit("replay://save-progress", &SaveProgressPayload {
-        id: save_id,
-        stage: "writing".into(),
-    });
+    let _ = app.emit(
+        "replay://save-progress",
+        &SaveProgressPayload {
+            id: save_id,
+            stage: "writing".into(),
+        },
+    );
 
     let timings = match save::write_and_mux(
         &snap.packets,
@@ -571,9 +608,13 @@ pub(super) async fn finish_save(
         &out,
         Some((app, save_id)),
     )
-    .await {
+    .await
+    {
         Ok(t) => t,
-        Err(e) => { emit_error(&e); return Err(e); }
+        Err(e) => {
+            emit_error(&e);
+            return Err(e);
+        }
     };
 
     // Save timing breakdown: lets us see *where* a slow save is slow
@@ -629,7 +670,10 @@ pub(super) async fn finish_save(
             );
         }
     } else {
-        crate::diag(app, "[replay] save · probe skipped or failed (clip should still be playable)");
+        crate::diag(
+            app,
+            "[replay] save · probe skipped or failed (clip should still be playable)",
+        );
     }
 
     let out_path = out.to_string_lossy().into_owned();
@@ -639,20 +683,22 @@ pub(super) async fn finish_save(
     // `total` + `dropped` were computed before the mux above. tracks_saved is
     // tracks with non-empty packet sets that actually landed in the MP4.
     let tracks_saved = (total - dropped.len()) as u32;
-    let _ = app.emit("replay://saved", &SavedPayload {
-        id: save_id,
-        path: out_path.clone(),
-        size_mb,
-        window_title: snap.window_title.clone(),
-        tracks_saved,
-        tracks_total: total as u32,
-    });
+    let _ = app.emit(
+        "replay://saved",
+        &SavedPayload {
+            id: save_id,
+            path: out_path.clone(),
+            size_mb,
+            window_title: snap.window_title.clone(),
+            tracks_saved,
+            tracks_total: total as u32,
+        },
+    );
     crate::diag(
         app,
         format!(
             "[save id={save_id}] END · OK · {:.1}MB · {tracks_saved}/{total} tracks · {}",
-            size_mb,
-            out_path
+            size_mb, out_path
         ),
     );
     Ok(ReplaySaveResult {
@@ -715,10 +761,7 @@ fn safe_filename_slug(input: &str) -> String {
         }
     }
     // Collapse whitespace runs to a single underscore for readability.
-    let collapsed: String = out
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("_");
+    let collapsed: String = out.split_whitespace().collect::<Vec<_>>().join("_");
     let trimmed = collapsed.trim_matches(|c: char| c == '.' || c == '-' || c == '_');
     let mut s = trimmed.to_string();
     if s.chars().count() > 60 {

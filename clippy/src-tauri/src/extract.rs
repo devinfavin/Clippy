@@ -54,13 +54,19 @@ async fn ffmpeg_copy_one(
         .args([
             "-y",
             "-hide_banner",
-            "-loglevel", "error",
-            "-i", src_path,
-            "-map", &format!("0:a:{}?", track_index),
+            "-loglevel",
+            "error",
+            "-i",
+            src_path,
+            "-map",
+            &format!("0:a:{}?", track_index),
             "-vn",
-            "-c:a", "copy",
-            "-bsf:a", "aac_adtstoasc",
-            "-map_chapters", "-1",
+            "-c:a",
+            "copy",
+            "-bsf:a",
+            "aac_adtstoasc",
+            "-map_chapters",
+            "-1",
             temp_path,
         ])
         .spawn()
@@ -70,7 +76,9 @@ async fn ffmpeg_copy_one(
         match event {
             CommandEvent::Stderr(b) => stderr_buf.push_str(&String::from_utf8_lossy(&b)),
             CommandEvent::Terminated(payload) => {
-                if payload.code == Some(0) { return Ok(()); }
+                if payload.code == Some(0) {
+                    return Ok(());
+                }
                 return Err(stderr_buf);
             }
             _ => {}
@@ -90,13 +98,19 @@ async fn ffmpeg_reencode_one(
         .args([
             "-y",
             "-hide_banner",
-            "-loglevel", "error",
-            "-i", src_path,
-            "-map", &format!("0:a:{}?", track_index),
+            "-loglevel",
+            "error",
+            "-i",
+            src_path,
+            "-map",
+            &format!("0:a:{}?", track_index),
             "-vn",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-map_chapters", "-1",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-map_chapters",
+            "-1",
             temp_path,
         ])
         .spawn()
@@ -106,7 +120,9 @@ async fn ffmpeg_reencode_one(
         match event {
             CommandEvent::Stderr(b) => stderr_buf.push_str(&String::from_utf8_lossy(&b)),
             CommandEvent::Terminated(payload) => {
-                if payload.code == Some(0) { return Ok(()); }
+                if payload.code == Some(0) {
+                    return Ok(());
+                }
                 return Err(stderr_buf);
             }
             _ => {}
@@ -139,7 +155,9 @@ async fn extract_one_to_cache(
     let cache_str = cache_path.to_string_lossy().to_string();
     let temp_str = format!("{}.tmp.m4a", cache_str);
 
-    let copy_err = ffmpeg_copy_one(app, src_path, track_index, &temp_str).await.err();
+    let copy_err = ffmpeg_copy_one(app, src_path, track_index, &temp_str)
+        .await
+        .err();
     let copy_ms = t0.elapsed().as_millis();
     if let Some(_err) = &copy_err {
         // Fallback: re-encode. Source codec might not fit in M4A (e.g. opus).
@@ -191,7 +209,7 @@ pub async fn extract_track(
     let key = proxy_cache_key(&src_path)?;
     let cache_path = cache_path_for(&proxy_dir(&app)?, &key, track_index);
     extract_one_to_cache(&app, &src_path, track_index, &cache_path).await?;
-    Ok(register_url(&*state, cache_path).await)
+    Ok(register_url(&state, cache_path).await)
 }
 
 /// Extract every requested track from `src_path` in a single ffmpeg read pass
@@ -228,8 +246,12 @@ pub async fn extract_tracks_batch(
     let mut misses: Vec<(u32, PathBuf, String)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for (&idx, cache_path) in track_indices.iter().zip(cache_paths.iter()) {
-        if !seen.insert(idx) { continue; }
-        if cache_path.exists() { continue; }
+        if !seen.insert(idx) {
+            continue;
+        }
+        if cache_path.exists() {
+            continue;
+        }
         let cache_str = cache_path.to_string_lossy().to_string();
         let temp_str = format!("{}.tmp.m4a", cache_str);
         misses.push((idx, cache_path.clone(), temp_str));
@@ -247,16 +269,22 @@ pub async fn extract_tracks_batch(
         let mut args: Vec<String> = vec![
             "-y".into(),
             "-hide_banner".into(),
-            "-loglevel".into(), "error".into(),
-            "-i".into(), src_path.clone(),
+            "-loglevel".into(),
+            "error".into(),
+            "-i".into(),
+            src_path.clone(),
         ];
         for (idx, _, temp) in &misses {
             args.extend_from_slice(&[
-                "-map".into(), format!("0:a:{}?", idx),
+                "-map".into(),
+                format!("0:a:{}?", idx),
                 "-vn".into(),
-                "-c:a".into(), "copy".into(),
-                "-bsf:a".into(), "aac_adtstoasc".into(),
-                "-map_chapters".into(), "-1".into(),
+                "-c:a".into(),
+                "copy".into(),
+                "-bsf:a".into(),
+                "aac_adtstoasc".into(),
+                "-map_chapters".into(),
+                "-1".into(),
                 temp.clone(),
             ]);
         }
@@ -267,7 +295,9 @@ pub async fn extract_tracks_batch(
             match event {
                 CommandEvent::Stderr(b) => stderr_buf.push_str(&String::from_utf8_lossy(&b)),
                 CommandEvent::Terminated(payload) => {
-                    if payload.code == Some(0) { ok = true; }
+                    if payload.code == Some(0) {
+                        ok = true;
+                    }
                     break;
                 }
                 _ => {}
@@ -327,7 +357,9 @@ pub async fn extract_tracks_batch(
     let mut failures: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     if batch_failed {
         for (idx, cache_path, _) in &misses {
-            if cache_path.exists() { continue; }
+            if cache_path.exists() {
+                continue;
+            }
             if let Err(e) = extract_one_to_cache(&app, &src_path, *idx, cache_path).await {
                 failures.insert(*idx, e);
             }
@@ -339,13 +371,21 @@ pub async fn extract_tracks_batch(
     let mut out: Vec<TrackExtractResult> = Vec::with_capacity(track_indices.len());
     for (&idx, cache_path) in track_indices.iter().zip(cache_paths.iter()) {
         if cache_path.exists() {
-            let url = register_url(&*state, cache_path.clone()).await;
-            out.push(TrackExtractResult { track_index: idx, url: Some(url), error: None });
+            let url = register_url(&state, cache_path.clone()).await;
+            out.push(TrackExtractResult {
+                track_index: idx,
+                url: Some(url),
+                error: None,
+            });
         } else {
             let err = failures
                 .remove(&idx)
                 .unwrap_or_else(|| "track extract failed".to_string());
-            out.push(TrackExtractResult { track_index: idx, url: None, error: Some(err) });
+            out.push(TrackExtractResult {
+                track_index: idx,
+                url: None,
+                error: Some(err),
+            });
         }
     }
     Ok(out)

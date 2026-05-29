@@ -109,9 +109,7 @@ pub mod windows_impl {
         unsafe { interop.CreateForMonitor(hmon) }
     }
 
-    pub fn extract_texture_from_frame(
-        frame: &Direct3D11CaptureFrame,
-    ) -> Result<ID3D11Texture2D> {
+    pub fn extract_texture_from_frame(frame: &Direct3D11CaptureFrame) -> Result<ID3D11Texture2D> {
         use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
         let surface = frame.Surface()?;
         let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
@@ -158,10 +156,7 @@ pub mod windows_impl {
     }
 
     /// Convenience wrapper for window capture (per-window mode).
-    pub fn open_capture_session(
-        hwnd: HWND,
-        d3d_device: &ID3D11Device,
-    ) -> Result<CaptureSession> {
+    pub fn open_capture_session(hwnd: HWND, d3d_device: &ID3D11Device) -> Result<CaptureSession> {
         let item = capture_item_for_hwnd(hwnd)?;
         open_capture_session_for(&item, d3d_device)
     }

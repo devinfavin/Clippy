@@ -11,13 +11,12 @@
 use std::sync::Arc;
 
 use super::{
-    allowlist_file, audio, capture, coordinator, games,
-    load_recent_adds, persist_manual, prune_dead_coord, save_dir_pref_file, sysinfo,
-    track_recent_add, untrack_recent_add,
+    allowlist_file, audio, capture, coordinator, games, load_recent_adds, persist_manual,
+    prune_dead_coord, save_dir_pref_file, sysinfo, track_recent_add, untrack_recent_add,
 };
 use super::{
-    CaptureModeArg, EncoderPreference, ReplaySaveResult, ReplaySettings, ReplayState,
-    ReplayStatus, ResolutionMode,
+    CaptureModeArg, EncoderPreference, ReplaySaveResult, ReplaySettings, ReplayState, ReplayStatus,
+    ResolutionMode,
 };
 
 #[tauri::command]
@@ -275,8 +274,7 @@ pub fn replay_set_save_dir(
     if p.as_os_str().is_empty() {
         return Err("path must not be empty".into());
     }
-    std::fs::create_dir_all(&p)
-        .map_err(|e| format!("can't create {}: {e}", p.display()))?;
+    std::fs::create_dir_all(&p).map_err(|e| format!("can't create {}: {e}", p.display()))?;
     {
         let mut g = state.0.lock().map_err(|e| e.to_string())?;
         *g = p.clone();

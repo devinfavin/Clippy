@@ -97,8 +97,8 @@ fn poc_capture_and_encode() -> Result<(Vec<u8>, usize, u32, u32), String> {
     let enc_width = (width + 15) & !15u32;
     let enc_height = (height + 15) & !15u32;
 
-    let session = open_capture_session(hwnd, &bundle.device)
-        .map_err(|e| format!("WGC session: {e}"))?;
+    let session =
+        open_capture_session(hwnd, &bundle.device).map_err(|e| format!("WGC session: {e}"))?;
 
     mf_startup().map_err(|e| format!("MFStartup: {e}"))?;
 
@@ -118,16 +118,17 @@ fn poc_capture_and_encode() -> Result<(Vec<u8>, usize, u32, u32), String> {
             let texture = extract_texture_from_frame(&frame)
                 .map_err(|e| format!("extract f{frame_count}: {e}"))?;
 
-            let bgra = readback_bgra_texture(
-                &bundle.device,
-                &bundle.context,
-                &texture,
-                width,
-                height,
-            )
-            .map_err(|e| format!("readback f{frame_count}: {e}"))?;
+            let bgra =
+                readback_bgra_texture(&bundle.device, &bundle.context, &texture, width, height)
+                    .map_err(|e| format!("readback f{frame_count}: {e}"))?;
 
-            let nv12 = bgra_to_nv12(&bgra, width as usize, height as usize, enc_width as usize, enc_height as usize);
+            let nv12 = bgra_to_nv12(
+                &bgra,
+                width as usize,
+                height as usize,
+                enc_width as usize,
+                enc_height as usize,
+            );
             let pts = frame_count as i64 * frame_duration_pts;
 
             submit_nv12_frame(&encoder, &nv12, pts, frame_duration_pts)
@@ -241,8 +242,8 @@ fn poc_gpu_convert_and_encode() -> Result<(Vec<u8>, usize, u32, u32), String> {
     let enc_width = (width + 15) & !15u32;
     let enc_height = (height + 15) & !15u32;
 
-    let session = open_capture_session(hwnd, &bundle.device)
-        .map_err(|e| format!("WGC session: {e}"))?;
+    let session =
+        open_capture_session(hwnd, &bundle.device).map_err(|e| format!("WGC session: {e}"))?;
 
     // Build the GPU video processor (BGRA src → NV12 dst, 16-aligned).
     let vp = VideoProcessor::new(
@@ -308,9 +309,7 @@ fn poc_gpu_convert_and_encode() -> Result<(Vec<u8>, usize, u32, u32), String> {
     mf_shutdown();
 
     if all_h264.is_empty() {
-        return Err(format!(
-            "no encoded output after {frame_count} frames"
-        ));
+        return Err(format!("no encoded output after {frame_count} frames"));
     }
 
     Ok((all_h264, frame_count, enc_width, enc_height))
@@ -395,8 +394,8 @@ fn poc_gpu_full() -> Result<(Vec<u8>, usize, u32, u32, String), String> {
     let enc_width = (width + 15) & !15u32;
     let enc_height = (height + 15) & !15u32;
 
-    let session = open_capture_session(hwnd, &bundle.device)
-        .map_err(|e| format!("WGC session: {e}"))?;
+    let session =
+        open_capture_session(hwnd, &bundle.device).map_err(|e| format!("WGC session: {e}"))?;
 
     let vp = VideoProcessor::new(
         &bundle.device,
@@ -457,10 +456,15 @@ fn poc_gpu_full() -> Result<(Vec<u8>, usize, u32, u32, String), String> {
 
         // Wait for NeedInput (draining HaveOutput along the way), then submit.
         loop {
-            let event = unsafe { event_gen.GetEvent(windows::Win32::Media::MediaFoundation::MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0)) }
-                .map_err(|e| format!("GetEvent: {e}"))?;
-            let etype = unsafe { event.GetType() }
-                .map_err(|e| format!("event type: {e}"))?;
+            let event = unsafe {
+                event_gen.GetEvent(
+                    windows::Win32::Media::MediaFoundation::MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(
+                        0,
+                    ),
+                )
+            }
+            .map_err(|e| format!("GetEvent: {e}"))?;
+            let etype = unsafe { event.GetType() }.map_err(|e| format!("event type: {e}"))?;
 
             if etype == METransformHaveOutput.0 as u32 {
                 if let Some((data, _, _)) = process_output_async(&encoder)
@@ -496,14 +500,18 @@ fn poc_gpu_full() -> Result<(Vec<u8>, usize, u32, u32, String), String> {
     // METransformDrainComplete. Cap iterations to avoid infinite waits.
     use windows::Win32::Media::MediaFoundation::METransformDrainComplete;
     for _ in 0..(TARGET_FRAMES + 32) {
-        let event = match unsafe { event_gen.GetEvent(windows::Win32::Media::MediaFoundation::MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0)) } {
+        let event = match unsafe {
+            event_gen.GetEvent(
+                windows::Win32::Media::MediaFoundation::MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0),
+            )
+        } {
             Ok(e) => e,
             Err(_) => break,
         };
         let etype = unsafe { event.GetType() }.unwrap_or(0);
         if etype == METransformHaveOutput.0 as u32 {
-            if let Some((data, _, _)) = process_output_async(&encoder)
-                .map_err(|e| format!("final drain: {e}"))?
+            if let Some((data, _, _)) =
+                process_output_async(&encoder).map_err(|e| format!("final drain: {e}"))?
             {
                 all_h264.extend_from_slice(&data);
             }

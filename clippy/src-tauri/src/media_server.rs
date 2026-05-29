@@ -1,11 +1,11 @@
-use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::{Query, State as AxumState};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::{AppHandle, State};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::Mutex as AsyncMutex;
@@ -130,7 +130,10 @@ pub(crate) async fn serve_file(
                     // CORS so MediaElementSource can read samples for WebAudio.
                     // Token + Host already gate access; CORS is the browser's.
                     .header("access-control-allow-origin", "*")
-                    .header("access-control-expose-headers", "Content-Range, Content-Length, Accept-Ranges")
+                    .header(
+                        "access-control-expose-headers",
+                        "Content-Range, Content-Length, Accept-Ranges",
+                    )
                     .body(Body::from_stream(stream))
                     .unwrap();
             }
@@ -144,7 +147,10 @@ pub(crate) async fn serve_file(
         .header(header::CONTENT_LENGTH, total.to_string())
         .header(header::ACCEPT_RANGES, "bytes")
         .header("access-control-allow-origin", "*")
-        .header("access-control-expose-headers", "Content-Range, Content-Length, Accept-Ranges")
+        .header(
+            "access-control-expose-headers",
+            "Content-Range, Content-Length, Accept-Ranges",
+        )
         .body(Body::from_stream(stream))
         .unwrap()
 }
@@ -178,8 +184,8 @@ pub async fn register_file_url(
     //   2. Files generate_proxy already trusted on this session — for the
     //      Direct strategy, that's the original source MP4.
     // Anything else is rejected outright.
-    let canonical = std::fs::canonicalize(&path)
-        .map_err(|e| format!("canonicalize failed: {}", e))?;
+    let canonical =
+        std::fs::canonicalize(&path).map_err(|e| format!("canonicalize failed: {}", e))?;
     let proxies = std::fs::canonicalize(crate::proxy::proxy_dir(&app)?)
         .map_err(|e| format!("proxy dir canonicalize failed: {}", e))?;
     let in_proxies = canonical.starts_with(&proxies);
@@ -198,7 +204,10 @@ pub async fn register_file_url(
 /// Insert a path into the media-server allowlist directly. Used by backend
 /// commands (generate_proxy's Direct strategy) to pre-trust a source path
 /// that register_file_url would otherwise reject for being outside proxy_dir.
-pub(crate) async fn allowlist_trust(state: &ServerState, path: &std::path::Path) -> Result<(), String> {
+pub(crate) async fn allowlist_trust(
+    state: &ServerState,
+    path: &std::path::Path,
+) -> Result<(), String> {
     let canonical = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
     state.allowlist.lock().await.insert(canonical);
     Ok(())

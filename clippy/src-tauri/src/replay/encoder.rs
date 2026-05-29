@@ -14,15 +14,13 @@ pub mod windows_impl {
                 IMFActivate, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaType, IMFSample,
                 IMFTransform, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer,
                 MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video,
-                MFShutdown, MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
-                MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
+                MFShutdown, MFStartup, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12,
+                MFVideoInterlace_Progressive, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER,
+                MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
                 MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
                 MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_REGISTER_TYPE_INFO,
-                MFTEnumEx, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
-                MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-                MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_VERSION,
-                MFSTARTUP_FULL, MFVideoFormat_H264, MFVideoFormat_NV12,
-                MFVideoInterlace_Progressive,
+                MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
+                MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_VERSION,
             },
         },
     };
@@ -32,14 +30,20 @@ pub mod windows_impl {
     }
 
     pub fn mf_shutdown() {
-        unsafe { let _ = MFShutdown(); }
+        unsafe {
+            let _ = MFShutdown();
+        }
     }
 
     /// Pack width+height into the u64 format MF_MT_FRAME_SIZE expects.
-    fn pack_size(w: u32, h: u32) -> u64 { ((w as u64) << 32) | h as u64 }
+    fn pack_size(w: u32, h: u32) -> u64 {
+        ((w as u64) << 32) | h as u64
+    }
 
     /// Pack numerator+denominator into the u64 format MF_MT_FRAME_RATE expects.
-    fn pack_ratio(num: u32, den: u32) -> u64 { ((num as u64) << 32) | den as u64 }
+    fn pack_ratio(num: u32, den: u32) -> u64 {
+        ((num as u64) << 32) | den as u64
+    }
 
     #[cfg(feature = "poc")]
     pub fn create_h264_encoder(
@@ -170,9 +174,8 @@ pub mod windows_impl {
         pts: i64,
         duration: i64,
     ) -> Result<()> {
-        let buffer = unsafe {
-            MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, 0, BOOL(0))?
-        };
+        let buffer =
+            unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, 0, BOOL(0))? };
         let sample: IMFSample = unsafe { MFCreateSample()? };
         unsafe {
             sample.AddBuffer(&buffer)?;
@@ -194,8 +197,7 @@ pub mod windows_impl {
         };
 
         // Check whether the encoder allocates its own output samples.
-        let stream_info: MFT_OUTPUT_STREAM_INFO =
-            unsafe { encoder.GetOutputStreamInfo(0)? };
+        let stream_info: MFT_OUTPUT_STREAM_INFO = unsafe { encoder.GetOutputStreamInfo(0)? };
         let encoder_provides =
             (stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
 
@@ -239,7 +241,9 @@ pub mod windows_impl {
                 let pts = unsafe { sample.GetSampleTime()? };
                 let is_keyframe = unsafe {
                     sample
-                        .GetUINT32(&windows::Win32::Media::MediaFoundation::MFSampleExtension_CleanPoint)
+                        .GetUINT32(
+                            &windows::Win32::Media::MediaFoundation::MFSampleExtension_CleanPoint,
+                        )
                         .unwrap_or(0)
                         != 0
                 };
@@ -377,10 +381,7 @@ pub mod windows_impl {
 
         // Hand the device manager to the encoder.
         let dm_unk: windows::core::IUnknown = device_manager.cast()?;
-        unsafe {
-            encoder
-                .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, dm_unk.as_raw() as usize)?
-        };
+        unsafe { encoder.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, dm_unk.as_raw() as usize)? };
 
         // Output type (H.264) must be set before input type.
         let output_type: IMFMediaType = unsafe { MFCreateMediaType()? };
@@ -427,17 +428,16 @@ pub mod windows_impl {
     /// its friendly name (used for the worker init diag entry — which encoder
     /// did we actually get?). Auto / Software use the existing helpers; the
     /// vendor variants pick by friendly-name substring with Auto fallback.
-    fn pick_encoder(
-        pref: crate::replay::EncoderPreference,
-    ) -> Result<(IMFTransform, String)> {
+    fn pick_encoder(pref: crate::replay::EncoderPreference) -> Result<(IMFTransform, String)> {
         use crate::replay::EncoderPreference as P;
         match pref {
             P::Auto => find_hardware_encoder().or_else(|_| find_software_encoder()),
             P::Software => find_software_encoder(),
             P::Nvenc => find_hw_encoder_by_substring(&["nvidia", "nvenc"])
                 .or_else(|_| find_hardware_encoder()),
-            P::Amf => find_hw_encoder_by_substring(&["amd", "amf"])
-                .or_else(|_| find_hardware_encoder()),
+            P::Amf => {
+                find_hw_encoder_by_substring(&["amd", "amf"]).or_else(|_| find_hardware_encoder())
+            }
             P::Qsv => find_hw_encoder_by_substring(&["intel", "qsv", "quick sync"])
                 .or_else(|_| find_hardware_encoder()),
         }
@@ -507,9 +507,8 @@ pub mod windows_impl {
         pts: i64,
         duration: i64,
     ) -> Result<()> {
-        let buffer: IMFMediaBuffer = unsafe {
-            MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, nv12, 0, BOOL(0))?
-        };
+        let buffer: IMFMediaBuffer =
+            unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, nv12, 0, BOOL(0))? };
         let sample: IMFSample = unsafe { MFCreateSample()? };
         unsafe {
             sample.AddBuffer(&buffer)?;
@@ -522,24 +521,19 @@ pub mod windows_impl {
 
     /// Pull one encoded packet on a `METransformHaveOutput` event.
     /// Returns None if the encoder unexpectedly had no sample to give.
-    pub fn process_output_async(
-        encoder: &IMFTransform,
-    ) -> Result<Option<(Vec<u8>, i64, bool)>> {
+    pub fn process_output_async(encoder: &IMFTransform) -> Result<Option<(Vec<u8>, i64, bool)>> {
         use std::mem::ManuallyDrop;
         use windows::Win32::Media::MediaFoundation::{
             MFT_OUTPUT_STREAM_INFO, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
         };
 
-        let stream_info: MFT_OUTPUT_STREAM_INFO =
-            unsafe { encoder.GetOutputStreamInfo(0)? };
-        let provides =
-            (stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
+        let stream_info: MFT_OUTPUT_STREAM_INFO = unsafe { encoder.GetOutputStreamInfo(0)? };
+        let provides = (stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
 
         let pre_sample: Option<IMFSample> = if provides {
             None
         } else {
-            let buf: IMFMediaBuffer =
-                unsafe { MFCreateMemoryBuffer(stream_info.cbSize.max(1))? };
+            let buf: IMFMediaBuffer = unsafe { MFCreateMemoryBuffer(stream_info.cbSize.max(1))? };
             let s: IMFSample = unsafe { MFCreateSample()? };
             unsafe { s.AddBuffer(&buf)? };
             Some(s)
@@ -572,7 +566,9 @@ pub mod windows_impl {
             let pts = unsafe { sample.GetSampleTime()? };
             let is_keyframe = unsafe {
                 sample
-                    .GetUINT32(&windows::Win32::Media::MediaFoundation::MFSampleExtension_CleanPoint)
+                    .GetUINT32(
+                        &windows::Win32::Media::MediaFoundation::MFSampleExtension_CleanPoint,
+                    )
                     .unwrap_or(0)
                     != 0
             };

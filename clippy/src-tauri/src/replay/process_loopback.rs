@@ -61,10 +61,10 @@ use windows::core::{Interface, GUID, HRESULT, PCWSTR};
 use windows::Win32::Media::Audio::{
     ActivateAudioInterfaceAsync, IActivateAudioInterfaceAsyncOperation,
     IActivateAudioInterfaceCompletionHandler, IAudioCaptureClient, IAudioClient,
-    AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
-    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
-    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, WAVEFORMATEX,
+    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
+    AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+    WAVEFORMATEX,
 };
 
 use super::audio::AudioFormat;
@@ -148,10 +148,7 @@ unsafe extern "system" fn cb_release(this: *mut c_void) -> u32 {
     }
 }
 
-unsafe extern "system" fn cb_activate_completed(
-    this: *mut c_void,
-    op_raw: *mut c_void,
-) -> HRESULT {
+unsafe extern "system" fn cb_activate_completed(this: *mut c_void, op_raw: *mut c_void) -> HRESULT {
     let obj = &*(this as *const CallbackObj);
 
     let result: Result<IAudioClient, String> = if op_raw.is_null() {

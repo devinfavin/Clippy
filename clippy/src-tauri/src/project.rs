@@ -66,8 +66,7 @@ pub fn save_project(
         s.push(".tmp");
         s.into()
     };
-    std::fs::write(&tmp_path, &bytes)
-        .map_err(|e| format!("write {}: {e}", tmp_path.display()))?;
+    std::fs::write(&tmp_path, &bytes).map_err(|e| format!("write {}: {e}", tmp_path.display()))?;
     if let Err(e) = std::fs::rename(&tmp_path, &path) {
         // Best-effort: drop the tempfile so the next save isn't blocked by
         // a stale `<...>.json.tmp` lying around. The next save will retry.

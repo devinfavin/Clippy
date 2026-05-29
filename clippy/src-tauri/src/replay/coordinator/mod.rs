@@ -125,17 +125,16 @@ impl Coordinator {
                 thread::Builder::new()
                     .name("clippy-coordinator-perwindow".into())
                     .spawn(move || {
-                        let result =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                run_per_window(
-                                    settings,
-                                    cmd_rx,
-                                    status_thread,
-                                    allowlist,
-                                    focus_monitor,
-                                    app_thread,
-                                );
-                            }));
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            run_per_window(
+                                settings,
+                                cmd_rx,
+                                status_thread,
+                                allowlist,
+                                focus_monitor,
+                                app_thread,
+                            );
+                        }));
                         if let Err(payload) = result {
                             let msg = panic_payload_to_string(&payload);
                             crate::diag(
@@ -157,10 +156,9 @@ impl Coordinator {
                 thread::Builder::new()
                     .name("clippy-coordinator-monitor".into())
                     .spawn(move || {
-                        let result =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                run_monitor(settings, hmon, cmd_rx, status_thread, app_thread);
-                            }));
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            run_monitor(settings, hmon, cmd_rx, status_thread, app_thread);
+                        }));
                         if let Err(payload) = result {
                             let msg = panic_payload_to_string(&payload);
                             crate::diag(

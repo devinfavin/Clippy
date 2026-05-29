@@ -9,7 +9,11 @@ pub(crate) fn basename(path: &str) -> &str {
 
 /// Truncate a string to `max` bytes for log entries, appending "…" if cut.
 pub(crate) fn trunc(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_string() } else { format!("{}…", &s[..max]) }
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max])
+    }
 }
 
 /// Escape a path for ffmpeg's concat-demuxer text format ("file '...'").

@@ -97,9 +97,9 @@ fn ram_total_mb() -> u64 {
 fn hw_encoders() -> Vec<String> {
     use windows::core::PWSTR;
     use windows::Win32::Media::MediaFoundation::{
-        IMFActivate, MFTEnumEx, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
-        MFT_ENUM_FLAG_SORTANDFILTER, MFT_FRIENDLY_NAME_Attribute,
-        MFT_REGISTER_TYPE_INFO, MFMediaType_Video, MFVideoFormat_H264,
+        IMFActivate, MFMediaType_Video, MFTEnumEx, MFT_FRIENDLY_NAME_Attribute, MFVideoFormat_H264,
+        MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+        MFT_REGISTER_TYPE_INFO,
     };
     use windows::Win32::System::Com::CoTaskMemFree;
 
@@ -133,11 +133,7 @@ fn hw_encoders() -> Vec<String> {
                 let mut name_ptr = PWSTR::null();
                 let mut name_len: u32 = 0;
                 if act
-                    .GetAllocatedString(
-                        &MFT_FRIENDLY_NAME_Attribute,
-                        &mut name_ptr,
-                        &mut name_len,
-                    )
+                    .GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut name_ptr, &mut name_len)
                     .is_ok()
                     && !name_ptr.is_null()
                 {

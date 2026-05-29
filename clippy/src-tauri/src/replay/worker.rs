@@ -108,8 +108,7 @@ impl WorkerHandle {
         app: tauri::AppHandle,
     ) -> Result<Self, String> {
         let (cmd_tx, cmd_rx) = mpsc::sync_channel::<WorkerCmd>(8);
-        let (init_tx, init_rx) =
-            mpsc::sync_channel::<Result<(u32, u32, u32, String), String>>(1);
+        let (init_tx, init_rx) = mpsc::sync_channel::<Result<(u32, u32, u32, String), String>>(1);
         let status = Arc::new(Mutex::new(ReplayStatus::Idle));
         let status_thread = Arc::clone(&status);
         let perf = Arc::new(Mutex::new(WorkerPerf::default()));
@@ -123,7 +122,15 @@ impl WorkerHandle {
             .name("clippy-replay-worker".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_worker(target, settings, cmd_rx, status_thread, perf_thread, init_tx, app);
+                    run_worker(
+                        target,
+                        settings,
+                        cmd_rx,
+                        status_thread,
+                        perf_thread,
+                        init_tx,
+                        app,
+                    );
                 }));
                 if let Err(payload) = result {
                     let msg = panic_payload_to_string(&payload);
@@ -293,9 +300,9 @@ fn run_worker(
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Gdi::HMONITOR;
     use windows::Win32::Media::MediaFoundation::{
-        IMFMediaEventGenerator, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, METransformHaveOutput,
-        METransformNeedInput, MF_EVENT_FLAG_NO_WAIT, MF_E_NO_EVENTS_AVAILABLE,
-        MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+        IMFMediaEventGenerator, METransformHaveOutput, METransformNeedInput,
+        MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFT_MESSAGE_COMMAND_DRAIN,
+        MFT_MESSAGE_NOTIFY_END_OF_STREAM, MF_EVENT_FLAG_NO_WAIT, MF_E_NO_EVENTS_AVAILABLE,
     };
 
     let fps: u32 = settings.fps.clamp(15, 240);
@@ -307,9 +314,8 @@ fn run_worker(
     let init = (|| -> Result<_, String> {
         let bundle = create_d3d11_device().map_err(|e| format!("D3D11: {e}"))?;
         let item = match target {
-            CaptureTarget::Window(h) => {
-                capture_item_for_hwnd(HWND(h as *mut _)).map_err(|e| format!("WGC item (window): {e}"))?
-            }
+            CaptureTarget::Window(h) => capture_item_for_hwnd(HWND(h as *mut _))
+                .map_err(|e| format!("WGC item (window): {e}"))?,
             CaptureTarget::Monitor(h) => capture_item_for_monitor(HMONITOR(h as *mut _))
                 .map_err(|e| format!("WGC item (monitor): {e}"))?,
         };
@@ -321,17 +327,23 @@ fn run_worker(
         let (target_w, target_h) = match settings.resolution_mode {
             super::ResolutionMode::Source => (src_w, src_h),
             super::ResolutionMode::Half => ((src_w / 2).max(16), (src_h / 2).max(16)),
-            super::ResolutionMode::Custom { width, height } => {
-                (width.max(16), height.max(16))
-            }
+            super::ResolutionMode::Custom { width, height } => (width.max(16), height.max(16)),
         };
         let enc_w = (target_w + 15) & !15u32;
         let enc_h = (target_h + 15) & !15u32;
 
         let session = open_capture_session_for(&item, &bundle.device)
             .map_err(|e| format!("WGC session: {e}"))?;
-        let vp = VideoProcessor::new(&bundle.device, &bundle.context, src_w, src_h, enc_w, enc_h, fps)
-            .map_err(|e| format!("video processor: {e}"))?;
+        let vp = VideoProcessor::new(
+            &bundle.device,
+            &bundle.context,
+            src_w,
+            src_h,
+            enc_w,
+            enc_h,
+            fps,
+        )
+        .map_err(|e| format!("video processor: {e}"))?;
 
         mf_startup().map_err(|e| format!("MFStartup: {e}"))?;
         let (encoder, device_manager, encoder_name) = create_h264_encoder_hw_async(
@@ -349,23 +361,48 @@ fn run_worker(
             .cast()
             .map_err(|e| format!("event generator cast: {e}"))?;
 
-        Ok((bundle, session, vp, encoder, device_manager, event_gen, enc_w, enc_h, item, encoder_name))
+        Ok((
+            bundle,
+            session,
+            vp,
+            encoder,
+            device_manager,
+            event_gen,
+            enc_w,
+            enc_h,
+            item,
+            encoder_name,
+        ))
     })();
 
-    let (bundle, session, vp, encoder, _device_manager, event_gen, enc_w, enc_h, item, encoder_name) =
-        match init {
-            Ok(t) => t,
-            Err(e) => {
-                crate::diag(
-                    &app,
-                    format!("[replay] worker init FAILED for {target:?}: {e}"),
-                );
-                let _ = init_tx.send(Err(e));
-                return;
-            }
-        };
+    let (
+        bundle,
+        session,
+        vp,
+        encoder,
+        _device_manager,
+        event_gen,
+        enc_w,
+        enc_h,
+        item,
+        encoder_name,
+    ) = match init {
+        Ok(t) => t,
+        Err(e) => {
+            crate::diag(
+                &app,
+                format!("[replay] worker init FAILED for {target:?}: {e}"),
+            );
+            let _ = init_tx.send(Err(e));
+            return;
+        }
+    };
 
-    let title = item.DisplayName().ok().map(|s| s.to_string()).unwrap_or_default();
+    let title = item
+        .DisplayName()
+        .ok()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
     let encoder_label = if encoder_name.is_empty() {
         "<unnamed encoder>".to_string()
     } else {
@@ -396,7 +433,9 @@ fn run_worker(
                 flag.store(true, Ordering::SeqCst);
                 crate::diag(
                     &app_for_handler,
-                    format!("[replay] capture item closed for {target_for_handler:?} — worker exiting"),
+                    format!(
+                        "[replay] capture item closed for {target_for_handler:?} — worker exiting"
+                    ),
                 );
                 Ok(())
             },
@@ -571,7 +610,7 @@ fn run_worker(
 
     // Encoder fires NeedInput before any input has been submitted. Pump events
     // once up front so the first real frame can be submitted immediately.
-    let nowait = MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(MF_EVENT_FLAG_NO_WAIT.0 as u32);
+    let nowait = MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(MF_EVENT_FLAG_NO_WAIT.0);
     let block = MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0);
 
     // Rolling perf counters. Reset every ~30s; published to `perf` mutex on
@@ -789,18 +828,12 @@ fn run_worker(
                     // Quantize down to a frame_duration_pts boundary and
                     // ensure strict monotonicity vs the previous frame.
                     let elapsed_pts = (now - epoch).as_nanos() as i64 / 100;
-                    let mut pts =
-                        (elapsed_pts / frame_duration_pts) * frame_duration_pts;
+                    let mut pts = (elapsed_pts / frame_duration_pts) * frame_duration_pts;
                     if pts <= next_pts && next_pts > 0 {
                         pts = next_pts + frame_duration_pts;
                     }
-                    if submit_nv12_texture(
-                        &encoder,
-                        vp.nv12_texture(),
-                        pts,
-                        frame_duration_pts,
-                    )
-                    .is_ok()
+                    if submit_nv12_texture(&encoder, vp.nv12_texture(), pts, frame_duration_pts)
+                        .is_ok()
                     {
                         c_submitted = c_submitted.saturating_add(1);
                         if !got_fresh_this_tick {
@@ -930,7 +963,10 @@ mod tests {
         trim_buffer(&mut b, 30);
         let kept: Vec<(i64, bool)> = b.iter().map(|p| (p.pts, p.is_keyframe)).collect();
         // Trim anchors to the first keyframe >= cutoff (pts=70).
-        assert_eq!(kept, vec![(70, true), (80, false), (90, true), (100, false)]);
+        assert_eq!(
+            kept,
+            vec![(70, true), (80, false), (90, true), (100, false)]
+        );
         // Invariant: first kept packet is a keyframe so the buffer is decodable.
         assert!(kept[0].1);
     }
@@ -938,13 +974,7 @@ mod tests {
     #[test]
     fn trim_buffer_keeps_decodable_invariant_after_trim() {
         // Same shape, smaller window — first keyframe >= cutoff is at pts=90.
-        let mut b = buf([
-            (10, true),
-            (40, true),
-            (70, true),
-            (90, true),
-            (100, false),
-        ]);
+        let mut b = buf([(10, true), (40, true), (70, true), (90, true), (100, false)]);
         trim_buffer(&mut b, 15); // cutoff = 100 - 15 = 85
         assert!(b.front().unwrap().is_keyframe);
         assert!(b.front().unwrap().pts >= 85);

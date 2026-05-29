@@ -239,7 +239,10 @@ pub async fn write_and_mux(
         if let Some((app, save_id)) = progress {
             #[derive(serde::Serialize, Clone)]
             #[serde(rename_all = "camelCase")]
-            struct P<'a> { id: u64, stage: &'a str }
+            struct P<'a> {
+                id: u64,
+                stage: &'a str,
+            }
             let _ = app.emit("replay://save-progress", P { id: save_id, stage });
         }
     };
@@ -301,7 +304,11 @@ pub async fn write_and_mux(
             }
             continue;
         }
-        pcm_bytes += track.packets.iter().map(|p| p.data.len() as u64).sum::<u64>();
+        pcm_bytes += track
+            .packets
+            .iter()
+            .map(|p| p.data.len() as u64)
+            .sum::<u64>();
         audio_paths.push((path, track));
     }
     let pcm_write_ms = pcm_start.elapsed().as_millis() as u64;
@@ -481,8 +488,7 @@ pub async fn write_and_mux(
             // for surround (576k for 5.1, 768k for 7.1). 96k/ch is enough
             // headroom for the native ffmpeg AAC encoder to stay clean
             // without burning bitrate the video could use instead.
-            let bitrate_kbps =
-                std::cmp::max(192_u32, 96_u32 * track.format.channels as u32);
+            let bitrate_kbps = std::cmp::max(192_u32, 96_u32 * track.format.channels as u32);
             args.push(format!("-b:a:{i}"));
             args.push(format!("{}k", bitrate_kbps));
             // Embed the track's friendly name as MP4 stream metadata so the
@@ -608,7 +614,10 @@ mod tests {
         // Newlines, CR, NUL, tabs, ESC — all dropped without occupying a slot
         // in the char budget.
         let dirty = "good\nname\rwith\tcontrol\x00chars";
-        assert_eq!(truncate_for_metadata(dirty, 128), "goodnamewithcontrolchars");
+        assert_eq!(
+            truncate_for_metadata(dirty, 128),
+            "goodnamewithcontrolchars"
+        );
         // C1 controls (0x80-0x9F) also stripped.
         assert_eq!(truncate_for_metadata("hi\u{0085}there", 128), "hithere");
     }

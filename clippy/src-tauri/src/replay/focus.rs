@@ -22,13 +22,11 @@ mod windows_impl {
     use std::thread;
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::System::Threading::GetCurrentThreadId;
-    use windows::Win32::UI::Accessibility::{
-        SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK,
-    };
+    use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
     use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowTextLengthW,
-        GetWindowTextW, PostThreadMessageW, TranslateMessage, EVENT_SYSTEM_FOREGROUND,
-        MSG, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_QUIT,
+        DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowTextLengthW, GetWindowTextW,
+        PostThreadMessageW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, MSG, WINEVENT_OUTOFCONTEXT,
+        WINEVENT_SKIPOWNPROCESS, WM_QUIT,
     };
 
     /// Sender lives in a static so the C-callable hook proc can reach it.
@@ -77,12 +75,14 @@ mod windows_impl {
                 let h = GetForegroundWindow();
                 if !h.0.is_null() {
                     let title = window_title(h);
-                    let _ = event_tx_slot()
-                        .lock()
-                        .map(|g| g.as_ref().map(|t| t.try_send(FocusEvent {
-                            hwnd: h.0 as isize,
-                            title,
-                        })));
+                    let _ = event_tx_slot().lock().map(|g| {
+                        g.as_ref().map(|t| {
+                            t.try_send(FocusEvent {
+                                hwnd: h.0 as isize,
+                                title,
+                            })
+                        })
+                    });
                 }
             }
 

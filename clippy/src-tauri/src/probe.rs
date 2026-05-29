@@ -45,7 +45,11 @@ fn parse_rate(s: &str) -> f64 {
     if parts.len() == 2 {
         let num: f64 = parts[0].parse().unwrap_or(0.0);
         let den: f64 = parts[1].parse().unwrap_or(1.0);
-        if den == 0.0 { 0.0 } else { num / den }
+        if den == 0.0 {
+            0.0
+        } else {
+            num / den
+        }
     } else {
         s.parse().unwrap_or(0.0)
     }
@@ -57,8 +61,10 @@ async fn probe_video_inner(app: &AppHandle, path: &str) -> Result<VideoInfo, Str
         .sidecar("ffprobe")
         .map_err(|e| e.to_string())?
         .args([
-            "-v", "error",
-            "-print_format", "json",
+            "-v",
+            "error",
+            "-print_format",
+            "json",
             "-show_format",
             "-show_streams",
             path,
@@ -111,9 +117,16 @@ async fn probe_video_inner(app: &AppHandle, path: &str) -> Result<VideoInfo, Str
             continue;
         }
         let idx = audio_tracks.len();
-        let codec = s.get("codec_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let codec = s
+            .get("codec_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let channels = s.get("channels").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let layout = s.get("channel_layout").and_then(|v| v.as_str()).map(String::from);
+        let layout = s
+            .get("channel_layout")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let tags = s.get("tags");
         // Read `title` first (MKV, NUT, other containers — standard key),
         // fall back to `name` (ffmpeg's MP4 mov muxer routes per-stream
@@ -168,15 +181,20 @@ async fn probe_video_inner(app: &AppHandle, path: &str) -> Result<VideoInfo, Str
         container: container.clone(),
         bit_rate_bps,
     };
-    diag(app, format!(
-        "probe: {} → {}/{}, {}×{} @ {:.2}fps, {} audio track(s), {:.1}s",
-        basename(path),
-        video_codec,
-        audio_codec.as_deref().unwrap_or("none"),
-        width, height, fps,
-        audio_tracks.len(),
-        duration_secs,
-    ));
+    diag(
+        app,
+        format!(
+            "probe: {} → {}/{}, {}×{} @ {:.2}fps, {} audio track(s), {:.1}s",
+            basename(path),
+            video_codec,
+            audio_codec.as_deref().unwrap_or("none"),
+            width,
+            height,
+            fps,
+            audio_tracks.len(),
+            duration_secs,
+        ),
+    );
     Ok(info)
 }
 
@@ -227,11 +245,16 @@ pub async fn probe_keyframes(app: AppHandle, path: String) -> Result<Vec<f32>, S
         .sidecar("ffprobe")
         .map_err(|e| e.to_string())?
         .args([
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-skip_frame", "nokey",
-            "-show_entries", "frame=pts_time",
-            "-of", "csv=print_section=0",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-skip_frame",
+            "nokey",
+            "-show_entries",
+            "frame=pts_time",
+            "-of",
+            "csv=print_section=0",
             &path,
         ])
         .output()
@@ -248,7 +271,9 @@ pub async fn probe_keyframes(app: AppHandle, path: String) -> Result<Vec<f32>, S
     let mut keyframes: Vec<f32> = Vec::new();
     for line in stdout.lines() {
         let s = line.trim();
-        if s.is_empty() || s == "N/A" { continue; }
+        if s.is_empty() || s == "N/A" {
+            continue;
+        }
         if let Ok(v) = s.parse::<f32>() {
             keyframes.push(v);
         }
@@ -327,13 +352,19 @@ pub async fn extract_waveform(
         .args([
             "-y",
             "-hide_banner",
-            "-loglevel", "error",
-            "-i", &path,
-            "-map", &format!("0:a:{}?", track_idx),
+            "-loglevel",
+            "error",
+            "-i",
+            &path,
+            "-map",
+            &format!("0:a:{}?", track_idx),
             "-vn",
-            "-ac", "1",
-            "-ar", "8000",
-            "-f", "s16le",
+            "-ac",
+            "1",
+            "-ar",
+            "8000",
+            "-f",
+            "s16le",
             "-",
         ])
         .spawn()

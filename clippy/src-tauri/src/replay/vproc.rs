@@ -14,21 +14,18 @@ pub mod windows_impl {
             Foundation::BOOL,
             Graphics::{
                 Direct3D11::{
-                    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
-                    D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
-                    D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC,
-                    D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
-                    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-                    D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
-                    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-                    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
-                    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-                    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
-                    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
-                    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
                     ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext,
                     ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
-                    ID3D11VideoProcessorOutputView,
+                    ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET,
+                    D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE,
+                    D3D11_MAP_READ, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC,
+                    D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+                    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+                    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
+                    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
+                    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
+                    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
+                    D3D11_VPOV_DIMENSION_TEXTURE2D,
                 },
                 Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC},
             },
@@ -67,17 +64,22 @@ pub mod windows_impl {
 
             let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
                 InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-                InputFrameRate: DXGI_RATIONAL { Numerator: fps, Denominator: 1 },
+                InputFrameRate: DXGI_RATIONAL {
+                    Numerator: fps,
+                    Denominator: 1,
+                },
                 InputWidth: src_w,
                 InputHeight: src_h,
-                OutputFrameRate: DXGI_RATIONAL { Numerator: fps, Denominator: 1 },
+                OutputFrameRate: DXGI_RATIONAL {
+                    Numerator: fps,
+                    Denominator: 1,
+                },
                 OutputWidth: dst_w,
                 OutputHeight: dst_h,
                 Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
             };
 
-            let enumerator =
-                unsafe { video_device.CreateVideoProcessorEnumerator(&content_desc)? };
+            let enumerator = unsafe { video_device.CreateVideoProcessorEnumerator(&content_desc)? };
             let processor = unsafe { video_device.CreateVideoProcessor(&enumerator, 0)? };
 
             // NV12 destination texture. Bind flags allow video processor write
@@ -88,7 +90,10 @@ pub mod windows_impl {
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: DXGI_FORMAT_NV12,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 Usage: D3D11_USAGE_DEFAULT,
                 BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
                 CPUAccessFlags: 0,
@@ -195,7 +200,10 @@ pub mod windows_impl {
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: DXGI_FORMAT_NV12,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 Usage: D3D11_USAGE_STAGING,
                 BindFlags: 0,
                 CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,

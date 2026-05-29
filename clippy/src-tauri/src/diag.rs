@@ -9,6 +9,12 @@ const DIAG_CAP: usize = 1000;
 /// anywhere — the user copies it explicitly via the "Copy diagnostics" button.
 pub struct DiagLog(pub Arc<Mutex<VecDeque<String>>>);
 
+impl Default for DiagLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DiagLog {
     pub fn new() -> Self {
         DiagLog(Arc::new(Mutex::new(VecDeque::with_capacity(DIAG_CAP))))
@@ -208,14 +214,18 @@ pub fn clear_diagnostics_log(app: AppHandle) -> Result<u64, String> {
 /// automatically. Full file paths are never logged; only basenames are used.
 #[tauri::command]
 pub fn get_diagnostics(app: AppHandle) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
     use crate::replay;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     let mut out = String::new();
     out.push_str(&format!(
         "Clippy v{} ({}) — diagnostic snapshot\n",
         env!("CARGO_PKG_VERSION"),
-        if cfg!(debug_assertions) { "dev build" } else { "release" }
+        if cfg!(debug_assertions) {
+            "dev build"
+        } else {
+            "release"
+        }
     ));
 
     let now_secs = SystemTime::now()
@@ -240,11 +250,7 @@ pub fn get_diagnostics(app: AppHandle) -> String {
         .lock()
         .map(|g| g.is_some())
         .unwrap_or(false);
-    let allowlist_size = replay_state
-        .allowlist
-        .lock()
-        .map(|g| g.len())
-        .unwrap_or(0);
+    let allowlist_size = replay_state.allowlist.lock().map(|g| g.len()).unwrap_or(0);
     out.push_str(&format!(
         "Coordinator running: {coord_running}\n\
          Game allowlist size: {allowlist_size}\n",
@@ -277,7 +283,10 @@ pub fn get_diagnostics(app: AppHandle) -> String {
             Ok(g) => g,
             Err(e) => e.into_inner(),
         };
-        guard.as_ref().map(|c| c.perf_snapshot()).unwrap_or_default()
+        guard
+            .as_ref()
+            .map(|c| c.perf_snapshot())
+            .unwrap_or_default()
     };
     if perf_rows.is_empty() {
         out.push_str("(no active workers — no perf data yet)\n");

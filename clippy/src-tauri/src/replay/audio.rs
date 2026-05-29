@@ -420,13 +420,7 @@ mod windows_impl {
                 let mut frames: u32 = 0;
                 let mut flags: u32 = 0;
                 let r = unsafe {
-                    capture_client.GetBuffer(
-                        &mut data_ptr,
-                        &mut frames,
-                        &mut flags,
-                        None,
-                        None,
-                    )
+                    capture_client.GetBuffer(&mut data_ptr, &mut frames, &mut flags, None, None)
                 };
                 if let Err(e) = r {
                     if !logged_get_buffer_err {

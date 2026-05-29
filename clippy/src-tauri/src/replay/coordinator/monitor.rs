@@ -27,11 +27,7 @@ pub(super) fn run_monitor(
         ),
     );
 
-    let worker = match WorkerHandle::start(
-        CaptureTarget::Monitor(hmon),
-        settings,
-        app.clone(),
-    ) {
+    let worker = match WorkerHandle::start(CaptureTarget::Monitor(hmon), settings, app.clone()) {
         Ok(w) => w,
         Err(e) => {
             crate::diag(&app, format!("[replay] monitor worker spawn FAILED: {e}"));

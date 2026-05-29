@@ -47,7 +47,11 @@ fn emit(step: &Step, pretty: bool) {
             Status::Fail => "FAIL",
             Status::Skip => "SKIP",
         };
-        let req = if step.required { "(required)" } else { "(optional)" };
+        let req = if step.required {
+            "(required)"
+        } else {
+            "(optional)"
+        };
         println!("[{tag}] {} {req}\n        {}", step.step, step.detail);
     } else {
         println!("{}", serde_json::to_string(step).unwrap());
@@ -119,45 +123,150 @@ fn main() {
 
     // 1. D3D11 device — gates everything else.
     let r = run("d3d11_device", true, pretty, check_d3d11);
-    tally(true, r, (&mut required_total, &mut required_passed, &mut optional_total, &mut optional_passed));
+    tally(
+        true,
+        r,
+        (
+            &mut required_total,
+            &mut required_passed,
+            &mut optional_total,
+            &mut optional_passed,
+        ),
+    );
 
     // 2. GPU + RAM + HW encoder probe (informational).
     let r = run("sysinfo_probe", true, pretty, check_sysinfo);
-    tally(true, r, (&mut required_total, &mut required_passed, &mut optional_total, &mut optional_passed));
+    tally(
+        true,
+        r,
+        (
+            &mut required_total,
+            &mut required_passed,
+            &mut optional_total,
+            &mut optional_passed,
+        ),
+    );
 
     // 3. Monitor enumeration.
     let r = run("monitor_enumeration", true, pretty, check_monitor_enum);
-    tally(true, r, (&mut required_total, &mut required_passed, &mut optional_total, &mut optional_passed));
+    tally(
+        true,
+        r,
+        (
+            &mut required_total,
+            &mut required_passed,
+            &mut optional_total,
+            &mut optional_passed,
+        ),
+    );
 
     // 4. WGC monitor capture session (open + close).
-    let r = run("wgc_monitor_capture_session", true, pretty, check_wgc_monitor);
-    tally(true, r, (&mut required_total, &mut required_passed, &mut optional_total, &mut optional_passed));
+    let r = run(
+        "wgc_monitor_capture_session",
+        true,
+        pretty,
+        check_wgc_monitor,
+    );
+    tally(
+        true,
+        r,
+        (
+            &mut required_total,
+            &mut required_passed,
+            &mut optional_total,
+            &mut optional_passed,
+        ),
+    );
 
     // 5. WGC window capture session — uses our own console window as target.
     let r = run("wgc_window_capture_session", true, pretty, check_wgc_window);
-    tally(true, r, (&mut required_total, &mut required_passed, &mut optional_total, &mut optional_passed));
+    tally(
+        true,
+        r,
+        (
+            &mut required_total,
+            &mut required_passed,
+            &mut optional_total,
+            &mut optional_passed,
+        ),
+    );
 
     // 6. MF startup + shutdown.
     let r = run("mf_startup_shutdown", true, pretty, check_mf_lifecycle);
-    tally(true, r, (&mut required_total, &mut required_passed, &mut optional_total, &mut optional_passed));
+    tally(
+        true,
+        r,
+        (
+            &mut required_total,
+            &mut required_passed,
+            &mut optional_total,
+            &mut optional_passed,
+        ),
+    );
 
     // 7. WASAPI render endpoint enumeration.
-    let r = run("wasapi_render_endpoints", true, pretty, check_wasapi_endpoints);
-    tally(true, r, (&mut required_total, &mut required_passed, &mut optional_total, &mut optional_passed));
+    let r = run(
+        "wasapi_render_endpoints",
+        true,
+        pretty,
+        check_wasapi_endpoints,
+    );
+    tally(
+        true,
+        r,
+        (
+            &mut required_total,
+            &mut required_passed,
+            &mut optional_total,
+            &mut optional_passed,
+        ),
+    );
 
     // 8. Game allowlist scan (no crash on missing launchers).
     let r = run("game_allowlist_scan", true, pretty, check_game_scan);
-    tally(true, r, (&mut required_total, &mut required_passed, &mut optional_total, &mut optional_passed));
+    tally(
+        true,
+        r,
+        (
+            &mut required_total,
+            &mut required_passed,
+            &mut optional_total,
+            &mut optional_passed,
+        ),
+    );
 
     // 9. HW encoder enumeration. Optional — pure-software systems still
     //    work (falls back to software MFT), so a zero count is "skip".
     let r = run("hw_encoder_enumeration", false, pretty, check_hw_encoders);
-    tally(false, r, (&mut required_total, &mut required_passed, &mut optional_total, &mut optional_passed));
+    tally(
+        false,
+        r,
+        (
+            &mut required_total,
+            &mut required_passed,
+            &mut optional_total,
+            &mut optional_passed,
+        ),
+    );
 
     // 10. Process Loopback activation (Win11 22H2+). Optional — older
     //     Windows correctly fails this and falls back to system loopback.
-    let r = run("process_loopback_activation", false, pretty, check_process_loopback);
-    tally(false, r, (&mut required_total, &mut required_passed, &mut optional_total, &mut optional_passed));
+    let r = run(
+        "process_loopback_activation",
+        false,
+        pretty,
+        check_process_loopback,
+    );
+    tally(
+        false,
+        r,
+        (
+            &mut required_total,
+            &mut required_passed,
+            &mut optional_total,
+            &mut optional_passed,
+        ),
+    );
 
     // 11. Save-path integration: synthesize a 5s H.264 fixture via the
     //     bundled ffmpeg, feed it through save::write_and_mux, then probe
@@ -165,7 +274,16 @@ fn main() {
     //     ffmpeg-arg rename slips past unit tests because nothing actually
     //     drives the production save pipeline end-to-end.
     let r = run("save_path", true, pretty, check_save_path);
-    tally(true, r, (&mut required_total, &mut required_passed, &mut optional_total, &mut optional_passed));
+    tally(
+        true,
+        r,
+        (
+            &mut required_total,
+            &mut required_passed,
+            &mut optional_total,
+            &mut optional_passed,
+        ),
+    );
 
     // Tray icon construction requires a live Tauri AppHandle, which a
     // standalone binary can't synthesize. Marked skip so the JSON output
@@ -220,7 +338,10 @@ fn check_sysinfo() -> Result<String, String> {
     }
     let mut detail = format!(
         "GPU=\"{}\" VRAM={}MB RAM={}MB encoders={}",
-        info.gpu_name, info.gpu_vram_mb, info.ram_total_mb, info.hw_encoders.len()
+        info.gpu_name,
+        info.gpu_vram_mb,
+        info.ram_total_mb,
+        info.hw_encoders.len()
     );
     for n in &info.hw_encoders {
         detail.push_str(&format!(" | {}", n));
@@ -262,8 +383,8 @@ fn check_wgc_monitor() -> Result<String, String> {
     let bundle = create_d3d11_device().map_err(|e| format!("D3D11: {e}"))?;
     let item = capture_item_for_monitor(HMONITOR(h as *mut _))
         .map_err(|e| format!("capture item: {e}"))?;
-    let session = open_capture_session_for(&item, &bundle.device)
-        .map_err(|e| format!("session: {e}"))?;
+    let session =
+        open_capture_session_for(&item, &bundle.device).map_err(|e| format!("session: {e}"))?;
     // Process exit cleans up. Drop explicitly so the WGC border (if any)
     // disappears before our summary line prints.
     let _ = session.session.Close();
@@ -301,7 +422,11 @@ fn check_wgc_window() -> Result<String, String> {
         match open_capture_session_for(&item, &bundle.device) {
             Ok(session) => {
                 let _ = session.session.Close();
-                let label = if i == 0 { "foreground window" } else { "console window" };
+                let label = if i == 0 {
+                    "foreground window"
+                } else {
+                    "console window"
+                };
                 return Ok(format!(
                     "opened WGC session on {label} (hwnd {:#x})",
                     hwnd.0 as isize
@@ -384,7 +509,8 @@ fn check_process_loopback() -> Result<String, String> {
     let epoch = Instant::now();
     // No Tauri runtime here — None skips diag-entry plumbing inside the
     // audio thread (we surface failures via this binary's own JSON output).
-    let res = clippy_lib::replay::audio::AudioCaptureHandle::start_for_process(pid, epoch, 10, None);
+    let res =
+        clippy_lib::replay::audio::AudioCaptureHandle::start_for_process(pid, epoch, 10, None);
     unsafe { CoUninitialize() };
     match res {
         Ok(_handle) => Ok(format!("activated process loopback for pid {pid}")),
@@ -474,7 +600,14 @@ fn check_save_path() -> Result<String, String> {
         .build()
         .map_err(|e| format!("build tokio runtime: {e}"))?;
     let timings = rt
-        .block_on(save::write_and_mux(&packets, &[], 60, "libx264", &out_mp4, None))
+        .block_on(save::write_and_mux(
+            &packets,
+            &[],
+            60,
+            "libx264",
+            &out_mp4,
+            None,
+        ))
         .map_err(|e| format!("write_and_mux: {e}"))?;
 
     // Stage 3: assertions.
@@ -487,9 +620,7 @@ fn check_save_path() -> Result<String, String> {
         ));
     }
     if !(4.5..=5.5).contains(&dur) {
-        return Err(format!(
-            "muxed duration {dur:.2}s outside [4.5, 5.5]"
-        ));
+        return Err(format!("muxed duration {dur:.2}s outside [4.5, 5.5]"));
     }
     // bsf gate correctness: libx264 must NOT trigger the pre-pass.
     if timings.bsf_pass_ms != 0 {
