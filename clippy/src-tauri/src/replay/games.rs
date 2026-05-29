@@ -45,6 +45,10 @@ impl GameAllowlist {
     pub fn len(&self) -> usize {
         self.paths.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
 }
 
 /// Canonical, lowercased, back-slashed string form of `path`.
@@ -201,7 +205,8 @@ fn steam_library_roots() -> Vec<PathBuf> {
 fn steam_install_path() -> Option<PathBuf> {
     use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_VALUE_TYPE,
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+        REG_VALUE_TYPE,
     };
 
     let subkey: Vec<u16> = "Software\\Valve\\Steam\0".encode_utf16().collect();
@@ -209,7 +214,14 @@ fn steam_install_path() -> Option<PathBuf> {
 
     unsafe {
         let mut hkey: HKEY = HKEY::default();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), 0, KEY_READ, &mut hkey).is_err()
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            0,
+            KEY_READ,
+            &mut hkey,
+        )
+        .is_err()
         {
             return None;
         }
@@ -275,7 +287,9 @@ pub fn resolve_window_exe(hwnd_val: isize) -> Option<PathBuf> {
         if r.is_err() {
             return None;
         }
-        Some(PathBuf::from(String::from_utf16_lossy(&buf[..size as usize])))
+        Some(PathBuf::from(String::from_utf16_lossy(
+            &buf[..size as usize],
+        )))
     }
 }
 
@@ -309,10 +323,12 @@ pub fn save_manual_entries(file: &Path, entries: &[PathBuf]) -> std::io::Result<
         std::fs::create_dir_all(parent)?;
     }
     let payload = AllowlistFile {
-        manual: entries.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+        manual: entries
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
     };
-    let s = serde_json::to_string_pretty(&payload)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let s = serde_json::to_string_pretty(&payload).map_err(std::io::Error::other)?;
     std::fs::write(file, s)
 }
 

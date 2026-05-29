@@ -1,8 +1,14 @@
+// Tauri command signatures are inherently wide (every editor parameter the
+// frontend passes becomes an argument). The param-struct refactor is tracked
+// as review finding F4; until then, don't fail the build on argument count.
+#![allow(clippy::too_many_arguments)]
+
 pub mod clipboard;
 pub mod diag;
 pub mod encoder_cascade;
 pub mod export;
 pub mod extract;
+pub mod ffmpeg;
 pub mod helpers;
 pub mod media_server;
 pub mod probe;
@@ -19,10 +25,10 @@ pub mod storage;
 pub use diag::{diag, epoch_to_ymd_for_filename, DiagLog, DiagVerbose};
 pub use state::{HideOnClose, InitialPath, ReplaySaveDir};
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
 use axum::routing::get;
 use axum::Router;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -35,8 +41,8 @@ fn register_save_hotkey(app: &AppHandle, shortcut_str: &str) -> Result<(), Strin
     use std::str::FromStr;
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-    let parsed = Shortcut::from_str(shortcut_str)
-        .map_err(|e| format!("parse '{shortcut_str}': {e}"))?;
+    let parsed =
+        Shortcut::from_str(shortcut_str).map_err(|e| format!("parse '{shortcut_str}': {e}"))?;
 
     // We only ever have the one global shortcut for now — clear the slate.
     let _ = app.global_shortcut().unregister_all();

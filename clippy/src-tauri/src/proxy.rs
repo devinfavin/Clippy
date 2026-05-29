@@ -1,9 +1,7 @@
-use std::path::PathBuf;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_shell::process::CommandEvent;
-use tauri_plugin_shell::ShellExt;
 
 use crate::diag::diag;
 use crate::encoder_cascade::{encoder_args, encoder_chain, WORKING_ENCODER};
@@ -42,7 +40,9 @@ pub(crate) fn classify_strategy(info: &VideoInfo) -> Strategy {
         return Strategy::Encode;
     }
     let lower = info.container.to_lowercase();
-    let mp4_native = lower.split(',').any(|x| matches!(x.trim(), "mp4" | "mov" | "m4v" | "3gp" | "3g2"));
+    let mp4_native = lower
+        .split(',')
+        .any(|x| matches!(x.trim(), "mp4" | "mov" | "m4v" | "3gp" | "3g2"));
     if mp4_native {
         Strategy::Direct
     } else {
@@ -84,82 +84,61 @@ async fn run_proxy_pass(
     start: std::time::Instant,
     event_name: &str,
 ) -> Result<(), String> {
-    let mut args: Vec<&str> = vec![
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-progress", "pipe:1",
-        "-nostats",
-        "-i", src_path,
-        "-vf", "scale='min(1280,iw)':-2",
+    let mut args: Vec<String> = vec![
+        "-y".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-progress".into(),
+        "pipe:1".into(),
+        "-nostats".into(),
+        "-i".into(),
+        src_path.into(),
+        "-vf".into(),
+        "scale='min(1280,iw)':-2".into(),
     ];
-    args.extend(encoder_args(encoder));
+    args.extend(encoder_args(encoder).into_iter().map(String::from));
     args.extend([
-        "-g", "15",
-        "-keyint_min", "15",
-        "-sc_threshold", "0",
-        "-c:a", "aac",
-        "-b:a", "96k",
-        "-movflags", "+faststart",
-        out_path,
+        "-g".into(),
+        "15".into(),
+        "-keyint_min".into(),
+        "15".into(),
+        "-sc_threshold".into(),
+        "0".into(),
+        "-c:a".into(),
+        "aac".into(),
+        "-b:a".into(),
+        "96k".into(),
+        "-movflags".into(),
+        "+faststart".into(),
+        out_path.into(),
     ]);
 
-    let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
-    let (mut rx, _child) = sidecar.args(args).spawn().map_err(|e| e.to_string())?;
-
-    let mut last_emit = std::time::Instant::now();
-    let total_us = duration_secs * 1_000_000.0;
-    let mut latest_us: f64 = 0.0;
-    let mut stderr_buf = String::new();
-
-    while let Some(event) = rx.recv().await {
-        match event {
-            CommandEvent::Stdout(line_bytes) => {
-                let line = String::from_utf8_lossy(&line_bytes);
-                for part in line.split('\n') {
-                    if let Some(rest) = part.trim().strip_prefix("out_time_us=") {
-                        if let Ok(us) = rest.parse::<f64>() {
-                            // Encoder pipelining can report out-of-order timestamps;
-                            // clamp to monotonic so the displayed % doesn't bounce.
-                            if us > latest_us { latest_us = us; }
-                        }
-                    }
-                }
-                if last_emit.elapsed().as_millis() >= 200 {
-                    let progress = if total_us > 0.0 {
-                        (latest_us / total_us).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let eta = if progress > 0.01 {
-                        Some((elapsed / progress) - elapsed)
-                    } else {
-                        None
-                    };
-                    let _ = app.emit(
-                        event_name,
-                        ProxyProgress { progress, elapsed_secs: elapsed, eta_secs: eta },
-                    );
-                    last_emit = std::time::Instant::now();
-                }
-            }
-            CommandEvent::Stderr(line_bytes) => {
-                stderr_buf.push_str(&String::from_utf8_lossy(&line_bytes));
-            }
-            CommandEvent::Terminated(payload) => {
-                if payload.code != Some(0) {
-                    return Err(format!(
-                        "ffmpeg ({}) exited with code {:?}: {}",
-                        encoder, payload.code, stderr_buf
-                    ));
-                }
-                break;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
+    let app_emit = app.clone();
+    let ev = event_name.to_string();
+    crate::ffmpeg::run_ffmpeg(
+        app,
+        "proxy",
+        args,
+        duration_secs,
+        move |progress, _elapsed| {
+            let elapsed = start.elapsed().as_secs_f64();
+            let eta = if progress > 0.01 {
+                Some((elapsed / progress) - elapsed)
+            } else {
+                None
+            };
+            let _ = app_emit.emit(
+                &ev,
+                ProxyProgress {
+                    progress,
+                    elapsed_secs: elapsed,
+                    eta_secs: eta,
+                },
+            );
+        },
+    )
+    .await
 }
 
 async fn run_remux_pass(
@@ -169,77 +148,50 @@ async fn run_remux_pass(
     duration_secs: f64,
     start: std::time::Instant,
 ) -> Result<(), String> {
-    let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
-    let (mut rx, _child) = sidecar
-        .args([
-            "-y",
-            "-hide_banner",
-            "-loglevel", "error",
-            "-progress", "pipe:1",
-            "-nostats",
-            "-i", src_path,
-            "-map", "0:v:0?",
-            "-map", "0:a:0?",
-            "-c", "copy",
-            "-map_chapters", "-1",
-            out_path,
-        ])
-        .spawn()
-        .map_err(|e| e.to_string())?;
-
-    let mut last_emit = std::time::Instant::now();
-    let total_us = duration_secs * 1_000_000.0;
-    let mut latest_us: f64 = 0.0;
-    let mut stderr_buf = String::new();
-
-    while let Some(event) = rx.recv().await {
-        match event {
-            CommandEvent::Stdout(line_bytes) => {
-                let line = String::from_utf8_lossy(&line_bytes);
-                for part in line.split('\n') {
-                    if let Some(rest) = part.trim().strip_prefix("out_time_us=") {
-                        if let Ok(us) = rest.parse::<f64>() {
-                            // Encoder pipelining can report out-of-order timestamps;
-                            // clamp to monotonic so the displayed % doesn't bounce.
-                            if us > latest_us { latest_us = us; }
-                        }
-                    }
-                }
-                if last_emit.elapsed().as_millis() >= 100 {
-                    let progress = if total_us > 0.0 {
-                        (latest_us / total_us).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let eta = if progress > 0.01 {
-                        Some((elapsed / progress) - elapsed)
-                    } else {
-                        None
-                    };
-                    let _ = app.emit(
-                        "proxy:progress",
-                        ProxyProgress { progress, elapsed_secs: elapsed, eta_secs: eta },
-                    );
-                    last_emit = std::time::Instant::now();
-                }
-            }
-            CommandEvent::Stderr(line_bytes) => {
-                stderr_buf.push_str(&String::from_utf8_lossy(&line_bytes));
-            }
-            CommandEvent::Terminated(payload) => {
-                if payload.code != Some(0) {
-                    return Err(format!(
-                        "ffmpeg (remux) exited with code {:?}: {}",
-                        payload.code, stderr_buf
-                    ));
-                }
-                break;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
+    let args: Vec<String> = vec![
+        "-y".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-progress".into(),
+        "pipe:1".into(),
+        "-nostats".into(),
+        "-i".into(),
+        src_path.into(),
+        "-map".into(),
+        "0:v:0?".into(),
+        "-map".into(),
+        "0:a:0?".into(),
+        "-c".into(),
+        "copy".into(),
+        "-map_chapters".into(),
+        "-1".into(),
+        out_path.into(),
+    ];
+    let app_emit = app.clone();
+    crate::ffmpeg::run_ffmpeg(
+        app,
+        "remux",
+        args,
+        duration_secs,
+        move |progress, _elapsed| {
+            let elapsed = start.elapsed().as_secs_f64();
+            let eta = if progress > 0.01 {
+                Some((elapsed / progress) - elapsed)
+            } else {
+                None
+            };
+            let _ = app_emit.emit(
+                "proxy:progress",
+                ProxyProgress {
+                    progress,
+                    elapsed_secs: elapsed,
+                    eta_secs: eta,
+                },
+            );
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -264,10 +216,21 @@ pub async fn generate_proxy(
             allowlist_trust(&state.state, std::path::Path::new(&path)).await?;
             let _ = app.emit(
                 "proxy:progress",
-                ProxyProgress { progress: 1.0, elapsed_secs: 0.0, eta_secs: Some(0.0) },
+                ProxyProgress {
+                    progress: 1.0,
+                    elapsed_secs: 0.0,
+                    eta_secs: Some(0.0),
+                },
             );
-            diag(&app, format!("proxy: Direct — {}/{} in {} container, played as-is",
-                info.video_codec, info.audio_codec.as_deref().unwrap_or("none"), info.container));
+            diag(
+                &app,
+                format!(
+                    "proxy: Direct — {}/{} in {} container, played as-is",
+                    info.video_codec,
+                    info.audio_codec.as_deref().unwrap_or("none"),
+                    info.container
+                ),
+            );
             Ok(ProxyResult {
                 play_path: path,
                 cached: true,
@@ -285,13 +248,25 @@ pub async fn generate_proxy(
                     strategy: "remux".to_string(),
                 });
             }
-            diag(&app, format!("proxy: Remux — {} container, remuxing to MP4", info.container));
+            diag(
+                &app,
+                format!(
+                    "proxy: Remux — {} container, remuxing to MP4",
+                    info.container
+                ),
+            );
             let out_str = out_path.to_string_lossy().to_string();
             let temp_str = format!("{}.tmp.mp4", out_str);
             let result = run_remux_pass(&app, &path, &temp_str, duration_secs, start).await;
             if let Err(e) = result {
                 let _ = std::fs::remove_file(&temp_str);
-                diag(&app, format!("proxy: Remux failed ({}), falling back to encode", trunc(&e, 120)));
+                diag(
+                    &app,
+                    format!(
+                        "proxy: Remux failed ({}), falling back to encode",
+                        trunc(&e, 120)
+                    ),
+                );
                 eprintln!("[clippy] remux failed: {} — falling back to encode", e);
                 return encode_fallback(&app, &path, duration_secs, start, "proxy:progress").await;
             }
@@ -304,14 +279,19 @@ pub async fn generate_proxy(
                     eta_secs: Some(0.0),
                 },
             );
-            diag(&app, format!("proxy: Remux done in {:.1}s", start.elapsed().as_secs_f64()));
+            diag(
+                &app,
+                format!("proxy: Remux done in {:.1}s", start.elapsed().as_secs_f64()),
+            );
             Ok(ProxyResult {
                 play_path: out_str,
                 cached: false,
                 strategy: "remux".to_string(),
             })
         }
-        Strategy::Encode => encode_fallback(&app, &path, duration_secs, start, "proxy:progress").await,
+        Strategy::Encode => {
+            encode_fallback(&app, &path, duration_secs, start, "proxy:progress").await
+        }
     }
 }
 
@@ -332,7 +312,10 @@ async fn encode_fallback(
             strategy: "encode (cached)".to_string(),
         });
     }
-    diag(app, "proxy: Encode — codec/container needs re-encode for playback");
+    diag(
+        app,
+        "proxy: Encode — codec/container needs re-encode for playback",
+    );
     let out_str = out_path.to_string_lossy().to_string();
     let temp_str = format!("{}.tmp.mp4", out_str);
 
@@ -365,7 +348,14 @@ async fn encode_fallback(
     };
 
     std::fs::rename(&temp_str, &out_path).map_err(|e| e.to_string())?;
-    diag(app, format!("proxy: Encode done via {} in {:.1}s", used, start.elapsed().as_secs_f64()));
+    diag(
+        app,
+        format!(
+            "proxy: Encode done via {} in {:.1}s",
+            used,
+            start.elapsed().as_secs_f64()
+        ),
+    );
     let _ = app.emit(
         event_name,
         ProxyProgress {

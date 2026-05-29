@@ -1,8 +1,6 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_shell::process::CommandEvent;
-use tauri_plugin_shell::ShellExt;
 
 use crate::diag::diag;
 use crate::encoder_cascade::{
@@ -47,7 +45,11 @@ impl RegionExport {
     fn effective_duration(&self) -> f64 {
         let raw = (self.out_secs - self.in_secs).max(0.0);
         let s = self.speed.unwrap_or(1.0);
-        if s <= 0.0 { raw } else { raw / s }
+        if s <= 0.0 {
+            raw
+        } else {
+            raw / s
+        }
     }
 }
 
@@ -153,7 +155,11 @@ fn build_audio_filter_complex(
             .collect()
     };
 
-    let mix_output = if post_mix_filters.is_empty() { "[aout]" } else { "[m]" };
+    let mix_output = if post_mix_filters.is_empty() {
+        "[aout]"
+    } else {
+        "[m]"
+    };
     let mut parts: Vec<String> = Vec::new();
 
     let mix_tag: String = if active.is_empty() {
@@ -225,179 +231,34 @@ struct ExportProgress {
     elapsed_secs: f64,
 }
 
-/// Run ffmpeg with the given args and report progress on the given event
-/// channel until termination. Used by both the size-targeted clip and stitch
-/// exporters.
+/// Thin wrapper over [`crate::ffmpeg::run_ffmpeg`] that emits `ExportProgress`
+/// on `event_name`. Kept so the many export call sites don't each repeat the
+/// emit closure; the spawn/progress/stderr loop (and the full-stderr failure
+/// log, finding F2) live in the shared runner.
 async fn run_ffmpeg_with_progress(
     app: &AppHandle,
     args: Vec<String>,
     duration_secs: f64,
     event_name: &str,
 ) -> Result<(), String> {
-    // Summarize the invocation for the diag log so support reports can see
-    // *what was attempted* even when the only visible symptom is "export
-    // failed". Logs output basename + codec flags + whether a filter graph
-    // was used — never the full file path (privacy).
-    let summary = summarize_ffmpeg_invocation(&args);
-    diag(app, format!("[export] START · {summary} · {duration_secs:.2}s"));
-
-    let sidecar = match app.shell().sidecar("ffmpeg") {
-        Ok(s) => s,
-        Err(e) => {
-            diag(app, format!("[export] FAILED · {summary} · sidecar lookup: {e}"));
-            return Err(e.to_string());
-        }
-    };
-    let (mut rx, _child) = match sidecar.args(args).spawn() {
-        Ok(t) => t,
-        Err(e) => {
-            diag(app, format!("[export] FAILED · {summary} · spawn: {e}"));
-            return Err(e.to_string());
-        }
-    };
-    let start = std::time::Instant::now();
-    let mut last_emit = std::time::Instant::now();
-    let total_us = duration_secs * 1_000_000.0;
-    let mut latest_us: f64 = 0.0;
-    let mut stderr_buf = String::new();
-    while let Some(event) = rx.recv().await {
-        match event {
-            CommandEvent::Stdout(line_bytes) => {
-                let line = String::from_utf8_lossy(&line_bytes);
-                for part in line.split('\n') {
-                    if let Some(rest) = part.trim().strip_prefix("out_time_us=") {
-                        if let Ok(us) = rest.parse::<f64>() {
-                            if us > latest_us {
-                                latest_us = us;
-                            }
-                        }
-                    }
-                }
-                if last_emit.elapsed().as_millis() >= 150 {
-                    let progress = if total_us > 0.0 {
-                        (latest_us / total_us).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    let _ = app.emit(
-                        event_name,
-                        ExportProgress {
-                            progress,
-                            elapsed_secs: start.elapsed().as_secs_f64(),
-                        },
-                    );
-                    last_emit = std::time::Instant::now();
-                }
-            }
-            CommandEvent::Stderr(line_bytes) => {
-                stderr_buf.push_str(&String::from_utf8_lossy(&line_bytes));
-            }
-            CommandEvent::Terminated(payload) => {
-                if payload.code != Some(0) {
-                    return Err(format!(
-                        "ffmpeg exited with code {:?}: {}",
-                        payload.code, stderr_buf
-                    ));
-                }
-                let elapsed = start.elapsed().as_secs_f64();
-                if payload.code != Some(0) {
-                    // Failure path: log every stderr line we got so support
-                    // reports include the exact ffmpeg error chain. Truncate
-                    // each line to 240 chars to stay sane in the ring buffer.
-                    diag(
-                        app,
-                        format!(
-                            "[export] FAILED · {summary} · exit={:?} after {elapsed:.2}s · stderr:\n{}",
-                            payload.code,
-                            stderr_buf
-                                .lines()
-                                .map(|l| format!("    {}", trunc(l, 240)))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        ),
-                    );
-                    return Err(format!(
-                        "ffmpeg exited with code {:?}: {}",
-                        payload.code, stderr_buf
-                    ));
-                }
-                // Success path: log warnings if any (ffmpeg can succeed but
-                // still emit useful notes — codec deprecations, container
-                // hints, etc.).
-                if stderr_buf.trim().is_empty() {
-                    diag(app, format!("[export] OK · {summary} · {elapsed:.2}s"));
-                } else {
-                    diag(
-                        app,
-                        format!(
-                            "[export] OK · {summary} · {elapsed:.2}s · stderr notes:\n{}",
-                            stderr_buf
-                                .lines()
-                                .take(8)
-                                .map(|l| format!("    {}", trunc(l, 240)))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        ),
-                    );
-                }
-                let _ = app.emit(
-                    event_name,
-                    ExportProgress {
-                        progress: 1.0,
-                        elapsed_secs: elapsed,
-                    },
-                );
-                break;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-/// One-liner summary of an ffmpeg sidecar invocation for diag entries.
-/// Picks out the bits a support reader cares about: output filename
-/// (basename only — never the full path, privacy), video + audio codec
-/// flags, target bitrates if set, and whether a `-filter_complex` graph
-/// was used (signals "multi-track audio mix" / "speed filter" path).
-fn summarize_ffmpeg_invocation(args: &[String]) -> String {
-    let mut parts: Vec<String> = Vec::new();
-
-    // Output path is the last arg in every export-style invocation we
-    // build. Show only the basename so the log doesn't leak the user's
-    // home directory.
-    if let Some(last) = args.last() {
-        parts.push(format!("out={}", basename(last)));
-    }
-    // Pick up -c:v / -c:a / -b:v / -b:a / -preset / -crf flags by walking
-    // pairs. Flags without a paired value are skipped (e.g. -vn).
-    let mut i = 0;
-    while i + 1 < args.len() {
-        match args[i].as_str() {
-            "-c:v" | "-c:a" | "-b:v" | "-b:a" | "-preset" | "-crf" | "-f" | "-pix_fmt" => {
-                let key = args[i].trim_start_matches('-');
-                parts.push(format!("{key}={}", args[i + 1]));
-                i += 2;
-            }
-            "-vn" => {
-                parts.push("audio-only".into());
-                i += 1;
-            }
-            "-filter_complex" => {
-                // Don't dump the whole graph (it can be long); record that
-                // a filter graph was used + its byte length so an outlier
-                // graph is at least visible.
-                parts.push(format!("filter_complex({}B)", args[i + 1].len()));
-                i += 2;
-            }
-            _ => i += 1,
-        }
-    }
-    if parts.is_empty() {
-        "ffmpeg".into()
-    } else {
-        parts.join(" ")
-    }
+    let app_emit = app.clone();
+    let event_name = event_name.to_string();
+    crate::ffmpeg::run_ffmpeg(
+        app,
+        "export",
+        args,
+        duration_secs,
+        move |progress, elapsed| {
+            let _ = app_emit.emit(
+                &event_name,
+                ExportProgress {
+                    progress,
+                    elapsed_secs: elapsed,
+                },
+            );
+        },
+    )
+    .await
 }
 
 /// Re-encode a single region from src_path to fit within target_size_mb.
@@ -435,7 +296,10 @@ pub async fn export_clip_sized(
         ),
     );
     if duration < 0.05 {
-        diag(&app, "[export] export_clip_sized REJECTED · selection too short");
+        diag(
+            &app,
+            "[export] export_clip_sized REJECTED · selection too short",
+        );
         return Err("selection too short".into());
     }
     let normalize = normalize.unwrap_or(false);
@@ -454,27 +318,42 @@ pub async fn export_clip_sized(
     let mut last_err = String::from("no encoders available");
     for enc in chain.iter() {
         let mut args: Vec<String> = vec![
-            "-y".into(), "-hide_banner".into(),
-            "-loglevel".into(), "error".into(),
-            "-progress".into(), "pipe:1".into(), "-nostats".into(),
-            "-ss".into(), format!("{:.6}", in_secs),
-            "-to".into(), format!("{:.6}", out_secs),
-            "-i".into(), src_path.clone(),
-            "-map".into(), "0:v:0?".into(),
-            "-map".into(), audio_map.clone(),
+            "-y".into(),
+            "-hide_banner".into(),
+            "-loglevel".into(),
+            "error".into(),
+            "-progress".into(),
+            "pipe:1".into(),
+            "-nostats".into(),
+            "-ss".into(),
+            format!("{:.6}", in_secs),
+            "-to".into(),
+            format!("{:.6}", out_secs),
+            "-i".into(),
+            src_path.clone(),
+            "-map".into(),
+            "0:v:0?".into(),
+            "-map".into(),
+            audio_map.clone(),
         ];
         if !vf.is_empty() {
-            args.push("-vf".into()); args.push(vf.clone());
+            args.push("-vf".into());
+            args.push(vf.clone());
         }
         if let Some(fc) = &audio_fc {
-            args.push("-filter_complex".into()); args.push(fc.clone());
+            args.push("-filter_complex".into());
+            args.push(fc.clone());
         }
         args.extend(encoder_args_sized(enc, video_kbps));
         args.extend([
-            "-c:a".into(), "aac".into(),
-            "-b:a".into(), format!("{}k", SIZED_AUDIO_BPS / 1000),
-            "-movflags".into(), "+faststart".into(),
-            "-map_chapters".into(), "-1".into(),
+            "-c:a".into(),
+            "aac".into(),
+            "-b:a".into(),
+            format!("{}k", SIZED_AUDIO_BPS / 1000),
+            "-movflags".into(),
+            "+faststart".into(),
+            "-map_chapters".into(),
+            "-1".into(),
             output_path.clone(),
         ]);
         match run_ffmpeg_with_progress(&app, args, effective_dur, "export:progress").await {
@@ -577,28 +456,44 @@ pub async fn export_concat_sized(
     let mut last_err = String::from("no encoders available");
     for enc in chain.iter() {
         let mut args: Vec<String> = vec![
-            "-y".into(), "-hide_banner".into(),
-            "-loglevel".into(), "error".into(),
-            "-progress".into(), "pipe:1".into(), "-nostats".into(),
-            "-f".into(), "concat".into(),
-            "-safe".into(), "0".into(),
-            "-i".into(), list_str.clone(),
-            "-map".into(), "0:v:0?".into(),
-            "-map".into(), audio_map.clone(),
-            "-fflags".into(), "+genpts".into(),
+            "-y".into(),
+            "-hide_banner".into(),
+            "-loglevel".into(),
+            "error".into(),
+            "-progress".into(),
+            "pipe:1".into(),
+            "-nostats".into(),
+            "-f".into(),
+            "concat".into(),
+            "-safe".into(),
+            "0".into(),
+            "-i".into(),
+            list_str.clone(),
+            "-map".into(),
+            "0:v:0?".into(),
+            "-map".into(),
+            audio_map.clone(),
+            "-fflags".into(),
+            "+genpts".into(),
         ];
         if !vf.is_empty() {
-            args.push("-vf".into()); args.push(vf.clone());
+            args.push("-vf".into());
+            args.push(vf.clone());
         }
         if let Some(fc) = &audio_fc {
-            args.push("-filter_complex".into()); args.push(fc.clone());
+            args.push("-filter_complex".into());
+            args.push(fc.clone());
         }
         args.extend(encoder_args_sized(enc, video_kbps));
         args.extend([
-            "-c:a".into(), "aac".into(),
-            "-b:a".into(), format!("{}k", SIZED_AUDIO_BPS / 1000),
-            "-movflags".into(), "+faststart".into(),
-            "-map_chapters".into(), "-1".into(),
+            "-c:a".into(),
+            "aac".into(),
+            "-b:a".into(),
+            format!("{}k", SIZED_AUDIO_BPS / 1000),
+            "-movflags".into(),
+            "+faststart".into(),
+            "-map_chapters".into(),
+            "-1".into(),
             output_path.clone(),
         ]);
         match run_ffmpeg_with_progress(&app, args, total_duration, "export:progress").await {
@@ -623,6 +518,7 @@ pub async fn export_concat_sized(
 ///   * pure stream-copy (no filters at all)
 ///   * audio-only re-encode (track mix only, video stream-copies)
 ///   * full re-encode (crop/speed + maybe audio mix)
+///
 /// Audio normalize is per-export and applied at the concat stage, never here.
 async fn cut_segment(
     app: &AppHandle,
@@ -643,59 +539,77 @@ async fn cut_segment(
     if needs_video_reencode {
         let vf = build_video_filter(region.crop, region.speed);
         if let Some(ref fc) = audio_fc {
-            diag(app, format!("export: full re-encode — vf=[{}] fc=[{}]", trunc(&vf, 80), trunc(fc, 120)));
+            diag(
+                app,
+                format!(
+                    "export: full re-encode — vf=[{}] fc=[{}]",
+                    trunc(&vf, 80),
+                    trunc(fc, 120)
+                ),
+            );
         } else {
-            diag(app, format!("export: full re-encode — vf=[{}]", trunc(&vf, 80)));
+            diag(
+                app,
+                format!("export: full re-encode — vf=[{}]", trunc(&vf, 80)),
+            );
         }
         let chain = encoder_chain(app).await;
         let mut last_err = String::from("no encoders available");
         for enc in chain.iter() {
             let mut args: Vec<String> = vec![
-                "-y".into(), "-hide_banner".into(),
-                "-loglevel".into(), "error".into(),
-                "-ss".into(), format!("{:.6}", region.in_secs),
-                "-to".into(), format!("{:.6}", region.out_secs),
-                "-i".into(), src_path.into(),
-                "-map".into(), "0:v:0?".into(),
-                "-map".into(), audio_map.clone(),
+                "-y".into(),
+                "-hide_banner".into(),
+                "-loglevel".into(),
+                "error".into(),
+                "-ss".into(),
+                format!("{:.6}", region.in_secs),
+                "-to".into(),
+                format!("{:.6}", region.out_secs),
+                "-i".into(),
+                src_path.into(),
+                "-map".into(),
+                "0:v:0?".into(),
+                "-map".into(),
+                audio_map.clone(),
             ];
             if !vf.is_empty() {
-                args.push("-vf".into()); args.push(vf.clone());
+                args.push("-vf".into());
+                args.push(vf.clone());
             }
             if let Some(fc) = &audio_fc {
-                args.push("-filter_complex".into()); args.push(fc.clone());
+                args.push("-filter_complex".into());
+                args.push(fc.clone());
             }
             args.extend(encoder_args_high_quality(enc).into_iter().map(String::from));
             args.extend([
-                "-c:a".into(), "aac".into(),
-                "-b:a".into(), "160k".into(),
-                "-map_chapters".into(), "-1".into(),
+                "-c:a".into(),
+                "aac".into(),
+                "-b:a".into(),
+                "160k".into(),
+                "-map_chapters".into(),
+                "-1".into(),
                 out_path.into(),
             ]);
             let t0 = std::time::Instant::now();
-            let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
-            let (mut rx, _child) = sidecar.args(args).spawn().map_err(|e| e.to_string())?;
-            let mut stderr_buf = String::new();
-            let mut ok = false;
-            while let Some(event) = rx.recv().await {
-                match event {
-                    CommandEvent::Stderr(b) => stderr_buf.push_str(&String::from_utf8_lossy(&b)),
-                    CommandEvent::Terminated(payload) => {
-                        if payload.code == Some(0) { ok = true; }
-                        break;
-                    }
-                    _ => {}
+            match crate::ffmpeg::run_ffmpeg(app, "cut", args, 0.0, |_, _| {}).await {
+                Ok(()) => {
+                    diag(
+                        app,
+                        format!(
+                            "export: cut OK via {} in {:.1}s",
+                            enc,
+                            t0.elapsed().as_secs_f64()
+                        ),
+                    );
+                    *WORKING_ENCODER.lock().unwrap() = Some(*enc);
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("[clippy] crop/speed cut {} failed: {}", enc, e);
+                    let _ = std::fs::remove_file(out_path);
+                    last_err = e;
                 }
             }
-            if ok {
-                diag(app, format!("ffmpeg: exit 0 via {} in {:.1}s", enc, t0.elapsed().as_secs_f64()));
-                *WORKING_ENCODER.lock().unwrap() = Some(*enc);
-                return Ok(());
-            }
-            diag(app, format!("ffmpeg: exit non-0 via {} — {}", enc, trunc(&stderr_buf, 200)));
-            eprintln!("[clippy] crop/speed cut {} failed: {}", enc, stderr_buf);
-            let _ = std::fs::remove_file(out_path);
-            last_err = stderr_buf;
         }
         return Err(last_err);
     }
@@ -704,89 +618,82 @@ async fn cut_segment(
         // Track mix changed but no crop/speed — video stream-copies, audio
         // gets the filter_complex treatment. Same speed as a normalize-only export.
         if let Some(ref fc) = audio_fc {
-            diag(app, format!("export: audio re-encode — fc=[{}]", trunc(fc, 160)));
+            diag(
+                app,
+                format!("export: audio re-encode — fc=[{}]", trunc(fc, 160)),
+            );
         }
-        let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
         let mut args: Vec<String> = vec![
-            "-y".into(), "-hide_banner".into(),
-            "-loglevel".into(), "error".into(),
-            "-ss".into(), format!("{:.6}", region.in_secs),
-            "-to".into(), format!("{:.6}", region.out_secs),
-            "-i".into(), src_path.into(),
-            "-map".into(), "0:v:0?".into(),
-            "-map".into(), audio_map.clone(),
-            "-c:v".into(), "copy".into(),
+            "-y".into(),
+            "-hide_banner".into(),
+            "-loglevel".into(),
+            "error".into(),
+            "-ss".into(),
+            format!("{:.6}", region.in_secs),
+            "-to".into(),
+            format!("{:.6}", region.out_secs),
+            "-i".into(),
+            src_path.into(),
+            "-map".into(),
+            "0:v:0?".into(),
+            "-map".into(),
+            audio_map.clone(),
+            "-c:v".into(),
+            "copy".into(),
         ];
         if let Some(fc) = &audio_fc {
-            args.push("-filter_complex".into()); args.push(fc.clone());
+            args.push("-filter_complex".into());
+            args.push(fc.clone());
         }
         args.extend([
-            "-c:a".into(), "aac".into(),
-            "-b:a".into(), "160k".into(),
-            "-avoid_negative_ts".into(), "make_zero".into(),
-            "-map_chapters".into(), "-1".into(),
+            "-c:a".into(),
+            "aac".into(),
+            "-b:a".into(),
+            "160k".into(),
+            "-avoid_negative_ts".into(),
+            "make_zero".into(),
+            "-map_chapters".into(),
+            "-1".into(),
             out_path.into(),
         ]);
         let t0 = std::time::Instant::now();
-        let (mut rx, _child) = sidecar.args(args).spawn().map_err(|e| e.to_string())?;
-        let mut stderr_buf = String::new();
-        while let Some(event) = rx.recv().await {
-            match event {
-                CommandEvent::Stderr(b) => stderr_buf.push_str(&String::from_utf8_lossy(&b)),
-                CommandEvent::Terminated(payload) => {
-                    if payload.code != Some(0) {
-                        diag(app, format!("ffmpeg: exit non-0 (audio mix) — {}", trunc(&stderr_buf, 200)));
-                        return Err(format!(
-                            "segment cut (audio mix) exited with code {:?}: {}",
-                            payload.code, stderr_buf
-                        ));
-                    }
-                    break;
-                }
-                _ => {}
-            }
-        }
-        diag(app, format!("ffmpeg: exit 0 (audio re-encode) in {:.1}s", t0.elapsed().as_secs_f64()));
+        crate::ffmpeg::run_ffmpeg(app, "cut", args, 0.0, |_, _| {}).await?;
+        diag(
+            app,
+            format!(
+                "export: cut audio re-encode OK in {:.1}s",
+                t0.elapsed().as_secs_f64()
+            ),
+        );
         return Ok(());
     }
 
     diag(app, "export: stream-copy (no crop/speed/mix change)");
 
-    let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
-    let (mut rx, _child) = sidecar
-        .args([
-            "-y",
-            "-hide_banner",
-            "-loglevel", "error",
-            "-ss", &format!("{:.6}", region.in_secs),
-            "-to", &format!("{:.6}", region.out_secs),
-            "-i", src_path,
-            "-map", "0:v:0?",
-            "-map", "0:a:0?",
-            "-c", "copy",
-            "-avoid_negative_ts", "make_zero",
-            "-map_chapters", "-1",
-            out_path,
-        ])
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let mut stderr_buf = String::new();
-    while let Some(event) = rx.recv().await {
-        match event {
-            CommandEvent::Stderr(b) => stderr_buf.push_str(&String::from_utf8_lossy(&b)),
-            CommandEvent::Terminated(payload) => {
-                if payload.code != Some(0) {
-                    return Err(format!(
-                        "segment cut exited with code {:?}: {}",
-                        payload.code, stderr_buf
-                    ));
-                }
-                break;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
+    let args: Vec<String> = vec![
+        "-y".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-ss".into(),
+        format!("{:.6}", region.in_secs),
+        "-to".into(),
+        format!("{:.6}", region.out_secs),
+        "-i".into(),
+        src_path.into(),
+        "-map".into(),
+        "0:v:0?".into(),
+        "-map".into(),
+        "0:a:0?".into(),
+        "-c".into(),
+        "copy".into(),
+        "-avoid_negative_ts".into(),
+        "make_zero".into(),
+        "-map_chapters".into(),
+        "-1".into(),
+        out_path.into(),
+    ];
+    crate::ffmpeg::run_ffmpeg(app, "cut", args, 0.0, |_, _| {}).await
 }
 
 /// Concatenate N regions from the same source into a single output file.
@@ -826,16 +733,21 @@ pub async fn export_concat(
     let normalize = normalize.unwrap_or(false);
     let mix = track_mix.unwrap_or_default();
     let total_tracks = total_audio_tracks.unwrap_or(1) as usize;
-    let mix_active = !mix.is_empty()
-        && !(mix.len() == total_tracks && mix.iter().all(|t| (t.volume - 1.0).abs() < 1e-6));
+    let mix_active = !(mix.is_empty()
+        || mix.len() == total_tracks && mix.iter().all(|t| (t.volume - 1.0).abs() < 1e-6));
     // Sum of post-speed durations — what the final output will actually be.
     let total_duration: f64 = regions.iter().map(|r| r.effective_duration()).sum();
     if total_duration < 0.05 {
-        diag(&app, "[export] export_concat REJECTED · total duration too short");
+        diag(
+            &app,
+            "[export] export_concat REJECTED · total duration too short",
+        );
         return Err("total duration is too short to export".into());
     }
     // Stage 1 dominates wall-clock when any region needs re-encode (crop/speed).
-    let any_reencode = regions.iter().any(|r| forces_video_reencode(r.crop, r.speed));
+    let any_reencode = regions
+        .iter()
+        .any(|r| forces_video_reencode(r.crop, r.speed));
 
     let temp_dir = std::env::temp_dir().join("clippy");
     std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
@@ -862,14 +774,27 @@ pub async fn export_concat(
     for (idx, region) in regions.iter().enumerate() {
         let seg_path = temp_dir.join(format!("seg-{}-{}.mp4", stamp, idx));
         let seg_str = seg_path.to_string_lossy().to_string();
-        if let Err(e) = cut_segment(&app, &src_path, region.clone(), &seg_str, &mix, total_tracks).await {
+        if let Err(e) = cut_segment(
+            &app,
+            &src_path,
+            region.clone(),
+            &seg_str,
+            &mix,
+            total_tracks,
+        )
+        .await
+        {
             cleanup(&temp_segments, None);
             return Err(format!("region {} cut failed: {}", idx + 1, e));
         }
         temp_segments.push(seg_path);
         produced_secs += region.effective_duration();
         // With re-encodes (video filter or audio mix), stage 1 dominates.
-        let stage1_share = if any_reencode || mix_active { 0.85 } else { 0.4 };
+        let stage1_share = if any_reencode || mix_active {
+            0.85
+        } else {
+            0.4
+        };
         let progress = (produced_secs / total_duration * stage1_share).clamp(0.0, stage1_share);
         let _ = app.emit(
             "export:progress",
@@ -894,110 +819,80 @@ pub async fn export_concat(
     }
     let list_str = list_file.to_string_lossy().to_string();
 
-    let sidecar = match app.shell().sidecar("ffmpeg") {
-        Ok(s) => s,
-        Err(e) => {
-            cleanup(&temp_segments, Some(&list_file));
-            return Err(e.to_string());
-        }
-    };
     // Normalize forces an audio re-encode at concat time (filter incompatible
     // with -c copy on the audio stream). Video can still stream-copy.
     let mut concat_args: Vec<String> = vec![
-        "-y".into(), "-hide_banner".into(),
-        "-loglevel".into(), "error".into(),
-        "-progress".into(), "pipe:1".into(), "-nostats".into(),
-        "-f".into(), "concat".into(),
-        "-safe".into(), "0".into(),
-        "-i".into(), list_str.clone(),
-        "-map".into(), "0:v:0?".into(),
-        "-map".into(), "0:a:0?".into(),
+        "-y".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-progress".into(),
+        "pipe:1".into(),
+        "-nostats".into(),
+        "-f".into(),
+        "concat".into(),
+        "-safe".into(),
+        "0".into(),
+        "-i".into(),
+        list_str.clone(),
+        "-map".into(),
+        "0:v:0?".into(),
+        "-map".into(),
+        "0:a:0?".into(),
     ];
     if normalize {
         concat_args.extend([
-            "-c:v".into(), "copy".into(),
-            "-af".into(), LOUDNORM_FILTER.into(),
-            "-c:a".into(), "aac".into(),
-            "-b:a".into(), "160k".into(),
+            "-c:v".into(),
+            "copy".into(),
+            "-af".into(),
+            LOUDNORM_FILTER.into(),
+            "-c:a".into(),
+            "aac".into(),
+            "-b:a".into(),
+            "160k".into(),
         ]);
     } else {
         concat_args.extend(["-c".into(), "copy".into()]);
     }
     concat_args.extend([
-        "-movflags".into(), "+faststart".into(),
-        "-map_chapters".into(), "-1".into(),
+        "-movflags".into(),
+        "+faststart".into(),
+        "-map_chapters".into(),
+        "-1".into(),
         output_path.clone(),
     ]);
-    let (mut rx, _child) = match sidecar.args(concat_args).spawn() {
-        Ok(p) => p,
-        Err(e) => {
-            cleanup(&temp_segments, Some(&list_file));
-            return Err(e.to_string());
-        }
+    let stage1_share = if any_reencode || mix_active {
+        0.85
+    } else {
+        0.4
     };
-
-    let mut last_emit = std::time::Instant::now();
-    let total_us = total_duration * 1_000_000.0;
-    let mut latest_us: f64 = 0.0;
-    let mut stderr_buf = String::new();
-
-    while let Some(event) = rx.recv().await {
-        match event {
-            CommandEvent::Stdout(line_bytes) => {
-                let line = String::from_utf8_lossy(&line_bytes);
-                for part in line.split('\n') {
-                    if let Some(rest) = part.trim().strip_prefix("out_time_us=") {
-                        if let Ok(us) = rest.parse::<f64>() {
-                            if us > latest_us {
-                                latest_us = us;
-                            }
-                        }
-                    }
-                }
-                if last_emit.elapsed().as_millis() >= 150 {
-                    let stage2 = if total_us > 0.0 {
-                        (latest_us / total_us).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    let stage1_share = if any_reencode || mix_active { 0.85 } else { 0.4 };
-                    let progress = (stage1_share + stage2 * (1.0 - stage1_share)).min(1.0);
-                    let _ = app.emit(
-                        "export:progress",
-                        ExportProgress {
-                            progress,
-                            elapsed_secs: start.elapsed().as_secs_f64(),
-                        },
-                    );
-                    last_emit = std::time::Instant::now();
-                }
-            }
-            CommandEvent::Stderr(line_bytes) => {
-                stderr_buf.push_str(&String::from_utf8_lossy(&line_bytes));
-            }
-            CommandEvent::Terminated(payload) => {
-                cleanup(&temp_segments, Some(&list_file));
-                if payload.code != Some(0) {
-                    diag(&app, format!("ffmpeg: concat failed — {}", trunc(&stderr_buf, 200)));
-                    return Err(format!(
-                        "ffmpeg concat exited with code {:?}: {}",
-                        payload.code, stderr_buf
-                    ));
-                }
-                diag(&app, format!("export_concat: done in {:.1}s", start.elapsed().as_secs_f64()));
-                let _ = app.emit(
-                    "export:progress",
-                    ExportProgress {
-                        progress: 1.0,
-                        elapsed_secs: start.elapsed().as_secs_f64(),
-                    },
-                );
-                break;
-            }
-            _ => {}
-        }
-    }
-
+    let app_emit = app.clone();
+    let res = crate::ffmpeg::run_ffmpeg(
+        &app,
+        "concat",
+        concat_args,
+        total_duration,
+        move |frac, elapsed| {
+            let progress = (stage1_share + frac * (1.0 - stage1_share)).min(1.0);
+            let _ = app_emit.emit(
+                "export:progress",
+                ExportProgress {
+                    progress,
+                    elapsed_secs: elapsed,
+                },
+            );
+        },
+    )
+    .await;
+    cleanup(&temp_segments, Some(&list_file));
+    res?;
+    diag(
+        &app,
+        format!(
+            "export_concat: done in {:.1}s",
+            start.elapsed().as_secs_f64()
+        ),
+    );
     Ok(())
 }
 
@@ -1053,27 +948,42 @@ pub async fn export_clip(
         let mut last_err = String::from("no encoders available");
         for enc in chain.iter() {
             let mut args: Vec<String> = vec![
-                "-y".into(), "-hide_banner".into(),
-                "-loglevel".into(), "error".into(),
-                "-progress".into(), "pipe:1".into(), "-nostats".into(),
-                "-ss".into(), format!("{:.6}", in_secs),
-                "-to".into(), format!("{:.6}", out_secs),
-                "-i".into(), src_path.clone(),
-                "-map".into(), "0:v:0?".into(),
-                "-map".into(), audio_map.clone(),
+                "-y".into(),
+                "-hide_banner".into(),
+                "-loglevel".into(),
+                "error".into(),
+                "-progress".into(),
+                "pipe:1".into(),
+                "-nostats".into(),
+                "-ss".into(),
+                format!("{:.6}", in_secs),
+                "-to".into(),
+                format!("{:.6}", out_secs),
+                "-i".into(),
+                src_path.clone(),
+                "-map".into(),
+                "0:v:0?".into(),
+                "-map".into(),
+                audio_map.clone(),
             ];
             if !vf.is_empty() {
-                args.push("-vf".into()); args.push(vf.clone());
+                args.push("-vf".into());
+                args.push(vf.clone());
             }
             if let Some(fc) = &audio_fc {
-                args.push("-filter_complex".into()); args.push(fc.clone());
+                args.push("-filter_complex".into());
+                args.push(fc.clone());
             }
             args.extend(encoder_args_high_quality(enc).into_iter().map(String::from));
             args.extend([
-                "-c:a".into(), "aac".into(),
-                "-b:a".into(), "160k".into(),
-                "-movflags".into(), "+faststart".into(),
-                "-map_chapters".into(), "-1".into(),
+                "-c:a".into(),
+                "aac".into(),
+                "-b:a".into(),
+                "160k".into(),
+                "-movflags".into(),
+                "+faststart".into(),
+                "-map_chapters".into(),
+                "-1".into(),
                 output_path.clone(),
             ]);
             match run_ffmpeg_with_progress(&app, args, effective_dur, "export:progress").await {
@@ -1095,109 +1005,71 @@ pub async fn export_clip(
         // Video stream-copy, audio runs through filter_complex (track mix +
         // optional normalize). Cheap — only the audio track is touched.
         let mut args: Vec<String> = vec![
-            "-y".into(), "-hide_banner".into(),
-            "-loglevel".into(), "error".into(),
-            "-progress".into(), "pipe:1".into(), "-nostats".into(),
-            "-ss".into(), format!("{:.6}", in_secs),
-            "-to".into(), format!("{:.6}", out_secs),
-            "-i".into(), src_path.clone(),
-            "-map".into(), "0:v:0?".into(),
-            "-map".into(), audio_map.clone(),
-            "-c:v".into(), "copy".into(),
+            "-y".into(),
+            "-hide_banner".into(),
+            "-loglevel".into(),
+            "error".into(),
+            "-progress".into(),
+            "pipe:1".into(),
+            "-nostats".into(),
+            "-ss".into(),
+            format!("{:.6}", in_secs),
+            "-to".into(),
+            format!("{:.6}", out_secs),
+            "-i".into(),
+            src_path.clone(),
+            "-map".into(),
+            "0:v:0?".into(),
+            "-map".into(),
+            audio_map.clone(),
+            "-c:v".into(),
+            "copy".into(),
         ];
         if let Some(fc) = &audio_fc {
-            args.push("-filter_complex".into()); args.push(fc.clone());
+            args.push("-filter_complex".into());
+            args.push(fc.clone());
         }
         args.extend([
-            "-c:a".into(), "aac".into(),
-            "-b:a".into(), "160k".into(),
-            "-avoid_negative_ts".into(), "make_zero".into(),
-            "-movflags".into(), "+faststart".into(),
-            "-map_chapters".into(), "-1".into(),
+            "-c:a".into(),
+            "aac".into(),
+            "-b:a".into(),
+            "160k".into(),
+            "-avoid_negative_ts".into(),
+            "make_zero".into(),
+            "-movflags".into(),
+            "+faststart".into(),
+            "-map_chapters".into(),
+            "-1".into(),
             output_path.clone(),
         ]);
         return run_ffmpeg_with_progress(&app, args, duration, "export:progress").await;
     }
 
-    let sidecar = app.shell().sidecar("ffmpeg").map_err(|e| e.to_string())?;
-    let (mut rx, _child) = sidecar
-        .args([
-            "-y",
-            "-hide_banner",
-            "-loglevel", "error",
-            "-progress", "pipe:1",
-            "-nostats",
-            "-ss", &format!("{:.6}", in_secs),
-            "-to", &format!("{:.6}", out_secs),
-            "-i", &src_path,
-            "-c", "copy",
-            "-avoid_negative_ts", "make_zero",
-            "-map", "0",
-            "-map_chapters", "-1",
-            &output_path,
-        ])
-        .spawn()
-        .map_err(|e| e.to_string())?;
-
-    let start = std::time::Instant::now();
-    let mut last_emit = std::time::Instant::now();
-    let total_us = duration * 1_000_000.0;
-    let mut latest_us: f64 = 0.0;
-    let mut stderr_buf = String::new();
-
-    while let Some(event) = rx.recv().await {
-        match event {
-            CommandEvent::Stdout(line_bytes) => {
-                let line = String::from_utf8_lossy(&line_bytes);
-                for part in line.split('\n') {
-                    if let Some(rest) = part.trim().strip_prefix("out_time_us=") {
-                        if let Ok(us) = rest.parse::<f64>() {
-                            // Encoder pipelining can report out-of-order timestamps;
-                            // clamp to monotonic so the displayed % doesn't bounce.
-                            if us > latest_us { latest_us = us; }
-                        }
-                    }
-                }
-                if last_emit.elapsed().as_millis() >= 150 {
-                    let progress = if total_us > 0.0 {
-                        (latest_us / total_us).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    let _ = app.emit(
-                        "export:progress",
-                        ExportProgress {
-                            progress,
-                            elapsed_secs: start.elapsed().as_secs_f64(),
-                        },
-                    );
-                    last_emit = std::time::Instant::now();
-                }
-            }
-            CommandEvent::Stderr(line_bytes) => {
-                stderr_buf.push_str(&String::from_utf8_lossy(&line_bytes));
-            }
-            CommandEvent::Terminated(payload) => {
-                if payload.code != Some(0) {
-                    return Err(format!(
-                        "ffmpeg exited with code {:?}: {}",
-                        payload.code, stderr_buf
-                    ));
-                }
-                let _ = app.emit(
-                    "export:progress",
-                    ExportProgress {
-                        progress: 1.0,
-                        elapsed_secs: start.elapsed().as_secs_f64(),
-                    },
-                );
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    Ok(())
+    let args: Vec<String> = vec![
+        "-y".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-progress".into(),
+        "pipe:1".into(),
+        "-nostats".into(),
+        "-ss".into(),
+        format!("{:.6}", in_secs),
+        "-to".into(),
+        format!("{:.6}", out_secs),
+        "-i".into(),
+        src_path,
+        "-c".into(),
+        "copy".into(),
+        "-avoid_negative_ts".into(),
+        "make_zero".into(),
+        "-map".into(),
+        "0".into(),
+        "-map_chapters".into(),
+        "-1".into(),
+        output_path,
+    ];
+    run_ffmpeg_with_progress(&app, args, duration, "export:progress").await
 }
 
 /// MP3 audio bitrate used for all audio-only exports. 192k is the conventional
@@ -1237,7 +1109,10 @@ pub async fn export_clip_audio(
         ),
     );
     if duration < 0.05 {
-        diag(&app, "[export] export_clip_audio REJECTED · selection too short");
+        diag(
+            &app,
+            "[export] export_clip_audio REJECTED · selection too short",
+        );
         return Err("selection too short".into());
     }
     let normalize = normalize.unwrap_or(false);
@@ -1248,22 +1123,34 @@ pub async fn export_clip_audio(
     let (audio_fc, audio_map) = build_audio_filter_complex(&mix, total_tracks, &post_filters);
 
     let mut args: Vec<String> = vec![
-        "-y".into(), "-hide_banner".into(),
-        "-loglevel".into(), "error".into(),
-        "-progress".into(), "pipe:1".into(), "-nostats".into(),
-        "-ss".into(), format!("{:.6}", in_secs),
-        "-to".into(), format!("{:.6}", out_secs),
-        "-i".into(), src_path,
+        "-y".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-progress".into(),
+        "pipe:1".into(),
+        "-nostats".into(),
+        "-ss".into(),
+        format!("{:.6}", in_secs),
+        "-to".into(),
+        format!("{:.6}", out_secs),
+        "-i".into(),
+        src_path,
         "-vn".into(),
-        "-map".into(), audio_map,
+        "-map".into(),
+        audio_map,
     ];
     if let Some(fc) = audio_fc {
-        args.push("-filter_complex".into()); args.push(fc);
+        args.push("-filter_complex".into());
+        args.push(fc);
     }
     args.extend([
-        "-c:a".into(), "libmp3lame".into(),
-        "-b:a".into(), MP3_BITRATE.into(),
-        "-map_chapters".into(), "-1".into(),
+        "-c:a".into(),
+        "libmp3lame".into(),
+        "-b:a".into(),
+        MP3_BITRATE.into(),
+        "-map_chapters".into(),
+        "-1".into(),
         output_path,
     ]);
     run_ffmpeg_with_progress(&app, args, effective_dur, "export:progress").await
@@ -1320,7 +1207,10 @@ pub async fn export_concat_audio(
     }
     let total_duration: f64 = regions.iter().map(|r| r.effective_duration()).sum();
     if total_duration < 0.05 {
-        diag(&app, "[export] export_concat_audio REJECTED · total duration too short");
+        diag(
+            &app,
+            "[export] export_concat_audio REJECTED · total duration too short",
+        );
         return Err("total duration too short".into());
     }
     let post_filters = build_audio_post_mix_filters(first.speed, normalize);
@@ -1345,22 +1235,34 @@ pub async fn export_concat_audio(
     let list_str = list_file.to_string_lossy().to_string();
 
     let mut args: Vec<String> = vec![
-        "-y".into(), "-hide_banner".into(),
-        "-loglevel".into(), "error".into(),
-        "-progress".into(), "pipe:1".into(), "-nostats".into(),
-        "-f".into(), "concat".into(),
-        "-safe".into(), "0".into(),
-        "-i".into(), list_str,
+        "-y".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-progress".into(),
+        "pipe:1".into(),
+        "-nostats".into(),
+        "-f".into(),
+        "concat".into(),
+        "-safe".into(),
+        "0".into(),
+        "-i".into(),
+        list_str,
         "-vn".into(),
-        "-map".into(), audio_map,
+        "-map".into(),
+        audio_map,
     ];
     if let Some(fc) = audio_fc {
-        args.push("-filter_complex".into()); args.push(fc);
+        args.push("-filter_complex".into());
+        args.push(fc);
     }
     args.extend([
-        "-c:a".into(), "libmp3lame".into(),
-        "-b:a".into(), MP3_BITRATE.into(),
-        "-map_chapters".into(), "-1".into(),
+        "-c:a".into(),
+        "libmp3lame".into(),
+        "-b:a".into(),
+        MP3_BITRATE.into(),
+        "-map_chapters".into(),
+        "-1".into(),
         output_path,
     ]);
     let result = run_ffmpeg_with_progress(&app, args, total_duration, "export:progress").await;
@@ -1390,10 +1292,7 @@ fn gif_filter_chain(crop: Option<Crop>, speed: Option<f64>, target_width: u32) -
         }
     }
     parts.push(format!("fps={}", GIF_FPS));
-    parts.push(format!(
-        "scale='min({},iw)':-2:flags=lanczos",
-        target_width
-    ));
+    parts.push(format!("scale='min({},iw)':-2:flags=lanczos", target_width));
     let pre = parts.join(",");
     format!("{},split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5", pre)
 }
@@ -1418,15 +1317,24 @@ pub async fn export_clip_gif(
     let effective_dur = duration / speed.unwrap_or(1.0).max(0.0001);
     let filter = gif_filter_chain(crop, speed, target_width.unwrap_or(GIF_DEFAULT_WIDTH));
     let args: Vec<String> = vec![
-        "-y".into(), "-hide_banner".into(),
-        "-loglevel".into(), "error".into(),
-        "-progress".into(), "pipe:1".into(), "-nostats".into(),
-        "-ss".into(), format!("{:.6}", in_secs),
-        "-to".into(), format!("{:.6}", out_secs),
-        "-i".into(), src_path,
+        "-y".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-progress".into(),
+        "pipe:1".into(),
+        "-nostats".into(),
+        "-ss".into(),
+        format!("{:.6}", in_secs),
+        "-to".into(),
+        format!("{:.6}", out_secs),
+        "-i".into(),
+        src_path,
         "-an".into(),
-        "-filter_complex".into(), filter,
-        "-loop".into(), "0".into(),
+        "-filter_complex".into(),
+        filter,
+        "-loop".into(),
+        "0".into(),
         output_path,
     ];
     run_ffmpeg_with_progress(&app, args, effective_dur, "export:progress").await
@@ -1467,16 +1375,21 @@ pub async fn export_concat_gif(
         let seg_str = seg_path.to_string_lossy().to_string();
         // GIF drops audio in stage 2, so the mix is irrelevant here.
         if let Err(e) = cut_segment(&app, &src_path, region.clone(), &seg_str, &[], 0).await {
-            for s in &temp_segments { let _ = std::fs::remove_file(s); }
+            for s in &temp_segments {
+                let _ = std::fs::remove_file(s);
+            }
             return Err(format!("region {} cut failed: {}", idx + 1, e));
         }
         temp_segments.push(seg_path);
         produced_secs += region.effective_duration();
         let progress = (produced_secs / total_duration * 0.7).clamp(0.0, 0.7);
-        let _ = app.emit("export:progress", ExportProgress {
-            progress,
-            elapsed_secs: start.elapsed().as_secs_f64(),
-        });
+        let _ = app.emit(
+            "export:progress",
+            ExportProgress {
+                progress,
+                elapsed_secs: start.elapsed().as_secs_f64(),
+            },
+        );
     }
 
     // Stage 2: build a concat list, run through palette pipeline.
@@ -1487,7 +1400,9 @@ pub async fn export_concat_gif(
         content.push_str(&format!("file '{}'\n", escaped));
     }
     if let Err(e) = std::fs::write(&list_file, &content) {
-        for s in &temp_segments { let _ = std::fs::remove_file(s); }
+        for s in &temp_segments {
+            let _ = std::fs::remove_file(s);
+        }
         return Err(e.to_string());
     }
     let list_str = list_file.to_string_lossy().to_string();
@@ -1499,20 +1414,31 @@ pub async fn export_concat_gif(
         GIF_FPS, target
     );
     let args: Vec<String> = vec![
-        "-y".into(), "-hide_banner".into(),
-        "-loglevel".into(), "error".into(),
-        "-progress".into(), "pipe:1".into(), "-nostats".into(),
-        "-f".into(), "concat".into(),
-        "-safe".into(), "0".into(),
-        "-i".into(), list_str,
+        "-y".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-progress".into(),
+        "pipe:1".into(),
+        "-nostats".into(),
+        "-f".into(),
+        "concat".into(),
+        "-safe".into(),
+        "0".into(),
+        "-i".into(),
+        list_str,
         "-an".into(),
-        "-filter_complex".into(), filter,
-        "-loop".into(), "0".into(),
+        "-filter_complex".into(),
+        filter,
+        "-loop".into(),
+        "0".into(),
         output_path,
     ];
     let result = run_ffmpeg_with_progress(&app, args, total_duration, "export:progress").await;
     let _ = std::fs::remove_file(&list_file);
-    for s in &temp_segments { let _ = std::fs::remove_file(s); }
+    for s in &temp_segments {
+        let _ = std::fs::remove_file(s);
+    }
     result
 }
 
@@ -1536,7 +1462,10 @@ mod tests {
     fn fc_single_source_default_mix_takes_fast_path() {
         // Default mix, single source, no post-filters → direct map, no graph.
         let (fc, map) = build_audio_filter_complex(&[], 1, "");
-        assert!(fc.is_none(), "single-track default mix should not build a graph");
+        assert!(
+            fc.is_none(),
+            "single-track default mix should not build a graph"
+        );
         assert_eq!(map, "0:a:0?");
     }
 
@@ -1571,8 +1500,14 @@ mod tests {
         let mix = vec![gain(0, 1.0)];
         let (fc, map) = build_audio_filter_complex(&mix, 1, ",loudnorm");
         let fc = fc.expect("post-filters force a graph");
-        assert!(fc.contains("[0:a:0]"), "graph must reference the active stream: {fc}");
-        assert!(fc.contains("loudnorm"), "graph must include the post-filter: {fc}");
+        assert!(
+            fc.contains("[0:a:0]"),
+            "graph must reference the active stream: {fc}"
+        );
+        assert!(
+            fc.contains("loudnorm"),
+            "graph must include the post-filter: {fc}"
+        );
         assert_eq!(map, "[aout]");
     }
 
@@ -1602,7 +1537,10 @@ mod tests {
         let (fc, map) = build_audio_filter_complex(&mix, 3, "");
         let fc = fc.expect("multi-track mix requires a graph");
         // track 2 was muted → only tracks 0 + 1 should be in the amix.
-        assert!(fc.contains("amix=inputs=2"), "expected 2-input amix, graph: {fc}");
+        assert!(
+            fc.contains("amix=inputs=2"),
+            "expected 2-input amix, graph: {fc}"
+        );
         assert_eq!(map, "[aout]");
     }
 
@@ -1618,7 +1556,11 @@ mod tests {
             (vec![gain(0, 0.5)], 1, ""),
             (vec![gain(0, 0.0)], 1, ""),
             (vec![gain(0, 1.0), gain(1, 1.0)], 2, ""),
-            (vec![gain(0, 1.0), gain(1, 0.5), gain(2, 0.0)], 3, ",atempo=2.0"),
+            (
+                vec![gain(0, 1.0), gain(1, 0.5), gain(2, 0.0)],
+                3,
+                ",atempo=2.0",
+            ),
         ];
         for (mix, total, post) in cases {
             let (fc, _map) = build_audio_filter_complex(&mix, total, post);

@@ -1,0 +1,82 @@
+# CI for Clippy (review finding G1). Two jobs: frontend (fast, ubuntu) and
+# backend (windows — the app is windows-rs/WGC/MF native, so clippy+test must
+# run on a Windows runner). The repo baseline is clippy-clean under
+# `-D warnings` and `cargo fmt --check`, so both gates below are strict.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (type-check · test · build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clippy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Enable corepack (pnpm pinned in package.json)
+        run: corepack enable
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+      - name: Type-check (strict)
+        run: pnpm exec tsc --noEmit
+      # Enable once an eslint config lands (review finding G2):
+      # - name: Lint
+      #   run: pnpm exec eslint .
+      - name: Unit tests (vitest)
+        run: pnpm test
+      - name: Build (tsc + vite)
+        run: pnpm build
+
+  backend:
+    name: Backend (fmt · clippy · test · audit)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: clippy/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clippy/src-tauri
+      # FFmpeg/ffprobe are LGPL and intentionally NOT committed (see README).
+      # tauri-build's context-gen + the externalBin config expect them present,
+      # so fetch + rename to the target-triple names the dev layout uses.
+      - name: Fetch ffmpeg sidecars
+        shell: pwsh
+        run: |
+          Invoke-WebRequest 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_extracted
+          $bin = (Get-ChildItem ffmpeg_extracted -Recurse -Filter ffmpeg.exe | Select-Object -First 1).DirectoryName
+          New-Item -ItemType Directory -Force -Path binaries | Out-Null
+          Copy-Item "$bin\ffmpeg.exe"  binaries\ffmpeg-x86_64-pc-windows-msvc.exe
+          Copy-Item "$bin\ffprobe.exe" binaries\ffprobe-x86_64-pc-windows-msvc.exe
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy (all features, deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --all-features
+      - name: Audit (RustSec advisories)
+        shell: pwsh
+        run: |
+          cargo install cargo-audit --locked
+          # Plain `cargo audit` exits 0 on the unmaintained-only warnings and
+          # non-zero only on real vulnerabilities. Do NOT add --deny warnings.
+          cargo audit

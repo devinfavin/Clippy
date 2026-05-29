@@ -59,8 +59,12 @@ fn saved_replays_stats(dir: &Path) -> (u64, u64) {
         return (0, 0);
     };
     for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue; };
-        if !meta.is_file() { continue; }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
         if is_video_file(&entry.file_name().to_string_lossy()) {
             bytes = bytes.saturating_add(meta.len());
             count += 1;
@@ -95,15 +99,26 @@ pub struct SavedReplay {
 /// a 4-row preview). Returns an empty list on any I/O error so the Recent
 /// view degrades to Hero rather than failing the load path.
 #[tauri::command]
-pub fn storage_list_replays(app: AppHandle, limit: Option<u32>) -> Result<Vec<SavedReplay>, String> {
+pub fn storage_list_replays(
+    app: AppHandle,
+    limit: Option<u32>,
+) -> Result<Vec<SavedReplay>, String> {
     let save_dir = crate::replay::load_save_dir(&app);
-    let Ok(entries) = std::fs::read_dir(&save_dir) else { return Ok(Vec::new()); };
+    let Ok(entries) = std::fs::read_dir(&save_dir) else {
+        return Ok(Vec::new());
+    };
     let mut out: Vec<SavedReplay> = Vec::new();
     for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue; };
-        if !meta.is_file() { continue; }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !is_video_file(&name) { continue; }
+        if !is_video_file(&name) {
+            continue;
+        }
         let modified_secs = meta
             .modified()
             .ok()
@@ -117,7 +132,7 @@ pub fn storage_list_replays(app: AppHandle, limit: Option<u32>) -> Result<Vec<Sa
             modified_secs,
         });
     }
-    out.sort_by(|a, b| b.modified_secs.cmp(&a.modified_secs));
+    out.sort_by_key(|r| std::cmp::Reverse(r.modified_secs));
     if let Some(n) = limit {
         out.truncate(n as usize);
     }
@@ -163,8 +178,12 @@ fn opened_index_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn read_opened_index(path: &Path) -> HashSet<String> {
-    let Ok(text) = std::fs::read_to_string(path) else { return HashSet::new(); };
-    let Ok(v) = serde_json::from_str::<Vec<String>>(&text) else { return HashSet::new(); };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashSet::new();
+    };
+    let Ok(v) = serde_json::from_str::<Vec<String>>(&text) else {
+        return HashSet::new();
+    };
     v.into_iter().collect()
 }
 
@@ -240,15 +259,28 @@ pub fn storage_prune(
     // stat is silently skipped — the user can re-run after fixing perms.
     let mut files: Vec<(PathBuf, u64, SystemTime)> = Vec::new();
     let Ok(entries) = std::fs::read_dir(&save_dir) else {
-        return Ok(StoragePruneResult { dry_run, ..Default::default() });
+        return Ok(StoragePruneResult {
+            dry_run,
+            ..Default::default()
+        });
     };
     for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue; };
-        if !meta.is_file() { continue; }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
         let name = entry.file_name();
-        if !is_video_file(&name.to_string_lossy()) { continue; }
+        if !is_video_file(&name.to_string_lossy()) {
+            continue;
+        }
         let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        if now.duration_since(mtime).map(|d| d < Duration::from_secs(30)).unwrap_or(false) {
+        if now
+            .duration_since(mtime)
+            .map(|d| d < Duration::from_secs(30))
+            .unwrap_or(false)
+        {
             continue;
         }
         files.push((entry.path(), meta.len(), mtime));
@@ -285,7 +317,9 @@ pub fn storage_prune(
         files.sort_by_key(|(_, _, mtime)| *mtime);
         let mut current_total: u64 = files.iter().map(|(_, sz, _)| *sz).sum();
         for (p, sz, _) in &files {
-            if current_total <= cap { break; }
+            if current_total <= cap {
+                break;
+            }
             victims.push((p.clone(), *sz));
             current_total = current_total.saturating_sub(*sz);
         }
@@ -323,10 +357,16 @@ pub fn storage_prune(
 pub(crate) fn prune_old_cache(dir: PathBuf, days: u64) {
     let cutoff = std::time::SystemTime::now()
         .checked_sub(std::time::Duration::from_secs(days * 24 * 60 * 60));
-    let Some(cutoff) = cutoff else { return; };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return; };
+    let Some(cutoff) = cutoff else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
     for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue; };
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
         if !meta.is_file() {
             continue;
         }

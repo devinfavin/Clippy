@@ -10,9 +10,9 @@ pub mod windows_impl {
         core::Result,
         Win32::Graphics::{
             Direct3D11::{
-                D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
-                D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext,
-                ID3D11Texture2D,
+                ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
+                D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEXTURE2D_DESC,
+                D3D11_USAGE_STAGING,
             },
             Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
         },
@@ -37,7 +37,10 @@ pub mod windows_impl {
                     MipLevels: 1,
                     ArraySize: 1,
                     Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
                     Usage: D3D11_USAGE_STAGING,
                     BindFlags: 0,
                     CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
@@ -76,7 +79,13 @@ pub mod windows_impl {
     ///
     /// `dst_w`/`dst_h` must be 16-aligned (H.264 macroblock requirement).
     /// Source pixels are copied into the top-left; any padding area is black.
-    pub fn bgra_to_nv12(bgra: &[u8], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<u8> {
+    pub fn bgra_to_nv12(
+        bgra: &[u8],
+        src_w: usize,
+        src_h: usize,
+        dst_w: usize,
+        dst_h: usize,
+    ) -> Vec<u8> {
         let y_size = dst_w * dst_h;
         let mut nv12 = vec![0u8; y_size + y_size / 2];
 
@@ -86,8 +95,7 @@ pub mod windows_impl {
                 let b = bgra[i] as f32;
                 let g = bgra[i + 1] as f32;
                 let r = bgra[i + 2] as f32;
-                nv12[y * dst_w + x] =
-                    (0.299 * r + 0.587 * g + 0.114 * b).clamp(0.0, 255.0) as u8;
+                nv12[y * dst_w + x] = (0.299 * r + 0.587 * g + 0.114 * b).clamp(0.0, 255.0) as u8;
             }
         }
 
@@ -99,8 +107,7 @@ pub mod windows_impl {
                 let g = bgra[i + 1] as f32;
                 let r = bgra[i + 2] as f32;
                 let uv_idx = uv_base + (y / 2) * dst_w + x;
-                nv12[uv_idx] =
-                    (-0.169 * r - 0.331 * g + 0.500 * b + 128.0).clamp(0.0, 255.0) as u8;
+                nv12[uv_idx] = (-0.169 * r - 0.331 * g + 0.500 * b + 128.0).clamp(0.0, 255.0) as u8;
                 nv12[uv_idx + 1] =
                     (0.500 * r - 0.419 * g - 0.081 * b + 128.0).clamp(0.0, 255.0) as u8;
             }
@@ -175,7 +182,7 @@ pub mod windows_impl {
             let bgra = solid(255, 255, 255, 8, 8);
             let nv12 = bgra_to_nv12(&bgra, 8, 8, 16, 16);
             // Row 0, col 12 (outside src_w=8): Y must be zero (not touched).
-            assert_eq!(nv12[0 * 16 + 12], 0);
+            assert_eq!(nv12[12], 0);
             // Row 12, col 4 (outside src_h=8): Y must be zero.
             assert_eq!(nv12[12 * 16 + 4], 0);
             // Inside source (row 4, col 4): white → Y=255.
