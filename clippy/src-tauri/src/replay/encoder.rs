@@ -6,7 +6,7 @@
 #[cfg(windows)]
 pub mod windows_impl {
     use windows::{
-        core::{Interface, Result},
+        core::{Interface, Result, GUID, HRESULT},
         Win32::{
             Foundation::BOOL,
             Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D},
@@ -24,6 +24,109 @@ pub mod windows_impl {
             },
         },
     };
+
+    // ----- ICodecAPI (hand-rolled) -----
+    //
+    // `windows-rs 0.58`'s Media-Audio / MediaFoundation feature set doesn't
+    // expose `ICodecAPI` or the rate-control codec API GUIDs. Pulling in
+    // `Win32_Media_DirectShow` to get them adds noticeable compile time and
+    // disk size for a single interface, so we hand-roll the COM vtable call
+    // here the same way `process_loopback.rs` does for
+    // `IActivateAudioInterfaceCompletionHandler`.
+    //
+    // The plumbing matters because setting only `MF_MT_AVG_BITRATE` on the
+    // output type — which is what the encoder did before this — leaves the
+    // AMD AMF MFT in its default quality-targeted VBR mode. Observed effect:
+    // a 30 Mbps target produced ~55 Mbps in practice, nearly doubling buffer
+    // RAM and saved-clip size. Setting CBR + mean bitrate via ICodecAPI makes
+    // the encoder honor the configured rate. The GOP setter (AVEncMPVGOPSize)
+    // is the same plumbing gap — without it, the encoder picks its own GOP
+    // (~250 frames on most HW MFTs) regardless of the user's keyframe
+    // interval setting, and the buffer trim is then granular to the encoder's
+    // GOP rather than the user-configured value.
+
+    /// ICodecAPI IID — {901db4c7-31ce-41a2-85dc-8fa0bf41b8da}.
+    const IID_ICODECAPI: GUID = GUID::from_u128(0x901db4c7_31ce_41a2_85dc_8fa0bf41b8da);
+
+    /// CODECAPI_AVEncCommonRateControlMode — selects CBR / VBR / quality.
+    /// Value type: VT_UI4. Use `RATE_CONTROL_CBR` (= 0) for constant bitrate.
+    const CODECAPI_AVENC_COMMON_RATE_CONTROL_MODE: GUID =
+        GUID::from_u128(0x1c0608e9_370c_4710_8a58_cb6181c42423);
+    /// CODECAPI_AVEncCommonMeanBitRate — target bitrate in bits/sec. VT_UI4.
+    const CODECAPI_AVENC_COMMON_MEAN_BIT_RATE: GUID =
+        GUID::from_u128(0xf7f0f0d2_2516_4e89_b87f_0c1c3f6c5db1);
+    /// CODECAPI_AVEncMPVGOPSize — GOP size in frames. VT_UI4.
+    const CODECAPI_AVENC_MPV_GOP_SIZE: GUID =
+        GUID::from_u128(0x95f31b26_95a4_4a3a_b2a9_7e83a8c7d0a3);
+
+    /// eAVEncCommonRateControlMode_CBR — constant-bitrate rate control.
+    const RATE_CONTROL_CBR: u32 = 0;
+
+    /// `ICodecAPI::SetValue` for a VT_UI4 parameter. QueryInterface from the
+    /// IMFTransform (most HW H.264 encoder MFTs implement ICodecAPI on the
+    /// same object), build a 24-byte VARIANT with VT_UI4 + the value, then
+    /// call vtable slot 9. Best-effort: returns Err on any failure so the
+    /// caller can log and continue without breaking encoder creation.
+    unsafe fn icodecapi_set_value_u32(
+        encoder: &IMFTransform,
+        api: &GUID,
+        value: u32,
+    ) -> std::result::Result<(), String> {
+        use std::ffi::c_void;
+
+        // Get ICodecAPI on the encoder via IUnknown::QueryInterface. We can't
+        // use windows-rs `cast::<ICodecAPI>()` because ICodecAPI isn't in the
+        // feature set, so we call QueryInterface manually through the IUnknown
+        // vtable of the IMFTransform (slot 0).
+        let unk_raw = encoder.as_raw();
+        if unk_raw.is_null() {
+            return Err("encoder raw pointer is null".into());
+        }
+        let unk_vtbl = *(unk_raw as *const *const usize);
+        let qi: unsafe extern "system" fn(
+            *mut c_void,
+            *const GUID,
+            *mut *mut c_void,
+        ) -> HRESULT = std::mem::transmute(*unk_vtbl.add(0));
+
+        let mut codec_api: *mut c_void = std::ptr::null_mut();
+        let hr = qi(unk_raw, &IID_ICODECAPI, &mut codec_api);
+        if !hr.is_ok() || codec_api.is_null() {
+            return Err(format!(
+                "QueryInterface(ICodecAPI) HRESULT {:#x}",
+                hr.0 as u32
+            ));
+        }
+
+        // Build VARIANT (x64 layout, 24 bytes): vt(u16) at offset 0; the
+        // wReserved1/2/3 fields fill 2..8 with zero; for VT_UI4 the ulVal
+        // sits at offset 8. The remaining 12 bytes (offsets 12..24) are
+        // unused for this VT but must exist so SetValue reads a properly
+        // sized VARIANT off our stack.
+        const VT_UI4: u16 = 19;
+        let mut variant = [0u8; 24];
+        std::ptr::write_unaligned(variant.as_mut_ptr() as *mut u16, VT_UI4);
+        std::ptr::write_unaligned(variant.as_mut_ptr().add(8) as *mut u32, value);
+
+        // ICodecAPI vtable layout: IUnknown methods at 0..3, then ICodecAPI's
+        // IsSupported(3) / IsModifiable(4) / GetParameterRange(5) /
+        // GetParameterValues(6) / GetDefaultValue(7) / GetValue(8) / SetValue(9).
+        let codec_vtbl = *(codec_api as *const *const usize);
+        let set_value: unsafe extern "system" fn(*mut c_void, *const GUID, *const u8) -> HRESULT =
+            std::mem::transmute(*codec_vtbl.add(9));
+        let set_hr = set_value(codec_api, api, variant.as_ptr());
+
+        // Release the QueryInterface ref regardless of SetValue outcome.
+        let release: unsafe extern "system" fn(*mut c_void) -> u32 =
+            std::mem::transmute(*codec_vtbl.add(2));
+        release(codec_api);
+
+        if set_hr.is_ok() {
+            Ok(())
+        } else {
+            Err(format!("ICodecAPI::SetValue HRESULT {:#x}", set_hr.0 as u32))
+        }
+    }
 
     pub fn mf_startup() -> Result<()> {
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }
@@ -363,7 +466,7 @@ pub mod windows_impl {
         fps_den: u32,
         preference: crate::replay::EncoderPreference,
         keyframe_interval_secs: Option<u32>,
-    ) -> Result<(IMFTransform, IMFDXGIDeviceManager, String)> {
+    ) -> Result<(IMFTransform, IMFDXGIDeviceManager, String, EncoderRateControlReport)> {
         use windows::Win32::Media::MediaFoundation::MF_TRANSFORM_ASYNC_UNLOCK;
 
         let (encoder, encoder_name) = pick_encoder(preference)?;
@@ -407,21 +510,89 @@ pub mod windows_impl {
             encoder.SetInputType(0, &input_type, 0)?;
         }
 
-        // GOP / keyframe-interval setter is plumbed but currently a no-op:
-        // setting it requires `ICodecAPI::SetValue` with a `PROPVARIANT`
-        // payload, neither of which is exposed by our windows-rs feature set
-        // (same constraint as the raw-byte PROPVARIANT in process_loopback).
-        // The encoder picks its own GOP (~250 frames on most HW MFTs); the
-        // buffer trim still rounds back to the nearest enclosed keyframe.
-        // Wire the attribute when we add a `Win32_Media_DirectShow` feature.
-        let _ = keyframe_interval_secs;
+        // Rate control + GOP via hand-rolled ICodecAPI (see icodecapi_set_value_u32
+        // above for why the COM call is hand-rolled). Each setter is independent
+        // and best-effort: failures are recorded in the report rather than
+        // failing encoder creation. The Microsoft software H.264 MFT in
+        // particular often returns S_FALSE / E_NOTIMPL for some of these
+        // parameters even though it implements ICodecAPI — we still want to
+        // build an encoder in that case, just with the encoder's defaults.
+        let mut report = EncoderRateControlReport {
+            cbr_set: false,
+            bitrate_set: false,
+            gop_set: false,
+            applied_gop_frames: None,
+            notes: String::new(),
+        };
+
+        unsafe {
+            match icodecapi_set_value_u32(
+                &encoder,
+                &CODECAPI_AVENC_COMMON_RATE_CONTROL_MODE,
+                RATE_CONTROL_CBR,
+            ) {
+                Ok(()) => report.cbr_set = true,
+                Err(e) => report.notes.push_str(&format!("rate-mode: {e}; ")),
+            }
+            match icodecapi_set_value_u32(
+                &encoder,
+                &CODECAPI_AVENC_COMMON_MEAN_BIT_RATE,
+                bitrate_kbps.saturating_mul(1000),
+            ) {
+                Ok(()) => report.bitrate_set = true,
+                Err(e) => report.notes.push_str(&format!("mean-bitrate: {e}; ")),
+            }
+            if let Some(gop_secs) = keyframe_interval_secs {
+                // GOP size in frames = fps * gop_seconds. Guard against
+                // zero-denominator-fps configs by clamping to at least 1.
+                let fps = if fps_den == 0 {
+                    fps_num
+                } else {
+                    fps_num / fps_den.max(1)
+                };
+                let gop_frames = fps.saturating_mul(gop_secs).max(1);
+                match icodecapi_set_value_u32(
+                    &encoder,
+                    &CODECAPI_AVENC_MPV_GOP_SIZE,
+                    gop_frames,
+                ) {
+                    Ok(()) => {
+                        report.gop_set = true;
+                        report.applied_gop_frames = Some(gop_frames);
+                    }
+                    Err(e) => report.notes.push_str(&format!("gop-size: {e}; ")),
+                }
+            }
+        }
 
         unsafe {
             encoder.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
             encoder.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
         }
 
-        Ok((encoder, device_manager, encoder_name))
+        Ok((encoder, device_manager, encoder_name, report))
+    }
+
+    /// Outcome of the ICodecAPI calls in `create_h264_encoder_hw_async`. The
+    /// worker logs this alongside the encoder friendly name so a "bitrate
+    /// looks like 2× the configured value" or "GOP isn't where I asked" is
+    /// directly visible in the diag log without rerunning. Field semantics:
+    ///
+    /// - `cbr_set` / `bitrate_set` / `gop_set`: did the matching SetValue
+    ///   call succeed. If `cbr_set && bitrate_set`, the encoder is honoring
+    ///   the configured kbps; if not, the encoder is in its default mode
+    ///   (typically quality-VBR) and may overshoot.
+    /// - `applied_gop_frames`: the frame count we sent the encoder. Useful
+    ///   for spotting a mismatch with `effective_fps` at save time.
+    /// - `notes`: concatenated failure messages (HRESULT etc.) for any setter
+    ///   that didn't succeed. Empty when everything worked.
+    #[derive(Debug, Clone)]
+    pub struct EncoderRateControlReport {
+        pub cbr_set: bool,
+        pub bitrate_set: bool,
+        pub gop_set: bool,
+        pub applied_gop_frames: Option<u32>,
+        pub notes: String,
     }
 
     /// Resolve the user's encoder preference to a concrete IMFTransform plus

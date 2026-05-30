@@ -268,6 +268,21 @@ pub(super) fn run_per_window(
             .filter(|(_, e)| !e.handle.is_alive())
             .map(|(h, _)| *h)
             .collect();
+        // Snapshot the foreground hwnd once per sweep so the auto-respawn
+        // path below doesn't make N syscalls when N workers died in lockstep.
+        // Cheap (a single GetForegroundWindow) but worth not amortizing badly.
+        #[cfg(windows)]
+        let fg_hwnd: Option<isize> = {
+            use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+            let h = unsafe { GetForegroundWindow() };
+            if h.0.is_null() {
+                None
+            } else {
+                Some(h.0 as isize)
+            }
+        };
+        #[cfg(not(windows))]
+        let fg_hwnd: Option<isize> = None;
         for h in dead {
             if let Some(entry) = workers.remove(&h) {
                 crate::diag(
@@ -280,6 +295,60 @@ pub(super) fn run_per_window(
                 lru.retain(|x| *x != h);
                 if last_game_hwnd == Some(h) {
                     last_game_hwnd = None;
+                }
+
+                // Auto-respawn when the dead worker's window is still the
+                // foreground game. Without this, a worker that bails for any
+                // self-detected reason (content-size resize from a fullscreen
+                // switch, encoder hang, zero-frames watchdog) leaves the
+                // buffer dead until the user alt-tabs to fire a new
+                // FocusEvent — the focus monitor is hook-driven, not polled,
+                // so it stays silent while the same window holds foreground.
+                // Re-checks the allowlist in case it changed between spawn
+                // and now.
+                if fg_hwnd == Some(h) {
+                    let still_game = match games::resolve_window_exe(h) {
+                        Some(exe) => match allowlist.lock() {
+                            Ok(g) => g.contains(&exe),
+                            Err(_) => false,
+                        },
+                        None => false,
+                    };
+                    if still_game {
+                        crate::diag(
+                            &app,
+                            format!(
+                                "[replay] auto-respawning worker for \"{}\" (hwnd {h:#x}) — still foreground",
+                                entry.title
+                            ),
+                        );
+                        match WorkerHandle::start(
+                            CaptureTarget::Window(h),
+                            settings.clone(),
+                            app.clone(),
+                        ) {
+                            Ok(handle) => {
+                                workers.insert(
+                                    h,
+                                    WorkerEntry {
+                                        handle,
+                                        title: entry.title.clone(),
+                                    },
+                                );
+                                lru.insert(0, h);
+                                last_game_hwnd = Some(h);
+                            }
+                            Err(e) => {
+                                crate::diag(
+                                    &app,
+                                    format!(
+                                        "[replay] auto-respawn FAILED for \"{}\": {e}",
+                                        entry.title
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }

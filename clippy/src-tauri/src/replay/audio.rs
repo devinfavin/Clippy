@@ -7,11 +7,25 @@
 
 use std::sync::Arc;
 
+/// WASAPI endpoint direction. `Render` endpoints are outputs that we capture
+/// via loopback (game audio, music). `Capture` endpoints are inputs we open
+/// directly (microphones) — opening a render endpoint as if it were a mic
+/// returns silence because nothing is rendering to it (the SteelSeries Sonar
+/// "Microphone" virtual device is the canonical example: its render side is
+/// a sink other apps write to, not a source).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EndpointKind {
+    Render,
+    Capture,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct AudioDevice {
     pub id: String,
     pub name: String,
     pub is_default: bool,
+    pub kind: EndpointKind,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -32,7 +46,7 @@ pub struct AudioPacket {
 
 #[cfg(windows)]
 pub fn enumerate_render_devices() -> Vec<AudioDevice> {
-    windows_impl::enumerate_render_devices()
+    windows_impl::enumerate_endpoints(EndpointKind::Render)
 }
 
 #[cfg(not(windows))]
@@ -41,11 +55,21 @@ pub fn enumerate_render_devices() -> Vec<AudioDevice> {
 }
 
 #[cfg(windows)]
+pub fn enumerate_capture_devices() -> Vec<AudioDevice> {
+    windows_impl::enumerate_endpoints(EndpointKind::Capture)
+}
+
+#[cfg(not(windows))]
+pub fn enumerate_capture_devices() -> Vec<AudioDevice> {
+    Vec::new()
+}
+
+#[cfg(windows)]
 pub use windows_impl::AudioCaptureHandle;
 
 #[cfg(windows)]
 mod windows_impl {
-    use super::{AudioDevice, AudioFormat, AudioPacket};
+    use super::{AudioDevice, AudioFormat, AudioPacket, EndpointKind};
     use std::collections::VecDeque;
     use std::sync::mpsc::{self, SyncSender};
     use std::sync::Arc;
@@ -53,8 +77,9 @@ mod windows_impl {
     use std::time::{Duration, Instant};
     use windows::core::PCWSTR;
     use windows::Win32::Media::Audio::{
-        eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
-        MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+        eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDevice,
+        IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY,
+        AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_LOOPBACK, DEVICE_STATE_ACTIVE, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
     };
 
@@ -62,7 +87,8 @@ mod windows_impl {
     const WAVE_FORMAT_IEEE_FLOAT: u16 = 0x0003;
     const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+        CoCreateInstance, CoGetApartmentType, CoInitializeEx, CoUninitialize, APTTYPE,
+        APTTYPEQUALIFIER, CLSCTX_ALL, COINIT_MULTITHREADED,
     };
 
     // Well-known GUID for IEEE-float audio in WAVEFORMATEXTENSIBLE.SubFormat.
@@ -70,8 +96,16 @@ mod windows_impl {
     const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: windows::core::GUID =
         windows::core::GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
 
-    pub fn enumerate_render_devices() -> Vec<AudioDevice> {
+    pub fn enumerate_endpoints(kind: EndpointKind) -> Vec<AudioDevice> {
         let mut out = Vec::new();
+        let data_flow = match kind {
+            EndpointKind::Render => eRender,
+            EndpointKind::Capture => eCapture,
+        };
+        let fallback_label = match kind {
+            EndpointKind::Render => "Output",
+            EndpointKind::Capture => "Input",
+        };
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             let enumerator: IMMDeviceEnumerator =
@@ -81,13 +115,13 @@ mod windows_impl {
                 };
 
             let default_id = enumerator
-                .GetDefaultAudioEndpoint(eRender, eConsole)
+                .GetDefaultAudioEndpoint(data_flow, eConsole)
                 .ok()
                 .and_then(|d| d.GetId().ok())
                 .map(|p| pcwstr_to_string(p))
                 .unwrap_or_default();
 
-            let collection = match enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
+            let collection = match enumerator.EnumAudioEndpoints(data_flow, DEVICE_STATE_ACTIVE) {
                 Ok(c) => c,
                 Err(_) => return out,
             };
@@ -105,13 +139,16 @@ mod windows_impl {
                 let name = match resolved {
                     Some(n) if is_default => format!("{n} (Default)"),
                     Some(n) => n,
-                    None if is_default => format!("Default output (device #{})", i + 1),
-                    None => format!("Output #{}", i + 1),
+                    None if is_default => {
+                        format!("Default {} (device #{})", fallback_label.to_lowercase(), i + 1)
+                    }
+                    None => format!("{fallback_label} #{}", i + 1),
                 };
                 out.push(AudioDevice {
                     id,
                     name,
                     is_default,
+                    kind,
                 });
             }
         }
@@ -191,6 +228,11 @@ mod windows_impl {
     pub enum CaptureSource {
         /// Output endpoint loopback. `None` = default render device.
         Device(Option<String>),
+        /// Input endpoint (microphone / line-in). `None` = default capture
+        /// device. Distinct from `Device` because the WASAPI Initialize call
+        /// must omit `AUDCLNT_STREAMFLAGS_LOOPBACK` — opening a capture
+        /// endpoint with loopback returns silence.
+        InputDevice(Option<String>),
         /// Process Loopback (Win11 22H2+) — captures only this PID's audio
         /// (and its child processes).
         Process(u32),
@@ -208,6 +250,26 @@ mod windows_impl {
             app: Option<tauri::AppHandle>,
         ) -> Result<Self, String> {
             Self::start_with_source(CaptureSource::Device(device_id), epoch, duration_secs, app)
+        }
+
+        /// Capture from a microphone / line-in (eCapture endpoint). `None`
+        /// uses the system's default capture device. Unlike `start`, the
+        /// underlying WASAPI client is opened WITHOUT the loopback flag — the
+        /// "Microphone" virtual devices that virtual mixers (Sonar,
+        /// Voicemeeter) expose are render endpoints by name only; their mic
+        /// audio lives on the capture side and must be opened as such.
+        pub fn start_input(
+            device_id: Option<String>,
+            epoch: Instant,
+            duration_secs: u32,
+            app: Option<tauri::AppHandle>,
+        ) -> Result<Self, String> {
+            Self::start_with_source(
+                CaptureSource::InputDevice(device_id),
+                epoch,
+                duration_secs,
+                app,
+            )
         }
 
         /// Phase 3.3 — capture only the given process's audio.
@@ -297,16 +359,54 @@ mod windows_impl {
         let label: String = match &source {
             CaptureSource::Device(Some(id)) => format!("device {id}"),
             CaptureSource::Device(None) => "default device".to_string(),
+            CaptureSource::InputDevice(Some(id)) => format!("input device {id}"),
+            CaptureSource::InputDevice(None) => "default input device".to_string(),
             CaptureSource::Process(pid) => format!("process loopback pid {pid}"),
         };
 
-        // COM init for this thread.
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        // COM init for this thread. We request MTA because the WASAPI
+        // activation path used by process loopback (`ActivateAudioInterfaceAsync`)
+        // returns E_ILLEGAL_METHOD_CALL synchronously when called from STA.
+        // The raw HRESULT is informative here: S_OK = freshly initialized as
+        // MTA; S_FALSE (folded into Ok in windows-rs) = MTA already; an Err
+        // typically means RPC_E_CHANGED_MODE (0x80010106), which signals
+        // someone else got here first and put us in STA — explains the
+        // process-loopback failure we see in production logs.
+        //
+        // Only logged when this thread is wired up for process loopback so
+        // the diag isn't spammy for the dozens-of-tracks setups some users
+        // run; the device-loopback / input-capture paths don't depend on
+        // apartment state and have never failed in the field.
+        let is_process_source = matches!(source, CaptureSource::Process(_));
+        let init_hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if is_process_source {
+            let init_msg = match init_hr.0 as u32 {
+                0x00000000 => "S_OK (MTA initialized this call)".to_string(),
+                0x00000001 => "S_FALSE (already initialized; same apartment)".to_string(),
+                0x80010106 => "RPC_E_CHANGED_MODE (already initialized as STA — process-loopback ActivateAudioInterfaceAsync will fail E_ILLEGAL_METHOD_CALL)".to_string(),
+                other => format!("HRESULT {:#010x}", other),
+            };
+            let apt_msg = unsafe {
+                let mut apt: APTTYPE = std::mem::zeroed();
+                let mut qual: APTTYPEQUALIFIER = std::mem::zeroed();
+                match CoGetApartmentType(&mut apt, &mut qual) {
+                    Ok(()) => format!("apt={:?} qual={:?}", apt, qual),
+                    Err(e) => format!("CoGetApartmentType Err {e}"),
+                }
+            };
+            if let Some(a) = &app {
+                crate::diag(
+                    a,
+                    format!(
+                        "[replay] audio thread COM state for {label}: CoInitializeEx(MTA) → {init_msg} · {apt_msg}"
+                    ),
+                );
+            }
         }
 
         let init_result = match source {
-            CaptureSource::Device(id) => init_capture(id),
+            CaptureSource::Device(id) => init_capture(id, EndpointKind::Render),
+            CaptureSource::InputDevice(id) => init_capture(id, EndpointKind::Capture),
             CaptureSource::Process(pid) => init_process_capture(pid),
         };
         let (audio_client, capture_client, format) = match init_result {
@@ -349,6 +449,22 @@ mod windows_impl {
         // breadcrumb; further occurrences fall through silently.
         let mut logged_get_size_err = false;
         let mut logged_get_buffer_err = false;
+        // QPC-anchored PTS state. WASAPI's `pu64QPCPosition` (returned in
+        // 100-ns units) records when the audio device actually captured the
+        // frame, not when our 5-ms poll happened to read it out. Anchoring on
+        // the first valid sample and adding QPC deltas thereafter removes
+        // read-jitter from the PTS clock — important for buffer trim accuracy
+        // and (more visibly) for keeping the audio's wall-clock relationship
+        // to video consistent across the saved clip.
+        //
+        // The anchor is `(first_qpc_100ns, first_pts_100ns)`. `first_pts_100ns`
+        // is `epoch.elapsed()` at the moment we received the first packet —
+        // it's the only PTS we can't get from QPC because we have no QPC
+        // sample before the first packet to compute against. All subsequent
+        // packets get `first_pts + (packet_qpc - first_qpc)`, which is
+        // jitter-free in the absence of WASAPI timestamp errors.
+        let mut qpc_anchor: Option<(u64, i64)> = None;
+        let mut logged_timestamp_err = false;
 
         'main: loop {
             // Wall-clock-driven trim. Runs every iteration so an idle WASAPI
@@ -419,8 +535,16 @@ mod windows_impl {
                 let mut data_ptr: *mut u8 = std::ptr::null_mut();
                 let mut frames: u32 = 0;
                 let mut flags: u32 = 0;
+                let mut device_pos: u64 = 0;
+                let mut qpc_pos: u64 = 0;
                 let r = unsafe {
-                    capture_client.GetBuffer(&mut data_ptr, &mut frames, &mut flags, None, None)
+                    capture_client.GetBuffer(
+                        &mut data_ptr,
+                        &mut frames,
+                        &mut flags,
+                        Some(&mut device_pos),
+                        Some(&mut qpc_pos),
+                    )
                 };
                 if let Err(e) = r {
                     if !logged_get_buffer_err {
@@ -438,7 +562,46 @@ mod windows_impl {
                 }
 
                 let byte_len = (frames as usize) * (bytes_per_frame as usize);
-                let pts_now = epoch.elapsed().as_nanos() as i64 / 100;
+                let read_time_pts = epoch.elapsed().as_nanos() as i64 / 100;
+
+                // Compute PTS from QPC unless WASAPI flagged the timestamp as
+                // unreliable. On `TIMESTAMP_ERROR` or `DATA_DISCONTINUITY` we
+                // fall back to read-time and reset the anchor so the next
+                // valid sample re-establishes it without inheriting drift.
+                let timestamp_unreliable = (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32)
+                    != 0
+                    || (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32) != 0;
+                let pts = if timestamp_unreliable {
+                    if !logged_timestamp_err {
+                        logged_timestamp_err = true;
+                        if let Some(a) = &app {
+                            crate::diag(
+                                a,
+                                format!(
+                                    "[replay] audio: {label}: WASAPI flagged QPC timestamp unreliable (first hit; falling back to read-time PTS until QPC clears)"
+                                ),
+                            );
+                        }
+                    }
+                    qpc_anchor = None;
+                    read_time_pts
+                } else {
+                    match qpc_anchor {
+                        None => {
+                            qpc_anchor = Some((qpc_pos, read_time_pts));
+                            read_time_pts
+                        }
+                        Some((anchor_qpc, anchor_pts)) => {
+                            // QPC is monotonic and already in 100-ns units, so
+                            // `qpc_pos - anchor_qpc` is the exact time delta
+                            // since the anchor sample. Wrap as i64 for the PTS
+                            // arithmetic; the underlying counter is plenty
+                            // wide that u64 → i64 won't overflow in any realistic
+                            // session lifetime.
+                            anchor_pts + (qpc_pos as i64 - anchor_qpc as i64)
+                        }
+                    }
+                };
 
                 let payload: Arc<[u8]> = if (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
                     // Hardware silence — emit zeros so PTS continuity holds.
@@ -456,7 +619,7 @@ mod windows_impl {
                 current_bytes += payload.len();
                 buffer.push_back(AudioPacket {
                     data: payload,
-                    pts: pts_now,
+                    pts,
                 });
                 // Trim moved to the wall-clock-driven block at the top of
                 // 'main so it runs even when WASAPI delivers no packets for
@@ -477,11 +640,21 @@ mod windows_impl {
 
     fn init_capture(
         device_id: Option<String>,
+        kind: EndpointKind,
     ) -> Result<(IAudioClient, IAudioCaptureClient, AudioFormat), String> {
         unsafe {
             let enumerator: IMMDeviceEnumerator =
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
                     .map_err(|e| format!("device enumerator: {e}"))?;
+
+            // Render endpoints are opened in loopback mode (we capture what
+            // they're playing). Capture endpoints (microphones, line-in) are
+            // opened as ordinary capture clients with no loopback flag —
+            // the loopback flag on a capture endpoint returns silence.
+            let (default_flow, stream_flags) = match kind {
+                EndpointKind::Render => (eRender, AUDCLNT_STREAMFLAGS_LOOPBACK),
+                EndpointKind::Capture => (eCapture, 0),
+            };
 
             let device: IMMDevice = match device_id {
                 Some(id) => {
@@ -491,7 +664,7 @@ mod windows_impl {
                         .map_err(|e| format!("get device by id: {e}"))?
                 }
                 None => enumerator
-                    .GetDefaultAudioEndpoint(eRender, windows::Win32::Media::Audio::eConsole)
+                    .GetDefaultAudioEndpoint(default_flow, eConsole)
                     .map_err(|e| format!("default endpoint: {e}"))?,
             };
 
@@ -509,7 +682,7 @@ mod windows_impl {
             audio_client
                 .Initialize(
                     AUDCLNT_SHAREMODE_SHARED,
-                    AUDCLNT_STREAMFLAGS_LOOPBACK,
+                    stream_flags,
                     2_000_000,
                     0,
                     mix_format_ptr,

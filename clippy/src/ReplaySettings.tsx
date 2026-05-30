@@ -70,6 +70,13 @@ function ReplaySettingsImpl() {
   const [audioNames, setAudioNames] = useState<Record<string, string>>(
     () => lsMap(LS.audioNames)
   );
+  const [inputDevices, setInputDevices] = useState<AudioDevice[]>([]);
+  const [selectedInputIds, setSelectedInputIds] = useState<Set<string>>(
+    () => new Set(lsArr(LS.inputIds))
+  );
+  const [inputNames, setInputNames] = useState<Record<string, string>>(
+    () => lsMap(LS.inputNames)
+  );
   const [useProcessLoopback, setUseProcessLoopback] = useState<boolean>(
     () => lsBool(LS.processLoopback, true)
   );
@@ -231,6 +238,9 @@ function ReplaySettingsImpl() {
     invoke<AudioDevice[]>("replay_list_audio_devices")
       .then((d) => alive && setAudioDevices(d))
       .catch(() => {});
+    invoke<AudioDevice[]>("replay_list_input_devices")
+      .then((d) => alive && setInputDevices(d))
+      .catch(() => {});
     return () => {
       alive = false;
     };
@@ -266,6 +276,12 @@ function ReplaySettingsImpl() {
   useEffect(() => {
     localStorage.setItem(LS.audioNames, JSON.stringify(audioNames));
   }, [audioNames]);
+  useEffect(() => {
+    localStorage.setItem(LS.inputIds, JSON.stringify([...selectedInputIds]));
+  }, [selectedInputIds]);
+  useEffect(() => {
+    localStorage.setItem(LS.inputNames, JSON.stringify(inputNames));
+  }, [inputNames]);
   useEffect(() => {
     localStorage.setItem(LS.processLoopback, String(useProcessLoopback));
   }, [useProcessLoopback]);
@@ -392,18 +408,38 @@ function ReplaySettingsImpl() {
     });
   }, []);
 
+  const toggleInputDevice = useCallback((id: string) => {
+    setSelectedInputIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const setInputName = useCallback((id: string, name: string) => {
+    setInputNames((prev) => {
+      const next = { ...prev };
+      const trimmed = name.trim();
+      if (trimmed.length === 0) delete next[id];
+      else next[id] = trimmed;
+      return next;
+    });
+  }, []);
+
   // Push the current device-id → friendly-name map down to the backend so
   // renames mid-buffer-session reach the next save. Debounced 300 ms so
   // typing doesn't spam the invoke channel; fires once on mount with the
   // localStorage-loaded map so the worker also sees pre-existing names.
   useEffect(() => {
     const t = window.setTimeout(() => {
-      invoke("replay_set_audio_names", { names: audioNames }).catch((e) =>
+      const merged = { ...audioNames, ...inputNames };
+      invoke("replay_set_audio_names", { names: merged }).catch((e) =>
         console.warn("[clippy] replay_set_audio_names failed:", e)
       );
     }, 300);
     return () => window.clearTimeout(t);
-  }, [audioNames]);
+  }, [audioNames, inputNames]);
 
   // ----- derived -----
   const minutes = (durationSecs / 60).toFixed(1).replace(/\.0$/, "");
@@ -653,11 +689,15 @@ function ReplaySettingsImpl() {
         open={audioOpen}
         onToggle={() => setAudioOpen((v) => !v)}
         title="Audio sources"
-        summary={
-          selectedAudioIds.size > 0
-            ? `${selectedAudioIds.size} device${selectedAudioIds.size === 1 ? "" : "s"} selected`
-            : "Default output (no devices selected)"
-        }
+        summary={(() => {
+          const o = selectedAudioIds.size;
+          const m = selectedInputIds.size;
+          if (o === 0 && m === 0) return "Default output (no devices selected)";
+          const parts: string[] = [];
+          if (o > 0) parts.push(`${o} output${o === 1 ? "" : "s"}`);
+          if (m > 0) parts.push(`${m} mic${m === 1 ? "" : "s"}`);
+          return parts.join(" · ");
+        })()}
       >
         <label className="settings-checkbox">
           <input
@@ -692,6 +732,51 @@ function ReplaySettingsImpl() {
           <p className="settings-section-blurb settings-help">
             With no devices selected, the buffer falls back to capturing the default output.
           </p>
+        )}
+
+        <SettingsLabel>Microphones / inputs</SettingsLabel>
+        <p className="settings-section-blurb">
+          Pick microphones or line-ins to record as additional tracks. These open the capture (input) side of the device — virtual mics like Sonar's process-mic appear here, not in Outputs.
+        </p>
+        {inputDevices.length === 0 ? (
+          <p className="settings-section-blurb">No input devices detected.</p>
+        ) : (
+          <div className="settings-audio-groups">
+            <div className="settings-audio-group is-open">
+              <div className="settings-audio-group-body">
+                {inputDevices.map((d) => {
+                  const checked = selectedInputIds.has(d.id);
+                  return (
+                    <div key={d.id} className="settings-audio-row">
+                      <label className="settings-checkbox">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleInputDevice(d.id)}
+                          disabled={isRunning}
+                        />
+                        <span className="settings-audio-system" title={d.name}>{d.name}</span>
+                      </label>
+                      {checked && (
+                        <span className="settings-audio-rename">
+                          <span className="settings-audio-rename-prefix">Called</span>
+                          <input
+                            type="text"
+                            className="settings-text settings-audio-name"
+                            placeholder="e.g. Mic"
+                            value={inputNames[d.id] ?? ""}
+                            onChange={(e) => setInputName(d.id, e.target.value)}
+                            disabled={isRunning}
+                            aria-label={`Track name for ${d.name}`}
+                          />
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         )}
       </Accordion>
 

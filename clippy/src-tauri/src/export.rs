@@ -350,6 +350,12 @@ pub async fn export_clip_sized(
             "aac".into(),
             "-b:a".into(),
             format!("{}k", SIZED_AUDIO_BPS / 1000),
+            // Forced stereo 48 kHz — see the export_clip path for the full
+            // rationale (Windows Photos compatibility + bitrate efficiency).
+            "-ac".into(),
+            "2".into(),
+            "-ar".into(),
+            "48000".into(),
             "-movflags".into(),
             "+faststart".into(),
             "-map_chapters".into(),
@@ -490,6 +496,12 @@ pub async fn export_concat_sized(
             "aac".into(),
             "-b:a".into(),
             format!("{}k", SIZED_AUDIO_BPS / 1000),
+            // Forced stereo 48 kHz — see the export_clip path for the full
+            // rationale (Windows Photos compatibility + bitrate efficiency).
+            "-ac".into(),
+            "2".into(),
+            "-ar".into(),
+            "48000".into(),
             "-movflags".into(),
             "+faststart".into(),
             "-map_chapters".into(),
@@ -585,7 +597,11 @@ async fn cut_segment(
                 "-c:a".into(),
                 "aac".into(),
                 "-b:a".into(),
-                "160k".into(),
+                "192k".into(),
+                "-ac".into(),
+                "2".into(),
+                "-ar".into(),
+                "48000".into(),
                 "-map_chapters".into(),
                 "-1".into(),
                 out_path.into(),
@@ -649,7 +665,21 @@ async fn cut_segment(
             "-c:a".into(),
             "aac".into(),
             "-b:a".into(),
-            "160k".into(),
+            "192k".into(),
+            // Force stereo 48 kHz on the output. Source clips can carry 7.1
+            // @ 96 kHz tracks from virtual mixers (Sonar, Voicemeeter); when
+            // amix folds those in, the AAC encoder defaults to the union
+            // layout — 7.1 @ 96 kHz @ 160k AAC ≈ 20 kbps/channel, which is
+            // both objectively bad and gets rejected by Windows Photos (its
+            // Media Foundation pipeline plays AAC LC stereo / mono / 5.1
+            // only). Downmix to plain stereo so the export plays in Photos
+            // and the bitrate is actually spent on the two channels that
+            // matter. ffmpeg inserts the standard ITU downmix coefficients
+            // for the 7.1 → stereo conversion.
+            "-ac".into(),
+            "2".into(),
+            "-ar".into(),
+            "48000".into(),
             "-avoid_negative_ts".into(),
             "make_zero".into(),
             "-map_chapters".into(),
@@ -849,7 +879,21 @@ pub async fn export_concat(
             "-c:a".into(),
             "aac".into(),
             "-b:a".into(),
-            "160k".into(),
+            "192k".into(),
+            // Force stereo 48 kHz on the output. Source clips can carry 7.1
+            // @ 96 kHz tracks from virtual mixers (Sonar, Voicemeeter); when
+            // amix folds those in, the AAC encoder defaults to the union
+            // layout — 7.1 @ 96 kHz @ 160k AAC ≈ 20 kbps/channel, which is
+            // both objectively bad and gets rejected by Windows Photos (its
+            // Media Foundation pipeline plays AAC LC stereo / mono / 5.1
+            // only). Downmix to plain stereo so the export plays in Photos
+            // and the bitrate is actually spent on the two channels that
+            // matter. ffmpeg inserts the standard ITU downmix coefficients
+            // for the 7.1 → stereo conversion.
+            "-ac".into(),
+            "2".into(),
+            "-ar".into(),
+            "48000".into(),
         ]);
     } else {
         concat_args.extend(["-c".into(), "copy".into()]);
@@ -979,7 +1023,11 @@ pub async fn export_clip(
                 "-c:a".into(),
                 "aac".into(),
                 "-b:a".into(),
-                "160k".into(),
+                "192k".into(),
+                "-ac".into(),
+                "2".into(),
+                "-ar".into(),
+                "48000".into(),
                 "-movflags".into(),
                 "+faststart".into(),
                 "-map_chapters".into(),
@@ -1033,7 +1081,21 @@ pub async fn export_clip(
             "-c:a".into(),
             "aac".into(),
             "-b:a".into(),
-            "160k".into(),
+            "192k".into(),
+            // Force stereo 48 kHz on the output. Source clips can carry 7.1
+            // @ 96 kHz tracks from virtual mixers (Sonar, Voicemeeter); when
+            // amix folds those in, the AAC encoder defaults to the union
+            // layout — 7.1 @ 96 kHz @ 160k AAC ≈ 20 kbps/channel, which is
+            // both objectively bad and gets rejected by Windows Photos (its
+            // Media Foundation pipeline plays AAC LC stereo / mono / 5.1
+            // only). Downmix to plain stereo so the export plays in Photos
+            // and the bitrate is actually spent on the two channels that
+            // matter. ffmpeg inserts the standard ITU downmix coefficients
+            // for the 7.1 → stereo conversion.
+            "-ac".into(),
+            "2".into(),
+            "-ar".into(),
+            "48000".into(),
             "-avoid_negative_ts".into(),
             "make_zero".into(),
             "-movflags".into(),

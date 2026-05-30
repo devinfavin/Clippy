@@ -53,6 +53,8 @@ pub fn replay_start(
     capture_mode: Option<CaptureModeArg>,
     audio_device_ids: Option<Vec<String>>,
     audio_device_names: Option<Vec<String>>,
+    audio_input_device_ids: Option<Vec<String>>,
+    audio_input_device_names: Option<Vec<String>>,
     use_process_loopback: Option<bool>,
     fps: Option<u32>,
     resolution_mode: Option<ResolutionMode>,
@@ -98,6 +100,8 @@ pub fn replay_start(
         duration_secs: duration_secs.unwrap_or(300).clamp(10, 600),
         audio_device_ids: audio_device_ids.unwrap_or_default(),
         audio_device_names: audio_device_names.unwrap_or_default(),
+        audio_input_device_ids: audio_input_device_ids.unwrap_or_default(),
+        audio_input_device_names: audio_input_device_names.unwrap_or_default(),
         video_bitrate_kbps: bitrate_kbps.unwrap_or(25_000).clamp(1_000, 200_000),
         use_process_loopback: use_process_loopback.unwrap_or(true),
         fps: fps.unwrap_or(60).clamp(15, 240),
@@ -117,10 +121,11 @@ pub fn replay_start(
     crate::diag(
         &app,
         format!(
-            "[replay] replay_start invoked · duration={}s bitrate={}kbps audio_devices={}",
+            "[replay] replay_start invoked · duration={}s bitrate={}kbps audio_devices={} mics={}",
             settings.duration_secs,
             settings.video_bitrate_kbps,
-            settings.audio_device_ids.len()
+            settings.audio_device_ids.len(),
+            settings.audio_input_device_ids.len()
         ),
     );
     Ok(())
@@ -329,6 +334,15 @@ pub fn replay_set_audio_names(
 #[tauri::command]
 pub fn replay_list_audio_devices() -> Vec<audio::AudioDevice> {
     audio::enumerate_render_devices()
+}
+
+/// Enumerate WASAPI capture endpoints (microphones, line-in, virtual mic
+/// devices like Sonar's). Distinct command from `replay_list_audio_devices`
+/// because the worker opens these without the loopback flag — opening a
+/// capture endpoint as render-loopback (the old code path) returns silence.
+#[tauri::command]
+pub fn replay_list_input_devices() -> Vec<audio::AudioDevice> {
+    audio::enumerate_capture_devices()
 }
 
 /// One-shot probe of the system's GPU + RAM + available HW H.264 encoders.

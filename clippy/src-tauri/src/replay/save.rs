@@ -252,6 +252,68 @@ pub async fn write_and_mux(
         return Err("buffer is empty".into());
     }
 
+    // PTS-span diag for A/V sync diagnosis. Emits one line per stream
+    // (video + each audio track) reporting first/last PTS and the implied
+    // duration. PTS units are 100-ns; durations reported in seconds for
+    // human readability. A user-reported "first 1s of audio missing" or
+    // "audio drifts later than video" translates directly into a span
+    // mismatch here — if `audio_dur` < `video_dur`, the audio will run out
+    // before the video does in the muxed clip, and the shorter stream's
+    // alignment with t=0 is what determines whether the gap is at the
+    // start or the end (raw PCM and raw H.264 both ride at MP4 t=0).
+    if let Some((app, _)) = progress {
+        let to_secs = |pts: i64| (pts as f64) / 10_000_000.0;
+        if packets.len() >= 2 {
+            let v_first = packets.first().map(|p| p.pts).unwrap_or(0);
+            let v_last = packets.last().map(|p| p.pts).unwrap_or(0);
+            crate::diag(
+                app,
+                format!(
+                    "[replay] save · video: {} pkts · pts [{:.3}s, {:.3}s] · span {:.3}s",
+                    packets.len(),
+                    to_secs(v_first),
+                    to_secs(v_last),
+                    to_secs(v_last - v_first),
+                ),
+            );
+        }
+        for (i, track) in audio_tracks.iter().enumerate() {
+            if track.packets.len() >= 2 {
+                let a_first = track.packets.first().map(|p| p.pts).unwrap_or(0);
+                let a_last = track.packets.last().map(|p| p.pts).unwrap_or(0);
+                let bytes: usize = track.packets.iter().map(|p| p.data.len()).sum();
+                let bytes_per_frame =
+                    (track.format.channels as u32) * (track.format.bits_per_sample as u32) / 8;
+                let bytes_per_sec = bytes_per_frame * track.format.sample_rate;
+                let byte_dur = if bytes_per_sec > 0 {
+                    bytes as f64 / bytes_per_sec as f64
+                } else {
+                    0.0
+                };
+                crate::diag(
+                    app,
+                    format!(
+                        "[replay] save · audio[{i}] \"{name}\": {pkts} pkts · pts [{first:.3}s, {last:.3}s] · pts-span {span:.3}s · byte-dur {bytes_dur:.3}s",
+                        name = track.name,
+                        pkts = track.packets.len(),
+                        first = to_secs(a_first),
+                        last = to_secs(a_last),
+                        span = to_secs(a_last - a_first),
+                        bytes_dur = byte_dur,
+                    ),
+                );
+            } else if track.packets.is_empty() {
+                crate::diag(
+                    app,
+                    format!(
+                        "[replay] save · audio[{i}] \"{name}\": 0 pkts (track will be omitted)",
+                        name = track.name
+                    ),
+                );
+            }
+        }
+    }
+
     // Staging directory for `.h264` / `.fixed.h264` / `.aN.pcm` intermediates.
     // Kept under the OS temp dir (rather than next to the output MP4) so a
     // save to a slow/network/external drive doesn't pay double the IO — only

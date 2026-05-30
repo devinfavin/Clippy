@@ -63,6 +63,15 @@ pub struct ReplaySettings {
     /// Optional friendly track names for each audio_device_ids entry, parallel
     /// by index. Empty string means "no custom name; use system device name".
     pub audio_device_names: Vec<String>,
+    /// User-selected microphone / line-in (eCapture) endpoints to record as
+    /// separate tracks. Opened without the loopback flag so the mic signal
+    /// actually flows through. Empty means "no mic tracks".
+    #[serde(default)]
+    pub audio_input_device_ids: Vec<String>,
+    /// Friendly names for `audio_input_device_ids`, parallel by index. Same
+    /// "" sentinel rules as `audio_device_names`.
+    #[serde(default)]
+    pub audio_input_device_names: Vec<String>,
     pub video_bitrate_kbps: u32,
     /// Try Process Loopback (Win11 22H2+) for the focused window so the
     /// saved file has only the game's own audio. Falls back silently to
@@ -89,6 +98,8 @@ impl Default for ReplaySettings {
             duration_secs: 300,
             audio_device_ids: Vec::new(),
             audio_device_names: Vec::new(),
+            audio_input_device_ids: Vec::new(),
+            audio_input_device_names: Vec::new(),
             video_bitrate_kbps: 25_000,
             use_process_loopback: true,
             fps: 60,

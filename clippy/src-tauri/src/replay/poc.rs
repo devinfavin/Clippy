@@ -411,7 +411,7 @@ fn poc_gpu_full() -> Result<(Vec<u8>, usize, u32, u32, String), String> {
     mf_startup().map_err(|e| format!("MFStartup: {e}"))?;
 
     // _device_manager must be kept alive for the encode session.
-    let (encoder, _device_manager, _encoder_name) = create_h264_encoder_hw_async(
+    let (encoder, _device_manager, _encoder_name, _rate_report) = create_h264_encoder_hw_async(
         &bundle.device,
         enc_width,
         enc_height,

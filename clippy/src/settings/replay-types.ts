@@ -9,11 +9,15 @@ export type MonitorInfo = {
   height: number;
 };
 
+/** Mirror of Rust's audio::EndpointKind. */
+export type EndpointKind = "render" | "capture";
+
 /** Mirror of Rust's audio::AudioDevice. */
 export type AudioDevice = {
   id: string;
   name: string;
   is_default: boolean;
+  kind: EndpointKind;
 };
 
 /** Mirror of Rust's sysinfo::SystemInfo. */

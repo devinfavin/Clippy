@@ -346,7 +346,7 @@ fn run_worker(
         .map_err(|e| format!("video processor: {e}"))?;
 
         mf_startup().map_err(|e| format!("MFStartup: {e}"))?;
-        let (encoder, device_manager, encoder_name) = create_h264_encoder_hw_async(
+        let (encoder, device_manager, encoder_name, rate_report) = create_h264_encoder_hw_async(
             &bundle.device,
             enc_w,
             enc_h,
@@ -370,8 +370,11 @@ fn run_worker(
             event_gen,
             enc_w,
             enc_h,
+            src_w,
+            src_h,
             item,
             encoder_name,
+            rate_report,
         ))
     })();
 
@@ -384,8 +387,11 @@ fn run_worker(
         event_gen,
         enc_w,
         enc_h,
+        pool_src_w,
+        pool_src_h,
         item,
         encoder_name,
+        rate_report,
     ) = match init {
         Ok(t) => t,
         Err(e) => {
@@ -415,6 +421,33 @@ fn run_worker(
             settings.video_bitrate_kbps,
             settings.keyframe_interval_secs,
             settings.encoder_preference,
+        ),
+    );
+    // Surface the ICodecAPI outcome so a "bitrate looks 2× wrong" or "GOP
+    // wasn't applied" is one line away in the diag log. `cbr` reflects the
+    // rate-control mode; `bitrate` reflects whether the mean-bitrate setter
+    // landed; `gop_frames` is what we actually told the encoder (None if
+    // we didn't try because keyframe_interval_secs was None, or if the
+    // setter failed — the notes field carries the HRESULT in that case).
+    let cbr_label = if rate_report.cbr_set { "CBR" } else { "DEFAULT" };
+    let bitrate_label = if rate_report.bitrate_set {
+        format!("{}kbps", settings.video_bitrate_kbps)
+    } else {
+        "DEFAULT".to_string()
+    };
+    let gop_label = match rate_report.applied_gop_frames {
+        Some(f) => format!("{f}f"),
+        None => "DEFAULT".to_string(),
+    };
+    crate::diag(
+        &app,
+        format!(
+            "[replay] encoder rate-control · mode={cbr_label} · target={bitrate_label} · gop={gop_label}{notes}",
+            notes = if rate_report.notes.is_empty() {
+                String::new()
+            } else {
+                format!(" · notes: {}", rate_report.notes.trim_end_matches("; "))
+            },
         ),
     );
     let _ = init_tx.send(Ok((enc_w, enc_h, fps, encoder_name.clone())));
@@ -533,6 +566,45 @@ fn run_worker(
         }
     }
 
+    // Microphones / line-ins (eCapture endpoints). Same per-track model as
+    // render-loopback above — each becomes its own MP4 audio stream. Distinct
+    // start path so the WASAPI client is opened without the loopback flag;
+    // opening Sonar's virtual "Microphone" render endpoint as loopback (what
+    // the old code did) returned silence.
+    for (i, device_id) in settings.audio_input_device_ids.iter().enumerate() {
+        match super::audio::AudioCaptureHandle::start_input(
+            Some(device_id.clone()),
+            epoch,
+            settings.duration_secs,
+            Some(app.clone()),
+        ) {
+            Ok(h) => {
+                let name = settings
+                    .audio_input_device_names
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_default();
+                audio_handles.push((h, name, device_id.clone()));
+            }
+            Err(e) => {
+                let name = settings
+                    .audio_input_device_names
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_default();
+                let label = if name.is_empty() {
+                    format!("input device {device_id}")
+                } else {
+                    format!("\"{name}\" ({device_id})")
+                };
+                crate::diag(
+                    &app,
+                    format!("[replay] audio: input init FAILED for {label}: {e}"),
+                );
+            }
+        }
+    }
+
     if audio_handles.is_empty() {
         match super::audio::AudioCaptureHandle::start(
             None,
@@ -635,6 +707,23 @@ fn run_worker(
     let mut consecutive_zero_cap_windows: u32 = 0;
     let mut consecutive_zero_pkts_windows: u32 = 0;
     const DEAD_CAPTURE_BAIL_AFTER_WINDOWS: u32 = 2;
+
+    // Content-size watchdog. WGC frame pools are fixed-size — we created ours
+    // from `item.Size()` at spawn (= pool_src_w × pool_src_h). When a game's
+    // window resizes (windowed → fullscreen, native res change, monitor swap)
+    // WGC keeps delivering frames at the pool size, cropping the new larger
+    // content to the old smaller surface. Symptom: a 2560×1440 game records
+    // as a 1936×1120 video showing only the top-left of the play area.
+    //
+    // Each captured frame's `ContentSize()` reports the true source size. We
+    // count consecutive frames where it diverges from the pool size by more
+    // than NOISE_PIXELS (DPI rounding + 1-frame transition jitter) and bail
+    // once the streak hits MISMATCH_BAIL_FRAMES. The coordinator then
+    // respawns the worker, which re-reads `item.Size()` and builds a fresh
+    // pool/vp/encoder at the new resolution.
+    let mut content_mismatch_streak: u32 = 0;
+    const CONTENT_MISMATCH_NOISE_PIXELS: i32 = 16;
+    const CONTENT_MISMATCH_BAIL_FRAMES: u32 = 8;
 
     'main: loop {
         // 0. If the captured item went away (window closed, monitor unplugged),
@@ -814,6 +903,33 @@ fn run_worker(
                 let mut got_fresh_this_tick = false;
                 if let Ok(frame) = session.frame_pool.TryGetNextFrame() {
                     c_captured = c_captured.saturating_add(1);
+
+                    // Content-size watchdog (see declaration above for rationale).
+                    // Check before texture extraction so we don't waste a copy on
+                    // frames we're about to discard via bail.
+                    if let Ok(cs) = frame.ContentSize() {
+                        let dw = (cs.Width as i32 - pool_src_w as i32).abs();
+                        let dh = (cs.Height as i32 - pool_src_h as i32).abs();
+                        if dw > CONTENT_MISMATCH_NOISE_PIXELS
+                            || dh > CONTENT_MISMATCH_NOISE_PIXELS
+                        {
+                            content_mismatch_streak =
+                                content_mismatch_streak.saturating_add(1);
+                            if content_mismatch_streak >= CONTENT_MISMATCH_BAIL_FRAMES {
+                                crate::diag(
+                                    &app,
+                                    format!(
+                                        "[replay] worker {target:?} bailing — WGC content size changed from {pool_src_w}x{pool_src_h} to {}x{} (window resize / fullscreen switch). Coordinator will respawn at the new size.",
+                                        cs.Width, cs.Height
+                                    ),
+                                );
+                                break 'main;
+                            }
+                        } else {
+                            content_mismatch_streak = 0;
+                        }
+                    }
+
                     if let Ok(bgra) = extract_texture_from_frame(&frame) {
                         if vp.convert(&bgra).is_ok() {
                             nv12_ready = true;

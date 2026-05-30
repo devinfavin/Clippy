@@ -7,6 +7,8 @@ export const LS = {
   saveBehavior: "clippy-replay-save-behavior",
   audioIds: "clippy-replay-audio-device-ids",
   audioNames: "clippy-replay-audio-device-names", // map: deviceId → custom name
+  inputIds: "clippy-replay-input-device-ids",
+  inputNames: "clippy-replay-input-device-names", // map: deviceId → custom name
   processLoopback: "clippy-replay-process-loopback",
   audioOpen: "clippy-replay-audio-section-open",
   gamesOpen: "clippy-replay-games-section-open",
@@ -131,6 +133,9 @@ export function getReplayStartArgs(): Record<string, unknown> {
   // Parallel array matching audioDeviceIds order — empty string means
   // "no custom name" so the worker uses a sensible default.
   const audioDeviceNames = audioDeviceIds.map((id) => audioNamesMap[id] ?? "");
+  const audioInputDeviceIds = lsArr(LS.inputIds);
+  const audioInputNamesMap = lsMap(LS.inputNames);
+  const audioInputDeviceNames = audioInputDeviceIds.map((id) => audioInputNamesMap[id] ?? "");
   const useProcessLoopback = lsBool(LS.processLoopback, true);
   const bitrateKbps = lsNum(LS.bitrate, 25_000);
   const encoderPreference = (localStorage.getItem(LS.encoderPref) as EncoderPref) ?? "auto";
@@ -153,6 +158,8 @@ export function getReplayStartArgs(): Record<string, unknown> {
     durationSecs,
     audioDeviceIds,
     audioDeviceNames,
+    audioInputDeviceIds,
+    audioInputDeviceNames,
     useProcessLoopback,
     // fps retired from the frontend — backend defaults to 60.
     bitrateKbps,
