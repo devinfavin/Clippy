@@ -61,17 +61,24 @@ export function useWaveformDraw(args: {
       // tracks at each x, weighted by their volume. Skipping the per-region
       // override scan keeps it cheap; the rail's Audio panel still shows the
       // per-track detail. Used by the main timeline.
+      //
+      // Sized up 2026-05-30: alpha 0.32 → 0.55 so the envelope reads through
+      // the region-band tints; bar width 1 → 2 px (with a 1 px gap) so peaks
+      // look like a waveform, not a noise field; unityBar 0.55 → 0.65 × H so
+      // loud audio fills more of the timeline strip.
       if (mode === "mixed") {
         const maxBar = cssH * 0.92;
-        const unityBar = cssH * 0.55;
+        const unityBar = cssH * 0.65;
         // Lift the longest track so envelope bin counts are consistent.
         let longest = 0;
         for (const bins of waveforms.values()) {
           if (bins.length > longest) longest = bins.length;
         }
         if (longest === 0) return;
-        ctx.fillStyle = "rgba(170, 174, 184, 0.32)";
-        for (let x = 0; x < cssW; x++) {
+        ctx.fillStyle = "rgba(190, 195, 208, 0.55)";
+        const barW = 2;
+        const stride = 3; // bar + 1 px gap
+        for (let x = 0; x < cssW; x += stride) {
           let envelope = 0;
           for (const [idx, bins] of waveforms.entries()) {
             const m = trackMix[idx];
@@ -81,7 +88,7 @@ export function useWaveformDraw(args: {
             const N = bins.length;
             if (N === 0) continue;
             const binStart = Math.floor((x / cssW) * N);
-            const binEnd = Math.max(binStart + 1, Math.floor(((x + 1) / cssW) * N));
+            const binEnd = Math.max(binStart + 1, Math.floor(((x + stride) / cssW) * N));
             let max = 0;
             for (let i = binStart; i < binEnd && i < N; i++) {
               const v = bins[i];
@@ -92,7 +99,7 @@ export function useWaveformDraw(args: {
           }
           const h = Math.min(envelope * unityBar, maxBar);
           if (h < 1) continue;
-          ctx.fillRect(x, mid - h / 2, 1, h);
+          ctx.fillRect(x, mid - h / 2, barW, h);
         }
         return;
       }
@@ -126,18 +133,25 @@ export function useWaveformDraw(args: {
       //     so 50% slider → half-height bars, 158% → ~1.6× taller. Heights
       //     clamp to slightly past the track strip so 200% reads as "loud"
       //     without escaping the canvas.
+      //
+      // 2026-05-30: bar width 1 → 2 px with a 1 px gap and unityBar 0.55 →
+      // 0.65 × cssH (same sizing as the mixed mode below) so the colored
+      // envelope reads as a proper waveform, not a noise field — and the
+      // keyframe ticks underneath stay visible in the gaps between bars.
       const maxBar = cssH * 0.92; // hard cap (canvas-bound)
-      const unityBar = cssH * 0.55; // bar height at volume == 1.0
+      const unityBar = cssH * 0.65; // bar height at volume == 1.0
+      const barW = 2;
+      const stride = 3; // bar + 1 px gap
 
       ctx.globalCompositeOperation = "source-over";
-      ctx.fillStyle = "rgba(140, 144, 154, 0.16)";
+      ctx.fillStyle = "rgba(140, 144, 154, 0.22)";
       for (const [idx, bins] of entries) {
         const N = bins.length;
         if (N === 0) continue;
-        for (let x = 0; x < cssW; x++) {
+        for (let x = 0; x < cssW; x += stride) {
           if (!xMixes[x][idx]?.muted) continue;
           const binStart = Math.floor((x / cssW) * N);
-          const binEnd = Math.max(binStart + 1, Math.floor(((x + 1) / cssW) * N));
+          const binEnd = Math.max(binStart + 1, Math.floor(((x + stride) / cssW) * N));
           let max = 0;
           for (let i = binStart; i < binEnd && i < N; i++) {
             const v = bins[i];
@@ -145,7 +159,7 @@ export function useWaveformDraw(args: {
           }
           const h = Math.min(max * unityBar, maxBar);
           if (h < 1) continue;
-          ctx.fillRect(x, mid - h / 2, 1, h);
+          ctx.fillRect(x, mid - h / 2, barW, h);
         }
       }
 
@@ -153,19 +167,19 @@ export function useWaveformDraw(args: {
       // middle x to avoid scanning all xMixes again.
       const midMix = xMixes[Math.floor(cssW / 2)] ?? trackMix;
       const activeCount = entries.filter(([i]) => !midMix[i]?.muted).length;
-      const baseAlpha = activeCount <= 1 ? 0.85 : 0.55;
+      const baseAlpha = activeCount <= 1 ? 0.9 : 0.65;
       ctx.globalCompositeOperation = "lighter";
       for (const [idx, bins] of entries) {
         const N = bins.length;
         if (N === 0) continue;
         ctx.fillStyle = hexWithAlpha(resolveTrackColor(idx, trackColors), baseAlpha);
-        for (let x = 0; x < cssW; x++) {
+        for (let x = 0; x < cssW; x += stride) {
           const m = xMixes[x][idx];
           if (m?.muted) continue;
           const vol = m?.volume ?? 1;
           if (vol <= 0) continue;
           const binStart = Math.floor((x / cssW) * N);
-          const binEnd = Math.max(binStart + 1, Math.floor(((x + 1) / cssW) * N));
+          const binEnd = Math.max(binStart + 1, Math.floor(((x + stride) / cssW) * N));
           let max = 0;
           for (let i = binStart; i < binEnd && i < N; i++) {
             const v = bins[i];
@@ -173,7 +187,7 @@ export function useWaveformDraw(args: {
           }
           const h = Math.min(max * vol * unityBar, maxBar);
           if (h < 1) continue;
-          ctx.fillRect(x, mid - h / 2, 1, h);
+          ctx.fillRect(x, mid - h / 2, barW, h);
         }
       }
       ctx.globalCompositeOperation = "source-over";

@@ -180,7 +180,22 @@ export type Region = {
   // Optional override of which palette slot this region uses (0..3 for cool
   // palette). Undefined → the natural index in the regions array.
   colorIndex?: number;
+  // User-renamed label, surfaced in the rail header, audio mix context,
+  // crop badge, and timeline tooltip. Empty / undefined falls back to
+  // "Region N" by natural index via regionDisplayName().
+  name?: string;
 };
+
+/** Resolve the human-readable label for a region. Uses the user-set name
+ *  when present (trimmed, non-empty), otherwise falls back to "Region N"
+ *  by 1-based natural index. Centralized so every surface — rail header,
+ *  audio context badge, crop panel, timeline tooltip — shows the same
+ *  thing without each computing it ad-hoc. */
+export function regionDisplayName(r: Region | null | undefined, indexZeroBased: number): string {
+  const trimmed = r?.name?.trim();
+  if (trimmed && trimmed.length > 0) return trimmed;
+  return `Region ${indexZeroBased + 1}`;
+}
 
 // Per-region speed presets shown in the rail's Regions panel.
 // 4× was dropped 2026-05-16: the use case (clipping from OBS recordings)
@@ -212,6 +227,14 @@ export const ASPECT_PRESETS: AspectLock[] = [
   { kind: "ratio", w: 4, h: 3, label: "4:3" },
   { kind: "source" },
 ];
+
+/** Aspect presets surfaced in the rail's Crop panel — preset-snap only.
+ *  Free is intentionally excluded (the design memo deferred free-form crop
+ *  from the rail; precise drag still lives inside the CropOverlay editor,
+ *  reachable via "Open crop editor…"). */
+export const RAIL_CROP_PRESETS: AspectLock[] = ASPECT_PRESETS.filter(
+  (p) => p.kind !== "free"
+);
 
 /** Same crop dims (or both undefined). Used to gate stitched export. */
 export function cropsEqual(a: Crop | undefined, b: Crop | undefined): boolean {

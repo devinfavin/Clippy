@@ -1081,6 +1081,17 @@ kbd {
   border-color: var(--border-2);
 }
 
+/* Slot reserves space for the draft chip even when it's not visible — chip
+   toggles via `visibility: hidden`, never via display/conditional render.
+   Without the reserved slot, adding/clearing a draft endpoint shifts the
+   transport row laterally on every click. Width fits "draft 0:00.00 →
+   0:00.00" with tabular-nums so digit changes don't shift either. */
+.draft-chip-slot {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  min-width: 180px;
+}
 /* Draft readout — chip-shaped so it reads as state, not action. Goes accent
    the moment the user has either an in or out marked, neutral otherwise. */
 .draft-chip {
@@ -3091,6 +3102,26 @@ button.btn-armed {
 .tips-footer {
   align-items: center;
 }
+/* Left-aligned footer link — visually the same dim-text treatment the
+   span had previously, but now interactive (opens Settings → Keyboard). */
+.tips-open-settings {
+  flex: 1;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: var(--fs-small);
+  color: var(--text-tertiary);
+  font-family: inherit;
+  transition: color var(--t-fast) var(--ease);
+}
+.tips-open-settings:hover { color: var(--text-primary); text-decoration: underline; }
+.tips-open-settings:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
 
 /* ---------------------------------------------------------- *
  *  Onboarding coachmark                                        *
@@ -3199,6 +3230,31 @@ button.btn-armed {
               border-color var(--motion-quick) var(--ease-out);
 }
 .help-button:hover {
+  background: var(--panel-2);
+  border-color: var(--border-2);
+  color: var(--text);
+}
+
+/* Settings gear — same visual treatment as the help button so the two
+   meta-actions read as a pair on the right edge of the topbar. SVG-based
+   so the gear renders crisply at any DPI. */
+.topbar-settings-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background var(--motion-quick) var(--ease-out),
+              color var(--motion-quick) var(--ease-out),
+              border-color var(--motion-quick) var(--ease-out);
+}
+.topbar-settings-btn:hover {
   background: var(--panel-2);
   border-color: var(--border-2);
   color: var(--text);
@@ -3406,7 +3462,7 @@ button.btn-armed {
 .empty-recent-list-header {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
+  gap: var(--s-3);
 }
 .empty-recent-list-title {
   font-size: 17px;
@@ -3418,6 +3474,25 @@ button.btn-armed {
   font-size: var(--fs-small);
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
+}
+/* "Open folder" sits at the right edge of the Recent header; quiet
+   styling so it doesn't compete with the list itself. */
+.empty-recent-open-folder {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: var(--fs-small);
+  color: var(--text-tertiary);
+  font-family: inherit;
+  transition: color var(--t-fast) var(--ease);
+}
+.empty-recent-open-folder:hover { color: var(--text-primary); text-decoration: underline; }
+.empty-recent-open-folder:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 .empty-recent-list {
   list-style: none;
@@ -3865,7 +3940,7 @@ button.btn-armed {
 }
 .audio-track-wave {
   width: 100%;
-  height: 18px;
+  height: 32px;
   display: block;
 }
 /* Native range slider — track is a colored / surface split via background
@@ -4089,32 +4164,53 @@ button.btn-armed {
   color: var(--accent);
   border-color: var(--accent-muted);
 }
+/* Icon buttons (loop / delete) live at the right of the active region row.
+   On the active row's color-tinted background the icons need to read at a
+   glance. Solid dark bg-base contrasts against the row tint regardless of
+   region color, and text-primary (92% white) keeps the icon stencil
+   sharp at 14×14 stroke 2. */
 .region-row-icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  background: transparent;
-  border: none;
-  color: var(--text-tertiary);
+  width: 26px;
+  height: 26px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
   border-radius: var(--radius-sm);
   cursor: default;
-  transition: background var(--t-fast), color var(--t-fast);
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
 }
-.region-row-icon-btn:hover { background: var(--bg-base); color: var(--text-secondary); }
-.region-row-icon-btn.active { color: var(--accent); }
-.region-row-delete:hover { color: var(--status-bad); }
+.region-row-icon-btn:hover {
+  background: var(--bg-elevated);
+  border-color: var(--border-strong);
+}
+.region-row-icon-btn.active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-base));
+}
+.region-row-delete { color: hsla(0, 0%, 100%, 0.85); }
+.region-row-delete:hover {
+  color: var(--status-bad);
+  border-color: color-mix(in srgb, var(--status-bad) 55%, var(--border-subtle));
+}
 
 .region-row-color-wrap { position: relative; }
+/* Color swatch ring: the swatch fill is the region color, which on an
+   active row tinted with that same color disappears into the background.
+   The two-layer box-shadow lifts the dot off any color-matching surface —
+   inner ring is panel-elevated, outer is a faint white edge. */
 .region-row-color-btn {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  border: 1px solid rgba(255,255,255,0.18);
+  border: 1px solid rgba(255,255,255,0.22);
+  box-shadow: 0 0 0 2px var(--bg-elevated), 0 0 0 3px rgba(255,255,255,0.10);
   padding: 0;
   cursor: default;
-  margin: 0 2px;
+  margin: 0 4px;
 }
 .region-row-color-pop {
   position: absolute;

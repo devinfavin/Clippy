@@ -94,6 +94,45 @@ fn replay_set_save_hotkey(app: AppHandle, shortcut: String) -> Result<(), String
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // MUST be the first plugin — when this fires, the secondary instance
+        // exits before doing anything else (binding the media-server port,
+        // building the coordinator, registering the save hotkey, creating
+        // a tray icon). Without that ordering the second instance still
+        // pays all the startup cost before being told it's a duplicate.
+        //
+        // The callback runs in the *existing* instance with the secondary
+        // launch's argv. We surface a video path (if any) via
+        // clippy://open-saved — the existing main-window listener routes
+        // through loadFile — and bring the main window forward.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            use tauri::Emitter;
+            // First arg is the secondary instance's exe path; skip it before
+            // running the same heuristic the initial-launch path uses.
+            let video = state::pick_video_path(argv.iter().skip(1));
+            if let Some(ref path) = video {
+                if let Some(slot) = app.try_state::<InitialPath>() {
+                    if let Ok(mut g) = slot.0.lock() {
+                        *g = Some(path.clone());
+                    }
+                }
+            }
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+                if let Some(path) = video {
+                    // The renderer's use-replay-saved-toast hook listens for
+                    // this event and calls loadFile(). Reusing the existing
+                    // wiring keeps the second-instance hand-off identical
+                    // to the in-app "open saved replay" flow.
+                    let _ = w.emit("clippy://open-saved", path);
+                }
+            }
+            diag(
+                &app.clone(),
+                "[startup] second instance attempted — surfaced main window, ignored duplicate launch".to_string(),
+            );
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -430,6 +469,7 @@ pub fn run() {
             replay::commands::replay_save,
             replay::commands::replay_list_monitors,
             replay::commands::replay_list_audio_devices,
+            replay::commands::replay_list_input_devices,
             replay::commands::replay_set_audio_names,
             replay::commands::replay_get_system_info,
             replay::commands::replay_list_games,

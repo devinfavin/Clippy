@@ -50,6 +50,12 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Single-instance guard. A second launch routes its argv to the running
+# instance (which surfaces the file via clippy://open-saved) and then
+# exits before doing any other startup work. Without this we'd get two
+# tray icons, two replay coordinators contending for the same encoder
+# slots, and two global-hotkey registrations where only the first wins.
+tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]
 # `windows-core` re-exported at the crate root so the `#[implement(...)]`

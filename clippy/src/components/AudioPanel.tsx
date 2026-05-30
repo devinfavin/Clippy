@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useDismissPopover } from "../hooks/use-dismiss-popover";
 import {
   defaultTrackColorIndex,
   resolveTrackColor,
@@ -145,6 +146,11 @@ function TrackRow(props: {
 }) {
   const [renaming, setRenaming] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Dismiss the color popover on Esc or outside-click. Previously only
+  // onMouseLeave dismissed it; clicking the swatch then not moving the
+  // cursor stranded the popover open.
+  const dotWrapRef = useRef<HTMLSpanElement | null>(null);
+  useDismissPopover(pickerOpen, dotWrapRef, () => setPickerOpen(false));
   const pct = Math.round(props.volume * 100);
   return (
     <div className={`audio-track-row${props.muted ? " is-muted" : ""}`}
@@ -171,7 +177,7 @@ function TrackRow(props: {
             </svg>
           )}
         </button>
-        <span className="audio-track-dot-wrap">
+        <span className="audio-track-dot-wrap" ref={dotWrapRef}>
           <button
             type="button"
             className="audio-track-dot"
@@ -181,7 +187,7 @@ function TrackRow(props: {
             aria-label="Change track color"
           />
           {pickerOpen && (
-            <span className="audio-track-color-pop" onMouseLeave={() => setPickerOpen(false)}>
+            <span className="audio-track-color-pop">
               {TRACK_COLORS.map((c, i) => (
                 <button
                   key={i}
@@ -236,15 +242,23 @@ function TrackRow(props: {
 
 /** Inline mini-waveform under each track row. SVG with one rect per ~2px so
  *  it stays readable in the rail's narrow width (~ 290px usable). Falls back
- *  to a flat baseline when the track's waveform hasn't extracted yet. */
+ *  to a flat baseline when the track's waveform hasn't extracted yet.
+ *
+ *  Sized up 2026-05-30: height 18 → 32, bins 60 → 48 (wider bars), opacity
+ *  0.6 → 0.85, square bars (no rx) so peaks read taller, plus a faint
+ *  center baseline that anchors silent stretches — without it, a quiet
+ *  track was visually indistinguishable from "data not loaded yet." */
 function MiniWaveform(props: { data: Float32Array | undefined; color: string }) {
   const w = 100;  // viewBox width; SVG scales to container
-  const h = 18;
-  const bins = 60;
-  const barW = w / bins - 0.5;
+  const h = 32;
+  const bins = 48;
+  const barW = w / bins - 0.4;
   const data = props.data;
   return (
     <svg className="audio-track-wave" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" aria-hidden>
+      {/* Center baseline — survives a silent track as a visible "track is
+          here, just quiet" hint. Drawn under the bars so peaks paint over it. */}
+      <line x1={0} y1={h / 2} x2={w} y2={h / 2} stroke={props.color} strokeOpacity={0.18} strokeWidth={0.6} />
       {Array.from({ length: bins }, (_, i) => {
         let v = 0;
         if (data && data.length > 0) {
@@ -257,10 +271,10 @@ function MiniWaveform(props: { data: Float32Array | undefined; color: string }) 
           }
           v = max;
         }
-        const bh = Math.max(1, v * h * 0.9);
+        const bh = Math.max(1.2, v * h * 0.92);
         const x = i * (w / bins);
         const y = (h - bh) / 2;
-        return <rect key={i} x={x} y={y} width={barW} height={bh} rx={barW / 2} fill={props.color} opacity={0.6} />;
+        return <rect key={i} x={x} y={y} width={barW} height={bh} fill={props.color} opacity={0.85} />;
       })}
     </svg>
   );

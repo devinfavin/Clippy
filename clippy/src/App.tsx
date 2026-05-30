@@ -5,6 +5,7 @@ import {
   cropsEqual,
   GIF_DEFAULT_RESOLUTION,
   newRegionId,
+  regionDisplayName,
   SIZE_PRESETS,
   resolveRegionColor,
   trackMixIsDefault,
@@ -263,6 +264,12 @@ function Editor() {
       setTrackMix({});
       setTrackColors({});
       setTrackNames({});
+      // Defensive: any selection / crop-edit / loop reference points at a
+      // region id that's about to be cleared. Drop them so the rail header,
+      // audio context, and crop overlay don't dangle on a stale id between
+      // the regions wipe and the project-state restore below.
+      setActiveRegionId(null);
+      setCropEditingRegionId(null);
       setPhase({ kind: "probing" });
 
       const probed = await invoke<VideoInfo>("probe_video", { path: selected });
@@ -395,6 +402,30 @@ function Editor() {
     const unkeptMaxDays = days > 0 ? days : null;
     invoke("storage_prune", { capBytes, unkeptMaxDays, dryRun: false }).catch(() => {});
   }, []);
+
+  // Forward-declared above the Esc gate so the effect's deps stay honest;
+  // the actual cropEditingRegionId state hook lives further down. Kept here
+  // as a closure read via ref instead of a dep to avoid re-binding the
+  // listener every render — Esc only needs the current value at fire time.
+  const cropOverlayOpenRef = useRef(false);
+
+  // Esc clears the active-region selection so the user can reach a
+  // no-region-selected state without finding the active row in the rail.
+  // Gated: don't fire while a modal is open or a field has focus, both of
+  // which use Esc for their own dismissal/cancel semantics.
+  useEffect(() => {
+    if (activeRegionId == null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (exportOpen || keybindsOpen || tipsOpen) return;
+      if (cropOverlayOpenRef.current) return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      setActiveRegionId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activeRegionId, exportOpen, keybindsOpen, tipsOpen]);
 
   // ---- transport controls ----
   const playPause = useCallback(() => {
@@ -581,6 +612,21 @@ function Editor() {
   const setRegionColorIndex = useCallback((id: string, colorIndex: number) => {
     setRegions((rs) => rs.map((r) => (r.id === id ? { ...r, colorIndex } : r)));
   }, []);
+  // User-set region label, persisted via useProjectAutosave. Empty input
+  // clears the override (regionDisplayName falls back to "Region N").
+  const setRegionName = useCallback((id: string, name: string) => {
+    const trimmed = name.trim();
+    setRegions((rs) =>
+      rs.map((r) => {
+        if (r.id !== id) return r;
+        if (trimmed.length === 0) {
+          const { name: _drop, ...rest } = r;
+          return rest;
+        }
+        return { ...r, name: trimmed };
+      })
+    );
+  }, []);
   /** Direct crop assignment used by the Crop panel's preset chips. Skips the
    *  full overlay editor — preset crops are deterministic so we just write
    *  the result. `undefined` clears the crop. */
@@ -591,6 +637,12 @@ function Editor() {
   // Crop edit mode: which region's crop are we editing? null = not editing.
   const [cropEditingRegionId, setCropEditingRegionId] = useState<string | null>(null);
   const wasPlayingBeforeCropRef = useRef(false);
+  // Mirror into the ref the Esc-deselect gate reads. Saves rebinding the
+  // listener every time cropEditingRegionId flips and avoids putting the
+  // state in the listener's deps (which would defeat the gate).
+  useEffect(() => {
+    cropOverlayOpenRef.current = cropEditingRegionId != null;
+  }, [cropEditingRegionId]);
   const startCropEdit = useCallback((regionId: string) => {
     const r = regions.find((x) => x.id === regionId);
     if (!r) return;
@@ -639,36 +691,54 @@ function Editor() {
   );
 
   // Region containing the playhead (first match, sorted by inSecs already).
-  // Drives the audio-mix context: while inside, the mixer edits that region's
-  // mix and WebAudio plays it; outside, both fall back to the source default.
+  // Drives the PLAYBACK mix only — as the playhead crosses a region boundary,
+  // useAudioTracks switches gains to that region's mix in real time.
   const playheadRegion = regions.find(
     (r) => currentTime >= r.inSecs && currentTime <= r.outSecs
   );
-  const playheadRegionIndex = playheadRegion ? regions.indexOf(playheadRegion) : -1;
-  const effectiveMix: TrackMix = playheadRegion?.mix ?? trackMix;
-  // Stable callback that writes back to the right slice of state — region
-  // override if inside one, otherwise the source default.
+  // Region that the AUDIO MIXER edits. Anchored to the user's explicit
+  // selection (clicking a region in the rail) rather than the playhead so
+  // muting a track on the selected region doesn't depend on whether the
+  // playhead happens to be inside the region at click time. Falls back to
+  // the playhead-containing region (for the legacy "scrub through a region
+  // and tweak its mix" workflow) and then to global if neither applies.
+  const audioEditRegion =
+    regions.find((r) => r.id === activeRegionId) ?? playheadRegion ?? null;
+  const audioEditRegionIndex = audioEditRegion ? regions.indexOf(audioEditRegion) : -1;
+  // Two views on the mix:
+  //   • editMix — what the AudioPanel reads/writes. Tied to the selected
+  //     region so a mute lands on the right slice of state.
+  //   • playbackMix — what useAudioTracks consumes. Tied to the playhead so
+  //     audio at any given moment reflects the local context. These differ
+  //     when the user is editing region N's mix while the playhead is
+  //     outside it — that's expected; the user hears the change once they
+  //     scrub into region N.
+  const editMix: TrackMix = audioEditRegion?.mix ?? trackMix;
+  const playbackMix: TrackMix = playheadRegion?.mix ?? trackMix;
+  // Writes go to the audio-edit region's mix when one is selected, else
+  // the global trackMix. Captured as a stable callback so AudioPanel
+  // re-renders don't churn its onChange identity.
   const setEffectiveMix = useCallback(
     (next: TrackMix) => {
-      if (playheadRegion) {
-        const id = playheadRegion.id;
+      if (audioEditRegion) {
+        const id = audioEditRegion.id;
         setRegions((rs) => rs.map((r) => (r.id === id ? { ...r, mix: next } : r)));
       } else {
         setTrackMix(next);
       }
     },
-    [playheadRegion]
+    [audioEditRegion]
   );
 
   // Multi-track audio: extract each track on file load and feed them through
   // WebAudio so the mixer's sliders/mutes affect playback in real time. Hook
-  // is a no-op for single-track sources. Effective mix changes as the playhead
-  // crosses region boundaries — you literally hear the per-region mix kick in.
+  // is a no-op for single-track sources. The mix here is the PLAYBACK mix —
+  // changes flow in as the playhead crosses region boundaries.
   useAudioTracks({
     videoElement: videoRef.current,
     srcPath,
     tracks: info?.audio_tracks ?? [],
-    mix: effectiveMix,
+    mix: playbackMix,
   });
 
   // For the floating loop badge in the player corner.
@@ -1173,6 +1243,17 @@ function Editor() {
     if (phase.kind !== "ready" && phase.kind !== "exporting") return;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     setIsScrubbing(true);
+    // Click landing outside any region band clears the active selection so
+    // the user can reach a "no region selected" state without finding the
+    // already-active row in the rail. Hit-test by checking whether any
+    // .region-band ancestor exists between target and the timeline element.
+    const target = e.target as HTMLElement | null;
+    const inBand =
+      target?.closest?.(".region-band") != null ||
+      target?.classList?.contains("region-edge-handle") === true;
+    if (!inBand && activeRegionId != null) {
+      setActiveRegionId(null);
+    }
     const v = videoRef.current;
     if (v) {
       wasMutedRef.current = v.muted;
@@ -1273,10 +1354,12 @@ function Editor() {
     trackMix,
     trackColors,
     duration,
-    // Timeline shows a single neutral mixed envelope; per-track detail
-    // lives in the rail's Audio panel where each row has its own inline
-    // mini-waveform.
-    mode: "mixed",
+    // Per-track colored envelope on the timeline so the user can see at a
+    // glance which track is doing what — and the gaps between the 2 px
+    // bars let the keyframe ticks underneath stay legible. Mixed-neutral
+    // mode is still available via the hook for surfaces that don't want
+    // the per-track palette.
+    mode: "tracks",
   });
   useKeyframeDraw({
     canvasRef: keyframeCanvasRef,
@@ -1446,7 +1529,7 @@ function Editor() {
         {/* Replay buffer status sits in the topbar as the "app state" indicator
             (analogous to Discord's avatar/status cluster, Steam's online dot).
             Only renders when the buffer is running — hidden when Idle. */}
-        <ReplayStatusPill onClick={() => setKeybindsOpen(true)} />
+        <ReplayStatusPill onClick={() => { setSettingsTab("replay"); setKeybindsOpen(true); }} />
         {updater.state.kind === "available" && (
           <button
             type="button"
@@ -1466,6 +1549,22 @@ function Editor() {
         >
           ?
         </button>
+        {/* Settings entry point — previously reachable only via the replay
+            pill (hidden when Idle), the bottom hint row, or the rare
+            update-available pill. Gear lives next to the help button so
+            both meta-actions cluster on the right edge before Export. */}
+        <button
+          className="topbar-settings-btn"
+          onClick={() => setKeybindsOpen(true)}
+          title="Settings"
+          aria-label="Settings"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </button>
         <button
           className="btn primary"
           onClick={openExport}
@@ -1481,6 +1580,7 @@ function Editor() {
         <EmptyState
           onOpenDialog={handleOpen}
           onLoadPath={(p) => { void loadFile(p).catch((e) => logErr("recent clip open", e)); }}
+          onOpenSettings={() => setKeybindsOpen(true)}
         />
       ) : (
       <>
@@ -1569,7 +1669,7 @@ function Editor() {
           if (!r) return null;
           const idx = regions.indexOf(r);
           return {
-            name: `Region ${idx + 1}`,
+            name: regionDisplayName(r, idx),
             color: resolveRegionColor(r, idx),
             number: idx + 1,
           };
@@ -1578,18 +1678,20 @@ function Editor() {
           info && info.audio_tracks.length >= 1 ? (
             <AudioPanel
               tracks={info.audio_tracks}
-              mix={effectiveMix}
+              mix={editMix}
               onChange={setEffectiveMix}
               trackColors={trackColors}
               onTrackColorsChange={setTrackColors}
               trackNames={trackNames}
               onTrackNamesChange={setTrackNames}
               contextLabel={
-                playheadRegion ? `Region ${playheadRegionIndex + 1}` : "Default"
+                audioEditRegion
+                  ? regionDisplayName(audioEditRegion, audioEditRegionIndex)
+                  : "Default"
               }
               contextColor={
-                playheadRegion
-                  ? resolveRegionColor(playheadRegion, playheadRegionIndex)
+                audioEditRegion
+                  ? resolveRegionColor(audioEditRegion, audioEditRegionIndex)
                   : null
               }
               waveforms={waveforms}
@@ -1604,12 +1706,16 @@ function Editor() {
             hasSource={!!srcPath && phase.kind === "ready"}
             loopingRegionId={loopingRegionId}
             onFocus={(id) => {
+              // null = explicit deselect (re-click on the active row). Don't
+              // seek in that case — the user is clearing focus, not asking
+              // to jump back to a region they're already inside.
               setActiveRegionId(id);
+              if (id == null) return;
               const r = regions.find((x) => x.id === id);
               if (r) seek(r.inSecs);
             }}
             onAddFromPlayhead={addRegionFromPlayhead}
-            onRename={() => { /* TODO: persist region.name when added to the Region type */ }}
+            onRename={setRegionName}
             onDelete={deleteRegion}
             onSetSpeed={setRegionSpeed}
             onSetColor={setRegionColorIndex}
@@ -1630,11 +1736,13 @@ function Editor() {
             sourceWidth={info?.width ?? 0}
             sourceHeight={info?.height ?? 0}
             hasSource={!!srcPath && phase.kind === "ready"}
+            regionCount={regions.length}
             onLaunchEditor={(id) => startCropEdit(id)}
             onSetPresetForActive={(crop) => {
               const r = regions.find((x) => x.id === activeRegionId) ?? playheadRegion;
               if (r) setRegionCropDirect(r.id, crop);
             }}
+            onApplyToAll={applyCropToAllRegions}
           />
         }
       />
@@ -1650,6 +1758,28 @@ function Editor() {
         <div className="time-readout">
           <span className="mono">{fmtTime(currentTime)}</span>
           <span className="dim mono"> / {fmtTime(duration)}</span>
+        </div>
+        {/* Draft chip — always in the DOM with a reserved slot; toggled via
+            visibility so adding/clearing a draft endpoint doesn't shift the
+            transport row. Sits next to the time-readout because both belong
+            to the "where am I" axis. Active = filled chip; otherwise the
+            slot is invisible but holds its space. */}
+        <div
+          className="draft-chip-slot"
+          aria-hidden={!(draftIn != null || draftOut != null)}
+        >
+          <span
+            className={`draft-chip${(draftIn != null || draftOut != null) ? " is-active" : ""}`}
+            title="In-progress region; commits when in < out"
+            style={{
+              visibility: (draftIn != null || draftOut != null) ? "visible" : "hidden",
+            }}
+          >
+            <span className="draft-chip-label">draft</span>
+            <span className="draft-chip-value mono">
+              {draftIn != null ? fmtTime(draftIn) : "--"} → {draftOut != null ? fmtTime(draftOut) : "--"}
+            </span>
+          </span>
         </div>
 
         <div className="transport-buttons">
@@ -1686,7 +1816,7 @@ function Editor() {
               key={r.id}
               className="region-band"
               style={{ left: `${left}%`, width: `${width}%`, ["--region-color" as never]: color }}
-              title={`Region ${i + 1}: ${fmtTime(r.inSecs)} → ${fmtTime(r.outSecs)} — drag edges to adjust`}
+              title={`${regionDisplayName(r, i)}: ${fmtTime(r.inSecs)} → ${fmtTime(r.outSecs)} — drag edges to adjust`}
             >
               <div
                 className={`region-edge-handle left${isResizingThis && resizingEdge?.edge === "in" ? " active" : ""}`}
@@ -1749,23 +1879,36 @@ function Editor() {
             Set Out
           </button>
 
-          {/* Draft chip — only rendered while there's actually a draft in
-              progress. Empty `DRAFT -- → --` was visual noise; once the user
-              marks an in or out, the chip appears with the value visible. */}
-          {(draftIn != null || draftOut != null) && (
-            <span
-              className="draft-chip is-active"
-              title="In-progress region; commits when in < out"
-            >
-              <span className="draft-chip-label">draft</span>
-              <span className="draft-chip-value mono">
-                {draftIn != null ? fmtTime(draftIn) : "--"} → {draftOut != null ? fmtTime(draftOut) : "--"}
-              </span>
-            </span>
-          )}
+          {/* (Draft chip moved into .time-readout — was here, jumped the
+              mark-buttons row on every in/out edit.) */}
 
           {/* Secondary marks — ghost, smaller hit-feel; utility actions. */}
-          <button className="mark-secondary" onClick={clearAllRegions} title="Remove all regions and the current draft">
+          <button
+            className="mark-secondary"
+            onClick={() => {
+              // Disabled-on-empty so a stray click on a fresh clip does
+              // nothing. Confirm at 2+ regions so an accidental click
+              // doesn't quietly nuke real work; a single region or a draft
+              // alone is cheap enough to skip the prompt.
+              if (regions.length >= 2) {
+                const ok = window.confirm(
+                  `Clear all ${regions.length} regions? This can't be undone (the project autosave will pick up the empty state).`
+                );
+                if (!ok) return;
+              }
+              clearAllRegions();
+            }}
+            disabled={
+              regions.length === 0 && draftIn == null && draftOut == null
+            }
+            title={
+              regions.length === 0 && draftIn == null && draftOut == null
+                ? "Nothing to clear"
+                : regions.length >= 2
+                  ? `Remove all ${regions.length} regions and any draft (asks to confirm)`
+                  : "Remove all regions and the current draft"
+            }
+          >
             Clear all
           </button>
           <button
@@ -1784,23 +1927,40 @@ function Editor() {
       </section>
 
       <footer className="hints" title="Click any shortcut to edit">
-        <HintKbd onClick={() => setKeybindsOpen(true)} bind={keybinds.playPause} label="play/pause" />
-        <HintKbd onClick={() => setKeybindsOpen(true)} bind={keybinds.frameBack} secondaryBind={keybinds.frameForward} label="frame" />
-        <HintKbd onClick={() => setKeybindsOpen(true)} bind={keybinds.jumpStart} secondaryBind={keybinds.jumpEnd} label="jump" />
-        <HintKbd onClick={() => setKeybindsOpen(true)} bind={keybinds.setIn} secondaryBind={keybinds.setOut} label="set in/out" />
-        <HintKbd onClick={() => setKeybindsOpen(true)} bind={keybinds.export} label="export" />
-        {regions.length > 0 && (
-          <HintKbd
-            onClick={() => setKeybindsOpen(true)}
-            bind={keybinds.jumpRegion1}
-            secondaryBind={keybinds[`jumpRegion${Math.min(regions.length, 9)}` as ActionId]}
-            label={regions.length === 1 ? "jump to region" : "jump to region"}
-          />
-        )}
-        <span className="hints-spacer" />
-        <button className="hints-edit" onClick={() => setKeybindsOpen(true)} title="Edit shortcuts">
-          edit shortcuts…
-        </button>
+        {/* Each hint and the "edit shortcuts…" link should land on the
+            Keyboard tab — the visible intent is "edit this binding,"
+            not "open whichever settings tab was last viewed." */}
+        {(() => {
+          const openKeyboardSettings = () => {
+            setSettingsTab("keyboard");
+            setKeybindsOpen(true);
+          };
+          return (
+            <>
+              <HintKbd onClick={openKeyboardSettings} bind={keybinds.playPause} label="play/pause" />
+              <HintKbd onClick={openKeyboardSettings} bind={keybinds.frameBack} secondaryBind={keybinds.frameForward} label="frame" />
+              <HintKbd onClick={openKeyboardSettings} bind={keybinds.jumpStart} secondaryBind={keybinds.jumpEnd} label="jump" />
+              <HintKbd onClick={openKeyboardSettings} bind={keybinds.setIn} secondaryBind={keybinds.setOut} label="set in/out" />
+              <HintKbd onClick={openKeyboardSettings} bind={keybinds.export} label="export" />
+              {regions.length > 0 && (
+                <HintKbd
+                  onClick={openKeyboardSettings}
+                  bind={keybinds.jumpRegion1}
+                  /* Only surface a secondary keybind when there's a
+                     meaningful range; with 1 region "1 / 1" was confusing. */
+                  secondaryBind={regions.length > 1
+                    ? keybinds[`jumpRegion${Math.min(regions.length, 9)}` as ActionId]
+                    : undefined}
+                  label="jump to region"
+                />
+              )}
+              <span className="hints-spacer" />
+              <button className="hints-edit" onClick={openKeyboardSettings} title="Edit shortcuts">
+                edit shortcuts…
+              </button>
+            </>
+          );
+        })()}
       </footer>
       </section>{/* /.shell-bottom */}
       </>
@@ -1860,7 +2020,16 @@ function Editor() {
         />
       )}
 
-      {tipsOpen && <TipsModal keybinds={keybinds} onClose={() => setTipsOpen(false)} />}
+      {tipsOpen && (
+        <TipsModal
+          keybinds={keybinds}
+          onClose={() => setTipsOpen(false)}
+          onOpenKeyboardSettings={() => {
+            setSettingsTab("keyboard");
+            setKeybindsOpen(true);
+          }}
+        />
+      )}
 
       {keybindsOpen && (
         <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setKeybindsOpen(false); }}>

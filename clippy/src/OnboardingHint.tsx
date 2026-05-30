@@ -61,15 +61,17 @@ export function OnboardingHint(props: { keybinds: Keybinds }) {
               <kbd>{formatKeybind(props.keybinds.openFile)}</kbd>.
             </li>
             <li>
-              On region chips, the <b>colored dot is clickable</b> — pick
-              from a cool palette.
+              The rail on the right has <b>Audio / Regions / Crop</b> tabs.
+              In <b>Regions</b>, double-click a region's name to rename it,
+              or click the colored swatch to recolor.
             </li>
             <li>
-              In the audio mixer, <b>click track names</b> to rename them
-              and <b>click the colored dots</b> to recolor.
+              In <b>Audio</b>, double-click a track name to rename it and
+              click its colored dot to recolor.
             </li>
             <li>
-              Hit the <b>?</b> in the topbar any time for the full tips list.
+              Hit the <b>?</b> in the topbar any time for the full tips list,
+              or the <b>gear</b> next to it for Settings.
             </li>
           </ul>
         </div>

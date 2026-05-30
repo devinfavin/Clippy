@@ -23,21 +23,33 @@ pub struct ReplaySaveDir(pub Mutex<PathBuf>);
 /// then taken (cleared) by the frontend on first mount.
 pub struct InitialPath(pub Mutex<Option<String>>);
 
-pub(crate) fn parse_initial_path() -> Option<String> {
+/// Scan an arg list for the first plausible video file path. Used both at
+/// startup (from `std::env::args()`) and from the single-instance plugin's
+/// callback (which hands us the second launch's argv).
+pub(crate) fn pick_video_path<I, S>(args: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     const VIDEO_EXTS: &[&str] = &["mp4", "mkv", "mov", "webm", "m4v", "avi"];
-    for arg in std::env::args().skip(1) {
-        if arg.starts_with('-') {
+    for arg in args.into_iter() {
+        let arg_str = arg.as_ref();
+        if arg_str.starts_with('-') {
             continue;
         }
-        let lower = arg.to_lowercase();
+        let lower = arg_str.to_lowercase();
         let ext_ok = VIDEO_EXTS
             .iter()
             .any(|e| lower.ends_with(&format!(".{}", e)));
-        if ext_ok && std::path::Path::new(&arg).is_file() {
-            return Some(arg);
+        if ext_ok && std::path::Path::new(arg_str).is_file() {
+            return Some(arg_str.to_string());
         }
     }
     None
+}
+
+pub(crate) fn parse_initial_path() -> Option<String> {
+    pick_video_path(std::env::args().skip(1))
 }
 
 #[tauri::command]

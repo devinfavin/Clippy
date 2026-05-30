@@ -13,7 +13,14 @@ import { formatKeybind, type Keybinds } from "./keybinds";
  * has bound to that action, so the modal never lies about a default the
  * user has rebound.
  */
-export function TipsModal(props: { keybinds: Keybinds; onClose: () => void }) {
+export function TipsModal(props: {
+  keybinds: Keybinds;
+  onClose: () => void;
+  /** Open Settings → Keyboard from the footer link. The link previously
+   *  read as instructive text only; making it actionable closes the loop
+   *  for users who want to rebind without hunting for the gear. */
+  onOpenKeyboardSettings: () => void;
+}) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -84,7 +91,14 @@ export function TipsModal(props: { keybinds: Keybinds; onClose: () => void }) {
           </div>
         </div>
         <footer className="modal-footer tips-footer">
-          <span className="filemeta-empty">Open Settings → Keyboard for the full list and rebindings.</span>
+          <button
+            type="button"
+            className="tips-open-settings"
+            onClick={() => { props.onOpenKeyboardSettings(); props.onClose(); }}
+            title="Open Settings → Keyboard"
+          >
+            Open Settings → Keyboard for the full list and rebindings.
+          </button>
           <button className="btn primary" onClick={props.onClose}>
             Got it
           </button>

@@ -1,6 +1,13 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { fmtTime } from "../formatters";
-import { REGION_COLORS, resolveRegionColor, SPEED_PRESETS, type Region } from "../types";
+import { useDismissPopover } from "../hooks/use-dismiss-popover";
+import {
+  REGION_COLORS,
+  regionDisplayName,
+  resolveRegionColor,
+  SPEED_PRESETS,
+  type Region,
+} from "../types";
 
 type Props = {
   regions: Region[];
@@ -8,8 +15,10 @@ type Props = {
   playheadSecs: number;
   hasSource: boolean;
   loopingRegionId: string | null;
-  /** Notify parent the user clicked a region — parent decides whether to seek. */
-  onFocus: (id: string) => void;
+  /** Notify parent the user clicked a region. Passing `null` deselects.
+   *  Clicking the already-active row toggles selection off. Parent decides
+   *  whether to seek. */
+  onFocus: (id: string | null) => void;
   /** Add a new region from the playhead position. Parent owns the geometry/
    *  collision rules; this panel just fires the intent. */
   onAddFromPlayhead: () => void;
@@ -26,10 +35,9 @@ type Props = {
  * region expands inline to expose speed pills, crop indicator, loop, and
  * delete. Hosted inside the editor rail's Regions tab.
  *
- * `Region` has no `name` field today; the chip strip just used "Region N" by
- * natural index. The panel does the same and stores rename input locally
- * (sentinel: not persisted) so the rename UX works without an immediate
- * type/back-end change. A future pass can persist `region.name`.
+ * Rename writes through `onRename` to the parent, which patches `region.name`
+ * and persists via `useProjectAutosave`. `regionDisplayName` falls back to
+ * "Region N" by natural index when the user hasn't renamed.
  */
 export function RegionsPanel(props: Props) {
   const {
@@ -49,7 +57,6 @@ export function RegionsPanel(props: Props) {
   } = props;
 
   const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [localNames, setLocalNames] = useState<Record<string, string>>({});
 
   // Display palette without the 4× preset (scope: speed ceiling stays at 2×;
   // the legacy 4× entry stays valid in saved data but isn't exposed in new UI).
@@ -87,13 +94,13 @@ export function RegionsPanel(props: Props) {
             const dur = r.outSecs - r.inSecs;
             const speed = r.speed ?? 1;
             const looping = loopingRegionId === r.id;
-            const displayName = localNames[r.id] ?? `Region ${i + 1}`;
+            const displayName = regionDisplayName(r, i);
             return (
               <li
                 key={r.id}
                 className={`region-row${active ? " active" : ""}`}
                 style={{ ["--tint-color" as never]: color }}
-                onClick={() => onFocus(r.id)}
+                onClick={() => onFocus(active ? null : r.id)}
               >
                 <div className="region-row-head">
                   <span className="region-row-id" aria-hidden>{i + 1}</span>
@@ -103,11 +110,10 @@ export function RegionsPanel(props: Props) {
                       defaultValue={displayName}
                       onClick={(e) => e.stopPropagation()}
                       onBlur={(e) => {
-                        const v = e.currentTarget.value.trim();
-                        if (v) {
-                          setLocalNames((m) => ({ ...m, [r.id]: v }));
-                          onRename(r.id, v);
-                        }
+                        // Empty string clears the override; parent helper
+                        // strips the field. No local fallback needed —
+                        // regionDisplayName handles "Region N".
+                        onRename(r.id, e.currentTarget.value);
                         setRenamingId(null);
                       }}
                       onKeyDown={(e) => {
@@ -176,9 +182,10 @@ export function RegionsPanel(props: Props) {
                         className={`region-row-icon-btn${looping ? " active" : ""}`}
                         onClick={() => onToggleLoop(r.id)}
                         title={looping ? "Stop looping" : "Loop this region"}
+                        aria-label={looping ? "Stop looping" : "Loop this region"}
                       >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                             strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                             strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                           <path d="M17 2l4 4-4 4M3 12V8a4 4 0 014-4h14M7 22l-4-4 4-4M21 12v4a4 4 0 01-4 4H3" />
                         </svg>
                       </button>
@@ -187,10 +194,11 @@ export function RegionsPanel(props: Props) {
                         className="region-row-icon-btn region-row-delete"
                         onClick={() => onDelete(r.id)}
                         title="Delete region"
+                        aria-label="Delete region"
                       >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                             strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                          <path d="M6 6l12 12M18 6L6 18" />
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                             strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6M10 11v6M14 11v6" />
                         </svg>
                       </button>
                     </div>
@@ -206,32 +214,38 @@ export function RegionsPanel(props: Props) {
 }
 
 /** Inline swatch popover. Lives next to the loop/delete actions in the
- *  expanded row. Kept tiny — the full ColorPicker is overkill here. */
+ *  expanded row. Kept tiny — the full ColorPicker is overkill here.
+ *
+ *  Dismisses on Esc or outside-click (via useDismissPopover); the older
+ *  onMouseLeave path stranded the popover when the user clicked but didn't
+ *  sweep the cursor away. */
 function RegionColorButton(props: {
   color: string;
   colorIndex: number;
   onPick: (idx: number) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLSpanElement | null>(null);
+  useDismissPopover(open, wrapRef, () => setOpen(false));
   return (
-    <span className="region-row-color-wrap">
+    <span className="region-row-color-wrap" ref={wrapRef}>
       <button
         type="button"
         className="region-row-color-btn"
         style={{ background: props.color }}
-        onClick={() => setOpen((v) => !v)}
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
         title="Change region color"
         aria-label="Change region color"
       />
       {open && (
-        <span className="region-row-color-pop" onMouseLeave={() => setOpen(false)}>
+        <span className="region-row-color-pop">
           {REGION_COLORS.map((c, i) => (
             <button
               key={i}
               type="button"
               className={`region-row-color-swatch${i === props.colorIndex ? " selected" : ""}`}
               style={{ background: c }}
-              onClick={() => { props.onPick(i); setOpen(false); }}
+              onClick={(e) => { e.stopPropagation(); props.onPick(i); setOpen(false); }}
               aria-label={`Color slot ${i + 1}`}
             />
           ))}

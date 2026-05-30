@@ -1,4 +1,4 @@
-import { ASPECT_PRESETS, type AspectLock, type Crop, type Region } from "../types";
+import { RAIL_CROP_PRESETS, regionDisplayName, type AspectLock, type Crop, type Region } from "../types";
 import { fittedSourceCropFor } from "../cropGeom";
 
 type Props = {
@@ -10,12 +10,20 @@ type Props = {
   sourceWidth: number;
   sourceHeight: number;
   hasSource: boolean;
+  /** Total number of regions in the project. Used to decide whether to
+   *  surface the "Apply to all regions" footer button (only meaningful at
+   *  2+). */
+  regionCount: number;
   /** Open the full crop editor (CropOverlay modal) for this region. The
    *  aspect chips here are quick presets; precise dragging happens there. */
   onLaunchEditor: (regionId: string) => void;
   /** Apply a preset aspect to the active region without opening the editor.
    *  `undefined` clears the crop. */
   onSetPresetForActive: (crop: Crop | undefined) => void;
+  /** Apply the active region's current crop to every region. The export
+   *  modal tells users to do this when a stitched export's regions have
+   *  different crops; surfacing it here avoids the editor-modal detour. */
+  onApplyToAll: (crop: Crop) => void;
 };
 
 /**
@@ -30,10 +38,11 @@ type Props = {
  */
 export function CropPanel(props: Props) {
   const { activeRegion, activeRegionIndex, sourceWidth, sourceHeight, hasSource,
-          onLaunchEditor, onSetPresetForActive } = props;
+          regionCount, onLaunchEditor, onSetPresetForActive, onApplyToAll } = props;
 
   const canEdit = hasSource && activeRegion != null;
   const currentCrop = activeRegion?.crop;
+  const canApplyToAll = canEdit && currentCrop != null && regionCount > 1;
 
   return (
     <div className="crop-panel">
@@ -45,13 +54,13 @@ export function CropPanel(props: Props) {
         <span>Aspect</span>
         <span className="crop-panel-region">
           {activeRegion
-            ? `Region ${(activeRegionIndex ?? 0) + 1}`
+            ? regionDisplayName(activeRegion, activeRegionIndex ?? 0)
             : "Pick a region first"}
         </span>
       </div>
 
       <div className="crop-panel-presets">
-        {ASPECT_PRESETS.map((preset) => (
+        {RAIL_CROP_PRESETS.map((preset) => (
           <CropAspectButton
             key={presetKey(preset)}
             preset={preset}
@@ -62,16 +71,9 @@ export function CropPanel(props: Props) {
             onPick={(crop) => onSetPresetForActive(crop)}
           />
         ))}
-        <button
-          type="button"
-          className="crop-preset-btn crop-preset-clear"
-          disabled={!canEdit || !currentCrop}
-          onClick={() => onSetPresetForActive(undefined)}
-          title="Clear the crop on this region"
-        >
-          <span className="crop-preset-label">Clear</span>
-          <span className="crop-preset-sub mono">no crop</span>
-        </button>
+        {/* Clear button removed — "Source" preset already clears the crop
+            (see CropAspectButton.handle: source → onPick(undefined)). After
+            dropping the Free entry, Clear was just a duplicate row. */}
       </div>
 
       <div className="crop-panel-output">
@@ -97,6 +99,25 @@ export function CropPanel(props: Props) {
           title="Open the precise crop editor for this region"
         >
           Open crop editor…
+        </button>
+        {/* Apply-to-all — only meaningful with 2+ regions AND an existing
+            crop on the active region. Stitched export blocks on crop
+            mismatch and explicitly tells the user to "Apply to all"; this
+            avoids the editor-modal round-trip the error message implies. */}
+        <button
+          type="button"
+          className="btn ghost"
+          disabled={!canApplyToAll}
+          onClick={() => currentCrop && onApplyToAll(currentCrop)}
+          title={
+            canApplyToAll
+              ? "Copy this region's crop to every region — required for stitched export"
+              : regionCount <= 1
+                ? "Only one region — nothing else to apply this crop to"
+                : "Set a crop on this region first"
+          }
+        >
+          Apply to all
         </button>
       </div>
     </div>

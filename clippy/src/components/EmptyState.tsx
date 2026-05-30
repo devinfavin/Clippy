@@ -16,6 +16,11 @@ type Props = {
   /** Called when the user picks a recent clip. Passes the absolute path so
    *  the parent can reuse loadFile. */
   onLoadPath: (path: string) => void;
+  /** Open the Settings modal. Surfaced on the Hero variant so a first-launch
+   *  user with the buffer off has a discoverable way in without first
+   *  loading a clip — the gear in the topbar appears only on the editor
+   *  layout, not the empty state. */
+  onOpenSettings: () => void;
 };
 
 /**
@@ -42,12 +47,12 @@ export function EmptyState(props: Props) {
   // Until the list lands, show Hero — it works for both cases and avoids a
   // flash of layout while the IPC resolves. ~50ms in practice.
   if (recents == null || recents.length === 0) {
-    return <Hero onOpenDialog={props.onOpenDialog} />;
+    return <Hero onOpenDialog={props.onOpenDialog} onOpenSettings={props.onOpenSettings} />;
   }
   return <Recent recents={recents} onOpenDialog={props.onOpenDialog} onLoadPath={props.onLoadPath} />;
 }
 
-function Hero(props: { onOpenDialog: () => void }) {
+function Hero(props: { onOpenDialog: () => void; onOpenSettings: () => void }) {
   return (
     <div className="empty-hero">
       <div className="empty-hero-inner">
@@ -68,6 +73,12 @@ function Hero(props: { onOpenDialog: () => void }) {
           <button className="btn primary empty-hero-cta" onClick={props.onOpenDialog} type="button">
             Open video…
           </button>
+          {/* Settings link — without it, a first-launch user with the buffer
+              off can't configure the buffer without first opening a clip
+              (the topbar gear only renders inside the editor layout). */}
+          <button className="btn ghost empty-hero-cta" onClick={props.onOpenSettings} type="button">
+            Settings
+          </button>
           <span className="empty-hero-hint">or drag a video here</span>
         </div>
       </div>
@@ -80,6 +91,15 @@ function Recent(props: {
   onOpenDialog: () => void;
   onLoadPath: (path: string) => void;
 }) {
+  // "Open folder" reveals the save directory in Explorer. We don't have the
+  // directory path in `recents` (each entry only carries the file path), so
+  // pass the first recent to reveal_in_folder — it lands the user in the
+  // save folder with that file selected, which matches the user intent.
+  // Falls back to /select on the file path, see storage::reveal_in_folder.
+  const openFolder = () => {
+    if (props.recents.length === 0) return;
+    invoke("reveal_in_folder", { path: props.recents[0].path }).catch(() => {});
+  };
   return (
     <div className="empty-recent">
       <div className="empty-recent-left">
@@ -102,6 +122,14 @@ function Recent(props: {
           <span className="empty-recent-list-count">
             {props.recents.length} clip{props.recents.length === 1 ? "" : "s"}
           </span>
+          <button
+            type="button"
+            className="empty-recent-open-folder"
+            onClick={openFolder}
+            title="Reveal the save folder in Explorer"
+          >
+            Open folder
+          </button>
         </div>
         <ul className="empty-recent-list" role="list">
           {props.recents.map((r) => (
