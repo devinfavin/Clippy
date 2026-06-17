@@ -160,7 +160,7 @@ function Editor() {
   const [exportSize, setExportSize] = useState<SizeLimit>(SIZE_PRESETS[0]);
   const [exportMode, setExportMode] = useState<ExportMode>("separate");
   const [exportFormat, setExportFormat] = useState<ExportFormat>("mp4");
-  const [exportNormalize, setExportNormalize] = useState(false);
+  const [exportPreserveTracks, setExportPreserveTracks] = useState(false);
   // Per-track mute + volume for multi-audio sources. Persisted with project.
   const [trackMix, setTrackMix] = useState<TrackMix>({});
   // Per-track color overrides (palette-slot per stream-index). User picks via
@@ -991,7 +991,7 @@ function Editor() {
             srcPath,
             regions: regionPayload,
             outputPath: dest,
-            normalize: exportNormalize,
+            preserveMultiTrack: exportPreserveTracks,
             trackMix: defaultMixPayload,
             totalAudioTracks,
           });
@@ -1001,7 +1001,7 @@ function Editor() {
             regions: regionPayload,
             outputPath: dest,
             targetSizeMb: exportSize.mb,
-            normalize: exportNormalize,
+            preserveMultiTrack: exportPreserveTracks,
             trackMix: defaultMixPayload,
             totalAudioTracks,
           });
@@ -1010,7 +1010,7 @@ function Editor() {
             srcPath,
             regions: regionPayload,
             outputPath: dest,
-            normalize: exportNormalize,
+            preserveMultiTrack: exportPreserveTracks,
             trackMix: defaultMixPayload,
             totalAudioTracks,
           });
@@ -1066,7 +1066,7 @@ function Editor() {
             outSecs: c.outSecs,
             outputPath: outputPaths[i],
             speed: c.speed ?? null,
-            normalize: exportNormalize,
+            preserveMultiTrack: exportPreserveTracks,
             trackMix: mixToPayload(c.mix),
             totalAudioTracks,
           });
@@ -1079,7 +1079,7 @@ function Editor() {
             targetSizeMb: exportSize.mb,
             crop: c.crop ?? null,
             speed: c.speed ?? null,
-            normalize: exportNormalize,
+            preserveMultiTrack: exportPreserveTracks,
             trackMix: mixToPayload(c.mix),
             totalAudioTracks,
           });
@@ -1091,7 +1091,7 @@ function Editor() {
             outputPath: outputPaths[i],
             crop: c.crop ?? null,
             speed: c.speed ?? null,
-            normalize: exportNormalize,
+            preserveMultiTrack: exportPreserveTracks,
             trackMix: mixToPayload(c.mix),
             totalAudioTracks,
           });
@@ -1102,7 +1102,7 @@ function Editor() {
     } catch (e) {
       setPhase({ kind: "error", message: String(e) });
     }
-  }, [srcPath, collectClips, exportMode, exportSize, exportFormat, exportNormalize, exportGifResolution, info, trackMix]);
+  }, [srcPath, collectClips, exportMode, exportSize, exportFormat, exportPreserveTracks, exportGifResolution, info, trackMix]);
 
   // Alias for the keybind dispatcher.
   const handleExport = openExport;
@@ -1975,8 +1975,8 @@ function Editor() {
           setSize={setExportSize}
           format={exportFormat}
           setFormat={setExportFormat}
-          normalize={exportNormalize}
-          setNormalize={setExportNormalize}
+          preserveMultiTrack={exportPreserveTracks}
+          setPreserveMultiTrack={setExportPreserveTracks}
           gifResolution={exportGifResolution}
           setGifResolution={setExportGifResolution}
           sourceWidth={info?.width ?? 0}

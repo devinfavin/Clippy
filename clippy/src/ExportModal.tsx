@@ -68,8 +68,8 @@ export function ExportModal(props: {
   setSize: (s: SizeLimit) => void;
   format: ExportFormat;
   setFormat: (f: ExportFormat) => void;
-  normalize: boolean;
-  setNormalize: (n: boolean) => void;
+  preserveMultiTrack: boolean;
+  setPreserveMultiTrack: (p: boolean) => void;
   gifResolution: GifResolution;
   setGifResolution: (g: GifResolution) => void;
   sourceWidth: number;
@@ -267,15 +267,20 @@ export function ExportModal(props: {
             />
           )}
 
-          {!isGif && (
+          {!isGif && !isAudio && (
             <div className="export-toggle-row">
               <div className="export-toggle-text">
-                <div className="export-toggle-label">Normalize loudness</div>
+                <div className="export-toggle-label">Preserve multi-track audio</div>
                 <div className="export-toggle-sub">
-                  Boosts quiet game audio to a Discord-friendly level (~-16 LUFS).
+                  Keep every audio track as its own stream for NLE editing. Off
+                  (the default) folds your mix into one stereo track for
+                  universal playback (Windows Photos, Discord, web).
                 </div>
               </div>
-              <Toggle value={props.normalize} onChange={props.setNormalize} />
+              <Toggle
+                value={props.preserveMultiTrack}
+                onChange={props.setPreserveMultiTrack}
+              />
             </div>
           )}
 

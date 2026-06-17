@@ -22,7 +22,7 @@ type HarnessOverrides = Partial<{
   mode: ExportMode;
   size: SizeLimit;
   format: ExportFormat;
-  normalize: boolean;
+  preserveMultiTrack: boolean;
   gifResolution: GifResolution;
   sourceWidth: number;
   sourceHeight: number;
@@ -38,7 +38,9 @@ function Harness(props: {
   const [mode, setMode] = useState<ExportMode>(props.init?.mode ?? "separate");
   const [size, setSize] = useState<SizeLimit>(props.init?.size ?? SIZE_PRESETS[0]);
   const [format, setFormat] = useState<ExportFormat>(props.init?.format ?? "mp4");
-  const [normalize, setNormalize] = useState<boolean>(props.init?.normalize ?? false);
+  const [preserveMultiTrack, setPreserveMultiTrack] = useState<boolean>(
+    props.init?.preserveMultiTrack ?? false
+  );
   const [gifResolution, setGifResolution] = useState<GifResolution>(
     props.init?.gifResolution ?? GIF_DEFAULT_RESOLUTION
   );
@@ -51,8 +53,8 @@ function Harness(props: {
       setSize={setSize}
       format={format}
       setFormat={setFormat}
-      normalize={normalize}
-      setNormalize={setNormalize}
+      preserveMultiTrack={preserveMultiTrack}
+      setPreserveMultiTrack={setPreserveMultiTrack}
       gifResolution={gifResolution}
       setGifResolution={setGifResolution}
       sourceWidth={props.init?.sourceWidth ?? 1920}
