@@ -560,8 +560,12 @@ pub async fn export_concat_sized(
     let post_filters = build_audio_post_mix_filters(first.speed);
     // Per-region mix wins; falls back to function-level mix.
     let active_mix: &[TrackGain] = first.mix.as_deref().unwrap_or(&mix);
-    let mux =
-        build_audio_filter_complex(active_mix, total_tracks, &post_filters, preserve_multi_track);
+    let mux = build_audio_filter_complex(
+        active_mix,
+        total_tracks,
+        &post_filters,
+        preserve_multi_track,
+    );
 
     // Write a concat list (forward slashes + escaped quotes for ffmpeg).
     let temp_dir = std::env::temp_dir().join("clippy");
@@ -711,11 +715,7 @@ async fn cut_segment(
             }
             args.extend(encoder_args_high_quality(enc).into_iter().map(String::from));
             push_audio_output_args(&mut args, &mux, 192);
-            args.extend([
-                "-map_chapters".into(),
-                "-1".into(),
-                out_path.into(),
-            ]);
+            args.extend(["-map_chapters".into(), "-1".into(), out_path.into()]);
             let t0 = std::time::Instant::now();
             match crate::ffmpeg::run_ffmpeg(app, "cut", args, 0.0, |_, _| {}).await {
                 Ok(()) => {
@@ -1482,7 +1482,8 @@ pub async fn export_concat_gif(
         let seg_path = temp_dir.join(format!("seg-gif-{}-{}.mp4", stamp, idx));
         let seg_str = seg_path.to_string_lossy().to_string();
         // GIF drops audio in stage 2, so the mix is irrelevant here.
-        if let Err(e) = cut_segment(&app, &src_path, region.clone(), &seg_str, &[], 0, false).await {
+        if let Err(e) = cut_segment(&app, &src_path, region.clone(), &seg_str, &[], 0, false).await
+        {
             for s in &temp_segments {
                 let _ = std::fs::remove_file(s);
             }
@@ -1639,7 +1640,9 @@ mod tests {
     fn fc_single_track_non_unity_emits_volume_filter() {
         let mix = vec![gain(0, 0.5)];
         let mux = build_audio_filter_complex(&mix, 1, "", false);
-        let fc = mux.filter_complex.expect("non-unity volume requires a graph");
+        let fc = mux
+            .filter_complex
+            .expect("non-unity volume requires a graph");
         assert!(fc.contains("volume=0.5000"), "graph: {fc}");
         assert_eq!(mux.maps, vec!["[aout]"]);
     }
@@ -1679,7 +1682,10 @@ mod tests {
         let mux = build_audio_filter_complex(&mix, 3, "", true);
         let fc = mux.filter_complex.expect("non-identity mix needs a graph");
         // Track 2 muted → 2 surviving streams; no amix (preserve never folds).
-        assert!(!fc.contains("amix"), "preserve must NOT fold via amix: {fc}");
+        assert!(
+            !fc.contains("amix"),
+            "preserve must NOT fold via amix: {fc}"
+        );
         assert!(fc.contains("[0:a:0]volume=1.0000[a0]"), "graph: {fc}");
         assert!(fc.contains("[0:a:1]volume=0.5000[a1]"), "graph: {fc}");
         assert_eq!(mux.maps, vec!["[a0]", "[a1]"]);
@@ -1693,8 +1699,14 @@ mod tests {
         // track, not just one fold-down stream.
         let mux = build_audio_filter_complex(&[], 2, "atempo=2.0000", true);
         let fc = mux.filter_complex.expect("post-filters force a graph");
-        assert!(fc.contains("[0:a:0]volume=1.0000,atempo=2.0000[a0]"), "graph: {fc}");
-        assert!(fc.contains("[0:a:1]volume=1.0000,atempo=2.0000[a1]"), "graph: {fc}");
+        assert!(
+            fc.contains("[0:a:0]volume=1.0000,atempo=2.0000[a0]"),
+            "graph: {fc}"
+        );
+        assert!(
+            fc.contains("[0:a:1]volume=1.0000,atempo=2.0000[a1]"),
+            "graph: {fc}"
+        );
         assert_eq!(mux.maps, vec!["[a0]", "[a1]"]);
         assert!(mux.needs_encode);
     }
@@ -1706,7 +1718,9 @@ mod tests {
         // with no audio at all.
         let mix = vec![gain(0, 0.0), gain(1, 0.0)];
         let mux = build_audio_filter_complex(&mix, 2, "", true);
-        let fc = mux.filter_complex.expect("preserve + all-muted needs anullsrc");
+        let fc = mux
+            .filter_complex
+            .expect("preserve + all-muted needs anullsrc");
         assert!(fc.contains("anullsrc"), "graph: {fc}");
         assert_eq!(mux.maps, vec!["[a0]"]);
         assert!(mux.needs_encode);
