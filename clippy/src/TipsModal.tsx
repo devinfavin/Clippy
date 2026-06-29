@@ -75,8 +75,9 @@ export function TipsModal(props: {
 
             <TipCard title="Export">
               <kbd className="tip-kbd">{formatKeybind(k.export)}</kbd> opens the export dialog (MP4 / MP3 / GIF).
-              Toggle <b>Normalize loudness</b> to boost quiet game audio to a
-              Discord-friendly level without touching the mix.
+              MP4 defaults to a single stereo track for universal playback;
+              toggle <b>Preserve multi-track audio</b> to keep every track
+              separate for NLE editing.
             </TipCard>
 
             <TipCard title="Save a frame">
