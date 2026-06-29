@@ -1014,12 +1014,16 @@ kbd {
 }
 .transport-buttons button {
   width: 36px;
-  padding: 5px 0;
-  text-align: center;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   border-color: transparent;
   color: var(--text-2);
 }
+.transport-buttons button svg { display: block; }
 .transport-buttons button:hover:not(:disabled) {
   background: var(--panel-2);
   border-color: var(--border-2);
@@ -1030,7 +1034,6 @@ kbd {
 .transport-buttons .play {
   width: 56px;
   height: 36px;
-  font-size: var(--type-emphasis);
   background: var(--accent-tint);
   border-color: color-mix(in srgb, var(--accent) 50%, transparent);
   color: var(--accent);

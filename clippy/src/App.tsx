@@ -173,6 +173,9 @@ function Editor() {
   // Post-export toast: list of files just produced.
   const [lastExport, setLastExport] = useState<{ paths: string[] } | null>(null);
   const [replaySavedToast, setReplaySavedToast] = useState<string | null>(null);
+  // Surfaces replay-buffer save failures (which are otherwise console-only) so
+  // an in-game save that fails reaches the user via StatusStrip.
+  const [replayError, setReplayError] = useState<string | null>(null);
 
   // Waveforms: one Float32Array of peak amplitudes per audio track, keyed by
   // track index. Single-track sources end up with a single entry at key 0.
@@ -386,7 +389,7 @@ function Editor() {
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   useDragDropFile(loadFile, setIsDraggingFile);
   useReplayAutoStart();
-  useReplaySavedToast(loadFile, setReplaySavedToast);
+  useReplaySavedToast(loadFile, setReplaySavedToast, setReplayError);
   useProxyProgress(setPhase);
   useExportProgress(setPhase);
 
@@ -680,21 +683,32 @@ function Editor() {
       videoRef.current?.play().catch(() => {});
     }
   }, []);
-  const editingRegion = cropEditingRegionId
-    ? regions.find((r) => r.id === cropEditingRegionId)
-    : null;
+  const editingRegion = useMemo(
+    () => (cropEditingRegionId ? regions.find((r) => r.id === cropEditingRegionId) ?? null : null),
+    [regions, cropEditingRegionId],
+  );
 
   // Active cropped region for the read-only indicator: first region whose crop
-  // is set AND contains the playhead. Re-evaluates each render — cheap.
-  const activeCroppedRegion = regions.find(
-    (r) => r.crop && currentTime >= r.inSecs && currentTime <= r.outSecs
+  // is set AND contains the playhead. Memoized on currentTime+regions so
+  // downstream `memo()` consumers see a stable reference between time updates
+  // that don't actually cross a region boundary.
+  const activeCroppedRegion = useMemo(
+    () =>
+      regions.find(
+        (r) => r.crop && currentTime >= r.inSecs && currentTime <= r.outSecs,
+      ) ?? null,
+    [regions, currentTime],
   );
 
   // Region containing the playhead (first match, sorted by inSecs already).
   // Drives the PLAYBACK mix only — as the playhead crosses a region boundary,
   // useAudioTracks switches gains to that region's mix in real time.
-  const playheadRegion = regions.find(
-    (r) => currentTime >= r.inSecs && currentTime <= r.outSecs
+  const playheadRegion = useMemo(
+    () =>
+      regions.find(
+        (r) => currentTime >= r.inSecs && currentTime <= r.outSecs,
+      ) ?? null,
+    [regions, currentTime],
   );
   // Region that the AUDIO MIXER edits. Anchored to the user's explicit
   // selection (clicking a region in the rail) rather than the playhead so
@@ -702,9 +716,27 @@ function Editor() {
   // playhead happens to be inside the region at click time. Falls back to
   // the playhead-containing region (for the legacy "scrub through a region
   // and tweak its mix" workflow) and then to global if neither applies.
-  const audioEditRegion =
-    regions.find((r) => r.id === activeRegionId) ?? playheadRegion ?? null;
-  const audioEditRegionIndex = audioEditRegion ? regions.indexOf(audioEditRegion) : -1;
+  const audioEditRegion = useMemo(
+    () => regions.find((r) => r.id === activeRegionId) ?? playheadRegion ?? null,
+    [regions, activeRegionId, playheadRegion],
+  );
+  const audioEditRegionIndex = useMemo(
+    () => (audioEditRegion ? regions.indexOf(audioEditRegion) : -1),
+    [regions, audioEditRegion],
+  );
+
+  // The rail's "active region" chip — stabilize the object identity so any
+  // future React.memo on EditorRail isn't defeated by a fresh literal per render.
+  const railActiveRegion = useMemo(() => {
+    const r = regions.find((x) => x.id === activeRegionId) ?? playheadRegion ?? null;
+    if (!r) return null;
+    const idx = regions.indexOf(r);
+    return {
+      name: regionDisplayName(r, idx),
+      color: resolveRegionColor(r, idx),
+      number: idx + 1,
+    };
+  }, [regions, activeRegionId, playheadRegion]);
   // Two views on the mix:
   //   • editMix — what the AudioPanel reads/writes. Tied to the selected
   //     region so a mute lands on the right slice of state.
@@ -1396,6 +1428,13 @@ function Editor() {
         onDismiss: () => setPhase({ kind: srcPath ? "ready" : "idle" }),
       };
     }
+    if (replayError) {
+      return {
+        kind: "error",
+        message: replayError,
+        onDismiss: () => setReplayError(null),
+      };
+    }
     if (phase.kind === "probing") {
       return { kind: "phase", label: "Reading file metadata…" };
     }
@@ -1453,6 +1492,7 @@ function Editor() {
     srcPath,
     lastExport,
     replaySavedToast,
+    replayError,
     loadFile,
     frameToast,
     isScrubbing,
@@ -1664,16 +1704,7 @@ function Editor() {
         onTabChange={setRailTab}
         regionCount={regions.length}
         hasAudio={!!info && info.audio_tracks.length >= 1}
-        activeRegion={(() => {
-          const r = regions.find((x) => x.id === activeRegionId) ?? playheadRegion ?? null;
-          if (!r) return null;
-          const idx = regions.indexOf(r);
-          return {
-            name: regionDisplayName(r, idx),
-            color: resolveRegionColor(r, idx),
-            number: idx + 1,
-          };
-        })()}
+        activeRegion={railActiveRegion}
         audio={
           info && info.audio_tracks.length >= 1 ? (
             <AudioPanel
@@ -1783,13 +1814,65 @@ function Editor() {
         </div>
 
         <div className="transport-buttons">
-          <button onClick={() => seek(0)} title={formatKeybind(keybinds.jumpStart)}>⏮</button>
-          <button onClick={() => stepFrames(-1)} title={formatKeybind(keybinds.frameBack)}>◀</button>
-          <button onClick={playPause} title={formatKeybind(keybinds.playPause)} className="play">
-            {isPlaying ? "⏸" : "▶"}
+          <button
+            onClick={() => seek(0)}
+            title={formatKeybind(keybinds.jumpStart)}
+            aria-label="Jump to start"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <polygon points="19 20 9 12 19 4" />
+              <line x1="5" y1="19" x2="5" y2="5" />
+            </svg>
           </button>
-          <button onClick={() => stepFrames(1)} title={formatKeybind(keybinds.frameForward)}>▶</button>
-          <button onClick={() => seek(duration)} title={formatKeybind(keybinds.jumpEnd)}>⏭</button>
+          <button
+            onClick={() => stepFrames(-1)}
+            title={formatKeybind(keybinds.frameBack)}
+            aria-label="Step back one frame"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+          </button>
+          <button
+            onClick={playPause}
+            title={formatKeybind(keybinds.playPause)}
+            className="play"
+            aria-label={isPlaying ? "Pause" : "Play"}
+          >
+            {isPlaying ? (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                <rect x="6" y="4" width="4" height="16" rx="1" />
+                <rect x="14" y="4" width="4" height="16" rx="1" />
+              </svg>
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                <polygon points="6 4 20 12 6 20 6 4" />
+              </svg>
+            )}
+          </button>
+          <button
+            onClick={() => stepFrames(1)}
+            title={formatKeybind(keybinds.frameForward)}
+            aria-label="Step forward one frame"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+          </button>
+          <button
+            onClick={() => seek(duration)}
+            title={formatKeybind(keybinds.jumpEnd)}
+            aria-label="Jump to end"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <polygon points="5 4 15 12 5 20 5 4" />
+              <line x1="19" y1="5" x2="19" y2="19" />
+            </svg>
+          </button>
         </div>
 
       <section
