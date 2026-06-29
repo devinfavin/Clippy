@@ -19,31 +19,46 @@ pub mod windows_impl {
                 MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
                 MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
                 MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_REGISTER_TYPE_INFO,
-                MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-                MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_VERSION,
+                MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+                MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
+                MF_VERSION,
             },
         },
     };
 
-    // ----- ICodecAPI (hand-rolled) -----
+    // ----- Rate control plumbing -----
+    //
+    // The same CODECAPI GUIDs (rate-control mode, mean bitrate, GOP size) can
+    // reach an encoder MFT through two different paths: `IMFAttributes` on the
+    // encoder's attribute store, or `ICodecAPI::SetValue`. Different vendors'
+    // MFTs honor different paths — and the failure mode is silent. We try the
+    // attribute path first (what OBS/Chromium/ffmpeg use as primary), then fall
+    // back to ICodecAPI for any property that didn't land.
+    //
+    // Why this matters: setting only `MF_MT_AVG_BITRATE` on the output type
+    // leaves the AMD AMF MFT in its default quality-targeted VBR mode with
+    // `peak_bitrate ≈ 2 × target`. Observed effect on a 30 Mbps target: ~55
+    // Mbps actual on motion-heavy content, nearly doubling buffer RAM and
+    // saved-clip size. Setting CBR + mean bitrate via the attribute path makes
+    // AMD's MFT engage true CBR. The ICodecAPI route accepts the mode-change
+    // call (returns S_OK) but rejects the bitrate update with E_NOTIMPL, so
+    // the encoder never actually leaves VBR — see diag_2026-06-20 for the
+    // smoking gun. The GOP setter is the same plumbing gap; without it, the
+    // encoder picks its own GOP (~30 frames on AMD MFT, ~250 on others)
+    // regardless of the user's keyframe interval setting.
+    //
+    // `MF_LOW_LATENCY = 1` on the attribute store tells the MFT we're a live
+    // workload; without it AMD's MFT picks a transcode-quality preset that
+    // biases toward overshooting target bitrate even in CBR mode.
     //
     // `windows-rs 0.58`'s Media-Audio / MediaFoundation feature set doesn't
     // expose `ICodecAPI` or the rate-control codec API GUIDs. Pulling in
     // `Win32_Media_DirectShow` to get them adds noticeable compile time and
     // disk size for a single interface, so we hand-roll the COM vtable call
     // here the same way `process_loopback.rs` does for
-    // `IActivateAudioInterfaceCompletionHandler`.
-    //
-    // The plumbing matters because setting only `MF_MT_AVG_BITRATE` on the
-    // output type — which is what the encoder did before this — leaves the
-    // AMD AMF MFT in its default quality-targeted VBR mode. Observed effect:
-    // a 30 Mbps target produced ~55 Mbps in practice, nearly doubling buffer
-    // RAM and saved-clip size. Setting CBR + mean bitrate via ICodecAPI makes
-    // the encoder honor the configured rate. The GOP setter (AVEncMPVGOPSize)
-    // is the same plumbing gap — without it, the encoder picks its own GOP
-    // (~250 frames on most HW MFTs) regardless of the user's keyframe
-    // interval setting, and the buffer trim is then granular to the encoder's
-    // GOP rather than the user-configured value.
+    // `IActivateAudioInterfaceCompletionHandler`. The attribute path goes
+    // through `IMFAttributes::SetUINT32` which the crate does expose, so only
+    // the fallback path needs the hand-rolled vtable.
 
     /// ICodecAPI IID — {901db4c7-31ce-41a2-85dc-8fa0bf41b8da}.
     const IID_ICODECAPI: GUID = GUID::from_u128(0x901db4c7_31ce_41a2_85dc_8fa0bf41b8da);
@@ -53,8 +68,9 @@ pub mod windows_impl {
     const CODECAPI_AVENC_COMMON_RATE_CONTROL_MODE: GUID =
         GUID::from_u128(0x1c0608e9_370c_4710_8a58_cb6181c42423);
     /// CODECAPI_AVEncCommonMeanBitRate — target bitrate in bits/sec. VT_UI4.
+    /// {F7222374-2144-4815-B550-A37F8E1B1B23}, per Windows SDK codecapi.h.
     const CODECAPI_AVENC_COMMON_MEAN_BIT_RATE: GUID =
-        GUID::from_u128(0xf7f0f0d2_2516_4e89_b87f_0c1c3f6c5db1);
+        GUID::from_u128(0xf7222374_2144_4815_b550_a37f8e1b1b23);
     /// CODECAPI_AVEncMPVGOPSize — GOP size in frames. VT_UI4.
     const CODECAPI_AVENC_MPV_GOP_SIZE: GUID =
         GUID::from_u128(0x95f31b26_95a4_4a3a_b2a9_7e83a8c7d0a3);
@@ -83,11 +99,8 @@ pub mod windows_impl {
             return Err("encoder raw pointer is null".into());
         }
         let unk_vtbl = *(unk_raw as *const *const usize);
-        let qi: unsafe extern "system" fn(
-            *mut c_void,
-            *const GUID,
-            *mut *mut c_void,
-        ) -> HRESULT = std::mem::transmute(*unk_vtbl.add(0));
+        let qi: unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT =
+            std::mem::transmute(*unk_vtbl.add(0));
 
         let mut codec_api: *mut c_void = std::ptr::null_mut();
         let hr = qi(unk_raw, &IID_ICODECAPI, &mut codec_api);
@@ -124,7 +137,10 @@ pub mod windows_impl {
         if set_hr.is_ok() {
             Ok(())
         } else {
-            Err(format!("ICodecAPI::SetValue HRESULT {:#x}", set_hr.0 as u32))
+            Err(format!(
+                "ICodecAPI::SetValue HRESULT {:#x}",
+                set_hr.0 as u32
+            ))
         }
     }
 
@@ -257,6 +273,11 @@ pub mod windows_impl {
                 "no H.264 encoder found",
             ));
         }
+        // MFTEnumEx hands back ref-owned IMFActivate pointers. We must Release
+        // every slot before CoTaskMemFree-ing the outer array; otherwise each
+        // unused slot leaks an MF activate object. On HW MFT enumeration this
+        // can pin NVENC encoder sessions and exhaust the consumer driver's
+        // ~3-session cap across repeated worker spawns.
         let (encoder, name) = unsafe {
             let activate = (*pactivates).as_ref().unwrap();
             let name = activate_friendly_name(activate);
@@ -264,6 +285,11 @@ pub mod windows_impl {
             (t, name)
         };
         unsafe {
+            // Drop every remaining slot (slot 0 was activated above; activation
+            // doesn't consume its ref, so it still needs Release too).
+            for i in 0..count as isize {
+                let _ = (*pactivates.offset(i)).take();
+            }
             windows::Win32::System::Com::CoTaskMemFree(Some(pactivates as *const _));
         }
         Ok((encoder, name))
@@ -325,20 +351,24 @@ pub mod windows_impl {
             }];
             let mut status = 0u32;
 
-            match unsafe { encoder.ProcessOutput(0, &mut output_data, &mut status) } {
-                Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => break,
-                Err(e) => return Err(e),
-                Ok(()) => {}
-            }
+            let process_result = unsafe { encoder.ProcessOutput(0, &mut output_data, &mut status) };
 
             // Same ManuallyDrop ownership transfer as in process_output_async
             // — without this, every drained packet leaks its IMFSample +
             // associated buffer. drain_encoder is only used by the PoC paths
-            // today, but the bug class is identical.
+            // today, but the bug class is identical. Takes must run on the
+            // error path too: the slot still holds either our pre_sample or
+            // anything the encoder partially wrote.
             let sample_owned: Option<IMFSample> =
                 unsafe { ManuallyDrop::take(&mut output_data[0].pSample) };
             let _events_owned: Option<windows::Win32::Media::MediaFoundation::IMFCollection> =
                 unsafe { ManuallyDrop::take(&mut output_data[0].pEvents) };
+
+            match process_result {
+                Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => break,
+                Err(e) => return Err(e),
+                Ok(()) => {}
+            }
 
             if let Some(sample) = sample_owned.as_ref() {
                 let pts = unsafe { sample.GetSampleTime()? };
@@ -466,7 +496,12 @@ pub mod windows_impl {
         fps_den: u32,
         preference: crate::replay::EncoderPreference,
         keyframe_interval_secs: Option<u32>,
-    ) -> Result<(IMFTransform, IMFDXGIDeviceManager, String, EncoderRateControlReport)> {
+    ) -> Result<(
+        IMFTransform,
+        IMFDXGIDeviceManager,
+        String,
+        EncoderRateControlReport,
+    )> {
         use windows::Win32::Media::MediaFoundation::MF_TRANSFORM_ASYNC_UNLOCK;
 
         let (encoder, encoder_name) = pick_encoder(preference)?;
@@ -474,6 +509,75 @@ pub mod windows_impl {
         // Unlock async mode — required before any other configuration call.
         let attrs = unsafe { encoder.GetAttributes()? };
         unsafe { attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)? };
+
+        // Plan rate-control values now so both the attribute path (below) and
+        // the ICodecAPI fallback (after SetOutputType) reference the same
+        // numbers. fps for GOP-frames math collapses fractional rates with
+        // a saturating divide; for the standard 60/1 case this is just 60.
+        let target_bps = bitrate_kbps.saturating_mul(1000);
+        let gop_frames_planned = keyframe_interval_secs.map(|gop_secs| {
+            let fps = if fps_den == 0 {
+                fps_num
+            } else {
+                fps_num / fps_den.max(1)
+            };
+            fps.saturating_mul(gop_secs).max(1)
+        });
+
+        let mut report = EncoderRateControlReport {
+            cbr_set: false,
+            bitrate_set: false,
+            gop_set: false,
+            applied_gop_frames: None,
+            cbr_source: None,
+            bitrate_source: None,
+            gop_source: None,
+            low_latency_set: false,
+            notes: String::new(),
+        };
+
+        // Attribute-path rate control. AMD's AMF MFT honors these GUIDs here
+        // even though it returns E_NOTIMPL for the same GUIDs via ICodecAPI.
+        // Set BEFORE SetOutputType so the encoder's internal mode selection
+        // sees them when it builds its rate-control pipeline.
+        unsafe {
+            match attrs.SetUINT32(&MF_LOW_LATENCY, 1) {
+                Ok(()) => report.low_latency_set = true,
+                Err(e) => report
+                    .notes
+                    .push_str(&format!("attr/low-latency: {:#x}; ", e.code().0 as u32)),
+            }
+            match attrs.SetUINT32(&CODECAPI_AVENC_COMMON_RATE_CONTROL_MODE, RATE_CONTROL_CBR) {
+                Ok(()) => {
+                    report.cbr_set = true;
+                    report.cbr_source = Some("attr");
+                }
+                Err(e) => report
+                    .notes
+                    .push_str(&format!("attr/rate-mode: {:#x}; ", e.code().0 as u32)),
+            }
+            match attrs.SetUINT32(&CODECAPI_AVENC_COMMON_MEAN_BIT_RATE, target_bps) {
+                Ok(()) => {
+                    report.bitrate_set = true;
+                    report.bitrate_source = Some("attr");
+                }
+                Err(e) => report
+                    .notes
+                    .push_str(&format!("attr/mean-bitrate: {:#x}; ", e.code().0 as u32)),
+            }
+            if let Some(gop_frames) = gop_frames_planned {
+                match attrs.SetUINT32(&CODECAPI_AVENC_MPV_GOP_SIZE, gop_frames) {
+                    Ok(()) => {
+                        report.gop_set = true;
+                        report.gop_source = Some("attr");
+                        report.applied_gop_frames = Some(gop_frames);
+                    }
+                    Err(e) => report
+                        .notes
+                        .push_str(&format!("attr/gop-size: {:#x}; ", e.code().0 as u32)),
+                }
+            }
+        }
 
         // Create + reset the DXGI device manager so encoder can read GPU textures.
         let mut dm: Option<IMFDXGIDeviceManager> = None;
@@ -510,57 +614,54 @@ pub mod windows_impl {
             encoder.SetInputType(0, &input_type, 0)?;
         }
 
-        // Rate control + GOP via hand-rolled ICodecAPI (see icodecapi_set_value_u32
-        // above for why the COM call is hand-rolled). Each setter is independent
-        // and best-effort: failures are recorded in the report rather than
-        // failing encoder creation. The Microsoft software H.264 MFT in
-        // particular often returns S_FALSE / E_NOTIMPL for some of these
-        // parameters even though it implements ICodecAPI — we still want to
-        // build an encoder in that case, just with the encoder's defaults.
-        let mut report = EncoderRateControlReport {
-            cbr_set: false,
-            bitrate_set: false,
-            gop_set: false,
-            applied_gop_frames: None,
-            notes: String::new(),
-        };
-
+        // ICodecAPI fallback. Only runs for properties the attribute path
+        // didn't take. NVENC builds and the Microsoft software H.264 MFT
+        // historically prefer this route for some properties; AMD AMF MFT
+        // rejects mean-bitrate / GOP here with E_NOTIMPL — that's the failure
+        // mode this dual-path setup exists to work around.
         unsafe {
-            match icodecapi_set_value_u32(
-                &encoder,
-                &CODECAPI_AVENC_COMMON_RATE_CONTROL_MODE,
-                RATE_CONTROL_CBR,
-            ) {
-                Ok(()) => report.cbr_set = true,
-                Err(e) => report.notes.push_str(&format!("rate-mode: {e}; ")),
-            }
-            match icodecapi_set_value_u32(
-                &encoder,
-                &CODECAPI_AVENC_COMMON_MEAN_BIT_RATE,
-                bitrate_kbps.saturating_mul(1000),
-            ) {
-                Ok(()) => report.bitrate_set = true,
-                Err(e) => report.notes.push_str(&format!("mean-bitrate: {e}; ")),
-            }
-            if let Some(gop_secs) = keyframe_interval_secs {
-                // GOP size in frames = fps * gop_seconds. Guard against
-                // zero-denominator-fps configs by clamping to at least 1.
-                let fps = if fps_den == 0 {
-                    fps_num
-                } else {
-                    fps_num / fps_den.max(1)
-                };
-                let gop_frames = fps.saturating_mul(gop_secs).max(1);
+            if !report.cbr_set {
                 match icodecapi_set_value_u32(
                     &encoder,
-                    &CODECAPI_AVENC_MPV_GOP_SIZE,
-                    gop_frames,
+                    &CODECAPI_AVENC_COMMON_RATE_CONTROL_MODE,
+                    RATE_CONTROL_CBR,
                 ) {
                     Ok(()) => {
-                        report.gop_set = true;
-                        report.applied_gop_frames = Some(gop_frames);
+                        report.cbr_set = true;
+                        report.cbr_source = Some("icodecapi");
                     }
-                    Err(e) => report.notes.push_str(&format!("gop-size: {e}; ")),
+                    Err(e) => report.notes.push_str(&format!("icodecapi/rate-mode: {e}; ")),
+                }
+            }
+            if !report.bitrate_set {
+                match icodecapi_set_value_u32(
+                    &encoder,
+                    &CODECAPI_AVENC_COMMON_MEAN_BIT_RATE,
+                    target_bps,
+                ) {
+                    Ok(()) => {
+                        report.bitrate_set = true;
+                        report.bitrate_source = Some("icodecapi");
+                    }
+                    Err(e) => report
+                        .notes
+                        .push_str(&format!("icodecapi/mean-bitrate: {e}; ")),
+                }
+            }
+            if let Some(gop_frames) = gop_frames_planned {
+                if !report.gop_set {
+                    match icodecapi_set_value_u32(
+                        &encoder,
+                        &CODECAPI_AVENC_MPV_GOP_SIZE,
+                        gop_frames,
+                    ) {
+                        Ok(()) => {
+                            report.gop_set = true;
+                            report.gop_source = Some("icodecapi");
+                            report.applied_gop_frames = Some(gop_frames);
+                        }
+                        Err(e) => report.notes.push_str(&format!("icodecapi/gop-size: {e}; ")),
+                    }
                 }
             }
         }
@@ -573,15 +674,24 @@ pub mod windows_impl {
         Ok((encoder, device_manager, encoder_name, report))
     }
 
-    /// Outcome of the ICodecAPI calls in `create_h264_encoder_hw_async`. The
-    /// worker logs this alongside the encoder friendly name so a "bitrate
+    /// Outcome of the rate-control setters in `create_h264_encoder_hw_async`.
+    /// The worker logs this alongside the encoder friendly name so a "bitrate
     /// looks like 2× the configured value" or "GOP isn't where I asked" is
     /// directly visible in the diag log without rerunning. Field semantics:
     ///
-    /// - `cbr_set` / `bitrate_set` / `gop_set`: did the matching SetValue
-    ///   call succeed. If `cbr_set && bitrate_set`, the encoder is honoring
-    ///   the configured kbps; if not, the encoder is in its default mode
-    ///   (typically quality-VBR) and may overshoot.
+    /// - `cbr_set` / `bitrate_set` / `gop_set`: did the matching setter
+    ///   land via either path. If `cbr_set && bitrate_set`, the encoder
+    ///   should be honoring the configured kbps; if not, it's in its default
+    ///   mode (typically quality-VBR with peak = 2× target) and will overshoot.
+    /// - `cbr_source` / `bitrate_source` / `gop_source`: which path actually
+    ///   took. `Some("attr")` = `IMFAttributes::SetUINT32` worked; this is
+    ///   the AMD AMF MFT path. `Some("icodecapi")` = the hand-rolled
+    ///   `ICodecAPI::SetValue` fallback worked; this is the SW MFT / older
+    ///   NVENC path. `None` = neither — the property is in the encoder's
+    ///   default state.
+    /// - `low_latency_set`: did `MF_LOW_LATENCY = 1` land. AMD's MFT needs
+    ///   this on top of CBR to actually discipline its rate-control loop;
+    ///   without it the encoder picks a transcode-quality preset.
     /// - `applied_gop_frames`: the frame count we sent the encoder. Useful
     ///   for spotting a mismatch with `effective_fps` at save time.
     /// - `notes`: concatenated failure messages (HRESULT etc.) for any setter
@@ -592,6 +702,10 @@ pub mod windows_impl {
         pub bitrate_set: bool,
         pub gop_set: bool,
         pub applied_gop_frames: Option<u32>,
+        pub cbr_source: Option<&'static str>,
+        pub bitrate_source: Option<&'static str>,
+        pub gop_source: Option<&'static str>,
+        pub low_latency_set: bool,
         pub notes: String,
     }
 
@@ -645,6 +759,9 @@ pub mod windows_impl {
         let mut chosen: Option<(IMFTransform, String)> = None;
         unsafe {
             for i in 0..count as isize {
+                if chosen.is_some() {
+                    break;
+                }
                 let entry = &*pactivates.offset(i);
                 let Some(act) = entry else { continue };
                 let name = activate_friendly_name(act);
@@ -655,9 +772,14 @@ pub mod windows_impl {
                 if needles.iter().any(|n| lower.contains(n)) {
                     if let Ok(t) = act.ActivateObject::<IMFTransform>() {
                         chosen = Some((t, name));
-                        break;
                     }
                 }
+            }
+            // Release every slot before freeing the outer array — otherwise
+            // each non-chosen activate leaks a COM ref, pinning HW encoder
+            // sessions across repeated worker spawns.
+            for i in 0..count as isize {
+                let _ = (*pactivates.offset(i)).take();
             }
             CoTaskMemFree(Some(pactivates as *const _));
         }
@@ -718,7 +840,7 @@ pub mod windows_impl {
         }];
         let mut status = 0u32;
 
-        unsafe { encoder.ProcessOutput(0, &mut output_data, &mut status)? };
+        let process_result = unsafe { encoder.ProcessOutput(0, &mut output_data, &mut status) };
 
         // MFT_OUTPUT_DATA_BUFFER uses ManuallyDrop on its IUnknown-typed
         // fields because the Microsoft API contract hands ownership of the
@@ -728,10 +850,15 @@ pub mod windows_impl {
         // leaks its IMFSample, which holds the encoder-allocated output
         // buffer (~115 KB at 1440x848@60 30Mbps = ~6.9 MB/s of RSS growth;
         // measured 2026-05-12).
+        //
+        // Takes must run regardless of ProcessOutput's result — on the error
+        // path the slot still holds either our pre_sample or anything the
+        // encoder partially wrote, and both need their Release to run.
         let sample_owned: Option<IMFSample> =
             unsafe { ManuallyDrop::take(&mut output_data[0].pSample) };
         let _events_owned: Option<windows::Win32::Media::MediaFoundation::IMFCollection> =
             unsafe { ManuallyDrop::take(&mut output_data[0].pEvents) };
+        process_result?;
 
         if let Some(sample) = sample_owned.as_ref() {
             let pts = unsafe { sample.GetSampleTime()? };

@@ -259,7 +259,14 @@ fn panic_payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
 
 /// Drop oldest packets to keep the buffer at approximately `duration_pts` of
 /// footage, preserving decode validity (the buffer always starts on a keyframe).
-fn trim_buffer(buffer: &mut VecDeque<VideoPacket>, duration_pts: i64) {
+///
+/// `max_bytes` is a hard secondary cap: if the buffer's total byte size grows
+/// past it (e.g. encoder stopped emitting keyframes, GOP setter silently
+/// failed on the underlying MFT), drop oldest packets unconditionally until
+/// back under cap. The buffer becomes momentarily undecodable until the next
+/// keyframe arrives — acceptable: without this, a misbehaving encoder will
+/// grow the buffer until the process OOMs the machine. `0` disables the cap.
+fn trim_buffer(buffer: &mut VecDeque<VideoPacket>, duration_pts: i64, max_bytes: usize) {
     if buffer.is_empty() {
         return;
     }
@@ -278,6 +285,17 @@ fn trim_buffer(buffer: &mut VecDeque<VideoPacket>, duration_pts: i64) {
     }
     if drop_before > 0 {
         buffer.drain(0..drop_before);
+    }
+
+    if max_bytes > 0 {
+        let mut total: usize = buffer.iter().map(|p| p.data.len()).sum();
+        while total > max_bytes && buffer.len() > 1 {
+            if let Some(front) = buffer.pop_front() {
+                total = total.saturating_sub(front.data.len());
+            } else {
+                break;
+            }
+        }
     }
 }
 
@@ -308,6 +326,19 @@ fn run_worker(
     let fps: u32 = settings.fps.clamp(15, 240);
     let frame_duration_pts: i64 = 10_000_000 / fps as i64;
     let duration_pts: i64 = settings.duration_secs as i64 * 10_000_000;
+    // Secondary byte cap for trim_buffer: 2× the configured bitrate-duration
+    // budget. The primary trim is keyframe-aligned; if the encoder stops
+    // emitting keyframes (GOP setter ignored, AMF reset, etc.) the primary
+    // trim refuses to drop anything and the buffer would otherwise grow
+    // unbounded. 2× absorbs keyframe burstiness while keeping the worst-case
+    // RAM footprint bounded.
+    let max_buffer_bytes: usize = {
+        let bytes_per_sec = (settings.video_bitrate_kbps as u64).saturating_mul(1000) / 8;
+        let raw = bytes_per_sec
+            .saturating_mul(settings.duration_secs as u64)
+            .saturating_mul(2);
+        raw.try_into().unwrap_or(usize::MAX)
+    };
 
     // Initialize the full GPU pipeline. If any step fails, send the error
     // back through init_tx and exit.
@@ -423,26 +454,33 @@ fn run_worker(
             settings.encoder_preference,
         ),
     );
-    // Surface the ICodecAPI outcome so a "bitrate looks 2× wrong" or "GOP
-    // wasn't applied" is one line away in the diag log. `cbr` reflects the
-    // rate-control mode; `bitrate` reflects whether the mean-bitrate setter
-    // landed; `gop_frames` is what we actually told the encoder (None if
-    // we didn't try because keyframe_interval_secs was None, or if the
-    // setter failed — the notes field carries the HRESULT in that case).
-    let cbr_label = if rate_report.cbr_set { "CBR" } else { "DEFAULT" };
-    let bitrate_label = if rate_report.bitrate_set {
-        format!("{}kbps", settings.video_bitrate_kbps)
-    } else {
-        "DEFAULT".to_string()
-    };
-    let gop_label = match rate_report.applied_gop_frames {
-        Some(f) => format!("{f}f"),
+    // Surface the rate-control outcome so a "bitrate looks 2× wrong" or "GOP
+    // wasn't applied" is one line away in the diag log. Each label carries
+    // the path that landed (`attr` = IMFAttributes; `icodecapi` = the
+    // hand-rolled fallback) so the AMD-specific failure where ICodecAPI
+    // accepts CBR mode but rejects the bitrate value is immediately visible.
+    // `DEFAULT` means neither path took and the encoder is on its own.
+    let cbr_label = match rate_report.cbr_source {
+        Some(src) => format!("CBR({src})"),
         None => "DEFAULT".to_string(),
+    };
+    let bitrate_label = match rate_report.bitrate_source {
+        Some(src) => format!("{}kbps({src})", settings.video_bitrate_kbps),
+        None => "DEFAULT".to_string(),
+    };
+    let gop_label = match (rate_report.applied_gop_frames, rate_report.gop_source) {
+        (Some(f), Some(src)) => format!("{f}f({src})"),
+        _ => "DEFAULT".to_string(),
+    };
+    let low_latency_label = if rate_report.low_latency_set {
+        "on"
+    } else {
+        "off"
     };
     crate::diag(
         &app,
         format!(
-            "[replay] encoder rate-control · mode={cbr_label} · target={bitrate_label} · gop={gop_label}{notes}",
+            "[replay] encoder rate-control · mode={cbr_label} · target={bitrate_label} · gop={gop_label} · low-latency={low_latency_label}{notes}",
             notes = if rate_report.notes.is_empty() {
                 String::new()
             } else {
@@ -877,7 +915,7 @@ fn run_worker(
                             pts,
                             is_keyframe,
                         });
-                        trim_buffer(&mut buffer, duration_pts);
+                        trim_buffer(&mut buffer, duration_pts, max_buffer_bytes);
                     }
                     Ok(None) => {}
                     Err(_) => {}
@@ -910,11 +948,9 @@ fn run_worker(
                     if let Ok(cs) = frame.ContentSize() {
                         let dw = (cs.Width as i32 - pool_src_w as i32).abs();
                         let dh = (cs.Height as i32 - pool_src_h as i32).abs();
-                        if dw > CONTENT_MISMATCH_NOISE_PIXELS
-                            || dh > CONTENT_MISMATCH_NOISE_PIXELS
+                        if dw > CONTENT_MISMATCH_NOISE_PIXELS || dh > CONTENT_MISMATCH_NOISE_PIXELS
                         {
-                            content_mismatch_streak =
-                                content_mismatch_streak.saturating_add(1);
+                            content_mismatch_streak = content_mismatch_streak.saturating_add(1);
                             if content_mismatch_streak >= CONTENT_MISMATCH_BAIL_FRAMES {
                                 crate::diag(
                                     &app,
@@ -936,6 +972,14 @@ fn run_worker(
                             got_fresh_this_tick = true;
                         }
                     }
+
+                    // WGC frames hold a slot in the frame_pool (size 2). The
+                    // pool only recycles the underlying texture when each
+                    // frame is explicitly Closed; relying on COM Release-on-
+                    // drop is documented as not sufficient. Without this,
+                    // long sessions back-pressure the pool and silently drop
+                    // frames.
+                    let _ = frame.Close();
                 }
 
                 if nv12_ready {
@@ -1049,6 +1093,14 @@ mod tests {
         }
     }
 
+    fn vp_sized(pts: i64, is_keyframe: bool, bytes: usize) -> VideoPacket {
+        VideoPacket {
+            data: Arc::from(vec![0u8; bytes].into_boxed_slice()),
+            pts,
+            is_keyframe,
+        }
+    }
+
     fn buf<I: IntoIterator<Item = (i64, bool)>>(it: I) -> VecDeque<VideoPacket> {
         it.into_iter().map(|(p, k)| vp(p, k)).collect()
     }
@@ -1056,7 +1108,7 @@ mod tests {
     #[test]
     fn trim_buffer_noop_on_empty() {
         let mut b = VecDeque::<VideoPacket>::new();
-        trim_buffer(&mut b, 30);
+        trim_buffer(&mut b, 30, 0);
         assert!(b.is_empty());
     }
 
@@ -1076,7 +1128,7 @@ mod tests {
             (90, true),
             (100, false),
         ]);
-        trim_buffer(&mut b, 30);
+        trim_buffer(&mut b, 30, 0);
         let kept: Vec<(i64, bool)> = b.iter().map(|p| (p.pts, p.is_keyframe)).collect();
         // Trim anchors to the first keyframe >= cutoff (pts=70).
         assert_eq!(
@@ -1091,18 +1143,18 @@ mod tests {
     fn trim_buffer_keeps_decodable_invariant_after_trim() {
         // Same shape, smaller window — first keyframe >= cutoff is at pts=90.
         let mut b = buf([(10, true), (40, true), (70, true), (90, true), (100, false)]);
-        trim_buffer(&mut b, 15); // cutoff = 100 - 15 = 85
+        trim_buffer(&mut b, 15, 0); // cutoff = 100 - 15 = 85
         assert!(b.front().unwrap().is_keyframe);
         assert!(b.front().unwrap().pts >= 85);
     }
 
     #[test]
-    fn trim_buffer_does_not_drop_when_no_keyframe_in_window() {
-        // Only keyframe is older than cutoff; current code preserves buffer
-        // rather than orphaning a non-keyframe head. Lock the behavior in.
+    fn trim_buffer_does_not_drop_when_no_keyframe_in_window_and_cap_disabled() {
+        // With the byte cap disabled (max_bytes=0), the keyframe-aligned primary
+        // trim preserves the buffer rather than orphaning a non-keyframe head.
         let mut b = buf([(10, true), (20, false), (30, false), (100, false)]);
         let before: Vec<i64> = b.iter().map(|p| p.pts).collect();
-        trim_buffer(&mut b, 30); // cutoff = 70, no keyframe >= 70
+        trim_buffer(&mut b, 30, 0); // cutoff = 70, no keyframe >= 70
         let after: Vec<i64> = b.iter().map(|p| p.pts).collect();
         assert_eq!(before, after);
     }
@@ -1112,8 +1164,36 @@ mod tests {
         // Front is the keyframe >= cutoff → drop_before stays 0 → no drain.
         let mut b = buf([(70, true), (80, false), (90, true), (100, false)]);
         let before: Vec<i64> = b.iter().map(|p| p.pts).collect();
-        trim_buffer(&mut b, 30); // cutoff = 70
+        trim_buffer(&mut b, 30, 0); // cutoff = 70
         let after: Vec<i64> = b.iter().map(|p| p.pts).collect();
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn trim_buffer_byte_cap_drops_oldest_when_primary_refuses() {
+        // No keyframe inside the duration window → primary trim does nothing.
+        // 4 packets × 100 bytes = 400 total; cap=200 must shrink to ≤ 200.
+        let mut b: VecDeque<VideoPacket> = [(10i64, true), (20, false), (30, false), (100, false)]
+            .into_iter()
+            .map(|(p, k)| vp_sized(p, k, 100))
+            .collect();
+        trim_buffer(&mut b, 30, 200);
+        let total: usize = b.iter().map(|p| p.data.len()).sum();
+        assert!(total <= 200, "buffer exceeded byte cap: total={}", total);
+        // At least the latest packet survives.
+        assert!(!b.is_empty());
+        assert_eq!(b.back().unwrap().pts, 100);
+    }
+
+    #[test]
+    fn trim_buffer_byte_cap_preserves_at_least_one_packet() {
+        // Cap smaller than any single packet — must not empty the buffer.
+        let mut b: VecDeque<VideoPacket> = [(10i64, true), (20, false)]
+            .into_iter()
+            .map(|(p, k)| vp_sized(p, k, 100))
+            .collect();
+        trim_buffer(&mut b, 30, 50);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b.back().unwrap().pts, 20);
     }
 }
