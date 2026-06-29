@@ -9,6 +9,7 @@ import { getSaveBehavior } from "../settings/replay-ls";
 export function useReplaySavedToast(
   loadFile: (path: string) => Promise<void>,
   setReplaySavedToast: React.Dispatch<React.SetStateAction<string | null>>,
+  setReplayError: React.Dispatch<React.SetStateAction<string | null>>,
 ): void {
   useEffect(() => {
     let unlistenSaved: UnlistenFn | null = null;
@@ -29,8 +30,14 @@ export function useReplaySavedToast(
         setReplaySavedToast(path);
       }
     }).then((u) => (unlistenSaved = u));
+    // A failed in-game save would otherwise be silent — surface it through
+    // StatusStrip so the user finds out before they go looking for the file.
     listen<{ msg?: string } | string>("replay://save-error", (event) => {
-      console.error("[clippy] replay save error:", event.payload);
+      const payload = event.payload as { msg?: string } | string;
+      const msg =
+        typeof payload === "string" ? payload : payload?.msg ?? "Replay save failed";
+      console.error("[clippy] replay save error:", payload);
+      setReplayError(`Replay save failed: ${msg}`);
     }).then((u) => (unlistenError = u));
     // Triggered by the in-game overlay's "Open" button. Always loads the
     // clip, independent of the saveBehavior setting, because the user has
@@ -48,5 +55,5 @@ export function useReplaySavedToast(
       unlistenError?.();
       unlistenOverlayOpen?.();
     };
-  }, [loadFile, setReplaySavedToast]);
+  }, [loadFile, setReplaySavedToast, setReplayError]);
 }
