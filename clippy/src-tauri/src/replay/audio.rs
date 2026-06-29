@@ -140,7 +140,11 @@ mod windows_impl {
                     Some(n) if is_default => format!("{n} (Default)"),
                     Some(n) => n,
                     None if is_default => {
-                        format!("Default {} (device #{})", fallback_label.to_lowercase(), i + 1)
+                        format!(
+                            "Default {} (device #{})",
+                            fallback_label.to_lowercase(),
+                            i + 1
+                        )
                     }
                     None => format!("{fallback_label} #{}", i + 1),
                 };
@@ -617,10 +621,7 @@ mod windows_impl {
                 let _ = unsafe { capture_client.ReleaseBuffer(frames) };
 
                 current_bytes += payload.len();
-                buffer.push_back(AudioPacket {
-                    data: payload,
-                    pts,
-                });
+                buffer.push_back(AudioPacket { data: payload, pts });
                 // Trim moved to the wall-clock-driven block at the top of
                 // 'main so it runs even when WASAPI delivers no packets for
                 // long stretches. The byte-cap defense is part of that same
