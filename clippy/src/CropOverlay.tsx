@@ -126,6 +126,20 @@ export function CropOverlay(props: {
 
   const dragRef = useRef<DragMode>({ kind: "none" });
 
+  // Coalesce pointermove → one crop update per animation frame. High-DPI mice
+  // fire 500-1000 Hz; without this each event triggers a full React render + a
+  // clip-path polygon recompute on the shade.
+  const moveRafRef = useRef<number | null>(null);
+  const pendingMoveRef = useRef<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    return () => {
+      if (moveRafRef.current != null) {
+        cancelAnimationFrame(moveRafRef.current);
+        moveRafRef.current = null;
+      }
+    };
+  }, []);
+
   // Rendered video area inside the player element.
   const fitted =
     bounds && srcW > 0 && srcH > 0
@@ -165,14 +179,14 @@ export function CropOverlay(props: {
     };
   };
 
-  const onMove = (e: React.PointerEvent) => {
+  const flushMove = () => {
+    moveRafRef.current = null;
     const drag = dragRef.current;
-    if (drag.kind === "none") return;
-    e.preventDefault();
-    if (!fitted) return;
-    // Mouse delta in source pixels.
-    const dxSrc = ((e.clientX - drag.startMouse.x) / fitted.w) * srcW;
-    const dySrc = ((e.clientY - drag.startMouse.y) / fitted.h) * srcH;
+    const pending = pendingMoveRef.current;
+    pendingMoveRef.current = null;
+    if (drag.kind === "none" || !pending || !fitted) return;
+    const dxSrc = ((pending.x - drag.startMouse.x) / fitted.w) * srcW;
+    const dySrc = ((pending.y - drag.startMouse.y) / fitted.h) * srcH;
     if (drag.kind === "move") {
       const c = drag.startCrop;
       const nx = Math.max(0, Math.min(srcW - c.w, Math.round(c.x + dxSrc)));
@@ -213,11 +227,26 @@ export function CropOverlay(props: {
     }
   };
 
+  const onMove = (e: React.PointerEvent) => {
+    if (dragRef.current.kind === "none") return;
+    e.preventDefault();
+    pendingMoveRef.current = { x: e.clientX, y: e.clientY };
+    if (moveRafRef.current == null) {
+      moveRafRef.current = requestAnimationFrame(flushMove);
+    }
+  };
+
   const onUp = (e: React.PointerEvent) => {
     if (dragRef.current.kind === "none") return;
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     } catch {}
+    // Apply any final pending position immediately so we don't end on a stale frame.
+    if (moveRafRef.current != null) {
+      cancelAnimationFrame(moveRafRef.current);
+      moveRafRef.current = null;
+      flushMove();
+    }
     dragRef.current = { kind: "none" };
   };
 
