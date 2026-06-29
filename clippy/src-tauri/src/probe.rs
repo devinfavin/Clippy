@@ -298,6 +298,38 @@ pub async fn probe_keyframes(app: AppHandle, path: String) -> Result<Vec<f32>, S
     Ok(keyframes)
 }
 
+/// Read the cached keyframe table (built by `probe_keyframes`) and return the
+/// largest keyframe time that is <= `target_secs`. Returns `None` if no cache
+/// exists yet or no keyframe precedes the target.
+///
+/// Used by the export pipeline's stream-copy paths to align in-points with
+/// packet boundaries. Without this, ffmpeg input-seek snaps video to the
+/// nearest prior keyframe but writes audio starting at the exact requested
+/// time, producing audible A/V desync proportional to the keyframe interval
+/// (~0.5–1s with OBS-default 1s keyframes).
+pub(crate) fn snap_to_prior_keyframe(
+    app: &AppHandle,
+    src_path: &str,
+    target_secs: f64,
+) -> Option<f64> {
+    let key = proxy_cache_key(src_path).ok()?;
+    let cache_path = proxy_dir(app).ok()?.join(format!("{}.kf.f32", &key[..32]));
+    let bytes = std::fs::read(&cache_path).ok()?;
+    if bytes.is_empty() || bytes.len() % 4 != 0 {
+        return None;
+    }
+    let target_f32 = target_secs as f32;
+    let mut best: Option<f32> = None;
+    for i in (0..bytes.len()).step_by(4) {
+        let arr: [u8; 4] = bytes[i..i + 4].try_into().ok()?;
+        let v = f32::from_le_bytes(arr);
+        if v <= target_f32 && best.is_none_or(|b| v > b) {
+            best = Some(v);
+        }
+    }
+    best.map(|v| v as f64)
+}
+
 /// Extract a peak-amplitude waveform from one audio track. Returns a vector
 /// of WAVEFORM_BINS f32 values in [0, 1] where each bin is the max sample
 /// magnitude over its slice of the timeline. Cached per (source, track) on

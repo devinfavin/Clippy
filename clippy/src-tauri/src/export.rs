@@ -749,13 +749,17 @@ async fn cut_segment(
                 format!("export: audio re-encode — fc=[{}]", trunc(fc, 160)),
             );
         }
+        // Snap to a prior keyframe so input-seek + `-c:v copy` keeps audio
+        // aligned with the keyframe-snapped video packets.
+        let video_in = crate::probe::snap_to_prior_keyframe(app, src_path, region.in_secs)
+            .unwrap_or(region.in_secs);
         let mut args: Vec<String> = vec![
             "-y".into(),
             "-hide_banner".into(),
             "-loglevel".into(),
             "error".into(),
             "-ss".into(),
-            format!("{:.6}", region.in_secs),
+            format!("{:.6}", video_in),
             "-to".into(),
             format!("{:.6}", region.out_secs),
             "-i".into(),
@@ -791,13 +795,18 @@ async fn cut_segment(
 
     diag(app, "export: stream-copy (no crop/speed/mix change)");
 
+    // Snap to a prior keyframe so video + audio start at the same packet
+    // boundary; without this, input-seek snaps video to the keyframe before
+    // `in_secs` but audio starts at the exact request time → A/V desync.
+    let snapped_in = crate::probe::snap_to_prior_keyframe(app, src_path, region.in_secs)
+        .unwrap_or(region.in_secs);
     let mut args: Vec<String> = vec![
         "-y".into(),
         "-hide_banner".into(),
         "-loglevel".into(),
         "error".into(),
         "-ss".into(),
-        format!("{:.6}", region.in_secs),
+        format!("{:.6}", snapped_in),
         "-to".into(),
         format!("{:.6}", region.out_secs),
         "-i".into(),
@@ -1115,6 +1124,11 @@ pub async fn export_clip(
     if needs_audio_reencode {
         // Video stream-copy, audio runs through filter_complex (track mix or
         // downmix). Cheap — only the audio track is touched.
+        // Snap in-point to a prior keyframe so input-seek + `-c:v copy` keeps
+        // audio and video aligned. Falls back to the raw user value if no
+        // keyframe cache exists yet (ffmpeg will still snap, but audio drifts).
+        let video_in =
+            crate::probe::snap_to_prior_keyframe(&app, &src_path, in_secs).unwrap_or(in_secs);
         let mut args: Vec<String> = vec![
             "-y".into(),
             "-hide_banner".into(),
@@ -1124,7 +1138,7 @@ pub async fn export_clip(
             "pipe:1".into(),
             "-nostats".into(),
             "-ss".into(),
-            format!("{:.6}", in_secs),
+            format!("{:.6}", video_in),
             "-to".into(),
             format!("{:.6}", out_secs),
             "-i".into(),
@@ -1154,6 +1168,12 @@ pub async fn export_clip(
     // Pure stream-copy: video and audio both copy. `-map 0` carries every
     // source stream through (video + all audio tracks); preserves multi-track
     // structure at zero CPU cost.
+    // Snap in-point to a prior keyframe so ffmpeg's input-seek matches the
+    // packet boundary for video AND audio — otherwise input-seek snaps video
+    // to the prior keyframe but audio starts at the exact request time,
+    // producing A/V desync of up to one GOP (~0.5–1s with OBS keyframes).
+    let snapped_in =
+        crate::probe::snap_to_prior_keyframe(&app, &src_path, in_secs).unwrap_or(in_secs);
     let args: Vec<String> = vec![
         "-y".into(),
         "-hide_banner".into(),
@@ -1163,7 +1183,7 @@ pub async fn export_clip(
         "pipe:1".into(),
         "-nostats".into(),
         "-ss".into(),
-        format!("{:.6}", in_secs),
+        format!("{:.6}", snapped_in),
         "-to".into(),
         format!("{:.6}", out_secs),
         "-i".into(),
