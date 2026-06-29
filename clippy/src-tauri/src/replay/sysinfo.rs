@@ -143,6 +143,12 @@ fn hw_encoders() -> Vec<String> {
                 }
             }
         }
+        // Release the IMFActivate ref in every slot before freeing the array
+        // — otherwise each enumerated activate leaks. This is called whenever
+        // the UI requests system info, so the leak accumulates per session.
+        for i in 0..count as isize {
+            let _ = (*activates.offset(i)).take();
+        }
         CoTaskMemFree(Some(activates as *const _));
     }
     out
